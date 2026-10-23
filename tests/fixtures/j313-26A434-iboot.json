@@ -1,0 +1,147 @@
+{
+  "ApChipID": "0x8103",
+  "ApBoardID": "0x26",
+  "ApSecurityDomain": "0x01",
+  "Info": {
+    "DeviceClass": "j313ap",
+    "Variant": "Customer Erase Install (IPSW)",
+    "RestoreBehavior": "Erase",
+    "MacOSVariant": "macOS Customer",
+    "RestoreAttestationMode": 6
+  },
+  "Manifest": {
+    "ANE": {
+      "Info": {
+        "Path": "Firmware/ane/h13_ane_fw_styx_j5x.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "AOP": {
+      "Info": {
+        "Path": "Firmware/AOP/aopfw-mac13gaop.RELEASE.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "AVE": {
+      "Info": {
+        "Path": "Firmware/ave/AppleAVE2FW_H13G.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "Ap,RestoreCIO": {
+      "Info": {
+        "Path": "Firmware/t8103ciofw.im4p",
+        "IsLoadedByiBootStage1": true,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "Ap,RestoreDCP2": {
+      "Info": {
+        "Path": "Firmware/dcp/ipad13dcp_restore.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "Ap,RestoreSecurePageTableMonitor": {
+      "Info": {
+        "Path": "Firmware/sptm.t8103.release.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "Ap,RestoreTMU": {
+      "Info": {
+        "Path": "Firmware/t8103tmufw.im4p",
+        "IsLoadedByiBootStage1": true,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "Ap,RestoreTrustedExecutionMonitor": {
+      "Info": {
+        "Path": "Firmware/txm.macosx.release.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "GFX": {
+      "Info": {
+        "Path": "Firmware/agx/armfw_g13g.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "ISP": {
+      "Info": {
+        "Path": "Firmware/isp_bni/adc-pallas-j129.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "PMP": {
+      "Info": {
+        "Path": "Firmware/pmp/t8103pmp.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "RestoreANS": {
+      "Info": {
+        "Path": "Firmware/rans.t8103.release.im4p",
+        "IsLoadedByiBootStage1": true,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "RestoreDCP": {
+      "Info": {
+        "Path": "Firmware/dcp/ipad13dcp_restore.im4p",
+        "IsLoadedByiBootStage1": true,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "RestoreKernelCache": {
+      "Info": {
+        "Path": "kernelcache.release.mac13g",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": false
+      }
+    },
+    "RestoreLogo": {
+      "Info": {
+        "Path": "Firmware/all_flash/applelogo@2x~mac-USBc.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": false
+      }
+    },
+    "RestoreTrustCache": {
+      "Info": {
+        "Path": "Firmware/043-70833-687.dmg.trustcache",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "SIO": {
+      "Info": {
+        "Path": "Firmware/SmartIOFirmware_ASCv4.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    },
+    "iBEC": {
+      "Info": {
+        "Path": "Firmware/dfu/iBEC.j313.RELEASE.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": false
+      }
+    },
+    "iBootData": {
+      "Info": {
+        "Path": "Firmware/all_flash/iBootData.j313.RELEASE.im4p",
+        "IsLoadedByiBootStage1": false,
+        "IsLoadedByiBoot": true
+      }
+    }
+  }
+}

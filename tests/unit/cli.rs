@@ -1,0 +1,145 @@
+use super::*;
+
+#[test]
+fn boot_state_requires_an_explicit_flag_to_load_ibss() {
+    for load in [false, true] {
+        let mut args = vec!["zalivka", "boot-state", "firmware.ipsw", "--ecid", "1234"];
+        if load {
+            args.push("--load-ibss");
+        }
+        match Cli::try_parse_from(args).unwrap().command {
+            Command::BootState {
+                ecid, load_ibss, ..
+            } => {
+                assert_eq!(ecid, 0x1234);
+                assert_eq!(load_ibss, load);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+}
+
+#[test]
+fn restore_and_revive_accept_automatic_download_and_shared_options() {
+    for command in ["restore", "revive"] {
+        let mut argv = vec![
+            "zalivka",
+            command,
+            "--ecid",
+            "1234",
+            "--experimental",
+            "--firmware-dir",
+            "cache",
+            "--identity",
+            "63",
+            "--transcript",
+            "restore.jsonl",
+            "--authorization-tokens",
+            "tokens.plist",
+            "--apple-connect-data",
+            "connect.data",
+        ];
+        if command == "restore" {
+            argv.push("--erase");
+        }
+        let args = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Restore { args, erase } => {
+                assert!(erase);
+                args
+            }
+            Command::Revive(args) => args,
+            _ => panic!("wrong command"),
+        };
+        assert!(args.ipsw.is_none());
+        assert_eq!(args.firmware_dir, Some(PathBuf::from("cache")));
+        assert_eq!(args.ecid, 0x1234);
+        assert_eq!(args.identity, Some(63));
+        assert_eq!(args.transcript, Some(PathBuf::from("restore.jsonl")));
+        assert_eq!(
+            args.authorization_tokens,
+            Some(PathBuf::from("tokens.plist"))
+        );
+        assert_eq!(args.apple_connect_data, Some(PathBuf::from("connect.data")));
+        assert!(Cli::try_parse_from(["zalivka", command, "--ecid", "1234"]).is_err());
+    }
+}
+
+#[test]
+fn local_restore_and_revive_reject_cache_options() {
+    for command in ["restore", "revive"] {
+        let mut argv = vec![
+            "zalivka",
+            command,
+            "local.ipsw",
+            "--ecid",
+            "1234",
+            "--experimental",
+        ];
+        if command == "restore" {
+            argv.push("--erase");
+        }
+        let args = match Cli::try_parse_from(&argv).unwrap().command {
+            Command::Restore { args, .. } | Command::Revive(args) => args,
+            _ => panic!("wrong command"),
+        };
+        assert_eq!(args.ipsw, Some(PathBuf::from("local.ipsw")));
+        argv.extend(["--firmware-dir", "cache"]);
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
+    assert!(matches!(
+        Cli::try_parse_from(["zalivka", "fetch", "--ecid", "1234"])
+            .unwrap()
+            .command,
+        Command::Fetch { .. }
+    ));
+}
+
+#[test]
+fn manual_sharing_is_unlimited_and_explicit_limits_are_validated() {
+    let command = Cli::try_parse_from(["zalivka", "usb-internet", "share"])
+        .unwrap()
+        .command;
+    assert!(matches!(
+        command,
+        Command::UsbInternet {
+            command: InternetCommand::Share { seconds: None, .. }
+        }
+    ));
+    let command = Cli::try_parse_from(["zalivka", "usb-internet", "share", "--seconds", "900"])
+        .unwrap()
+        .command;
+    assert!(matches!(
+        command,
+        Command::UsbInternet {
+            command: InternetCommand::Share {
+                seconds: Some(900),
+                ..
+            }
+        }
+    ));
+    let command = Cli::try_parse_from([
+        "zalivka",
+        "revive",
+        "--ecid",
+        "2a",
+        "--experimental",
+        "--share-internet",
+    ])
+    .unwrap()
+    .command;
+    let Command::Revive(args) = command else {
+        panic!("wrong command")
+    };
+    assert!(
+        args.run(Behavior::Update)
+            .unwrap_err()
+            .to_string()
+            .contains("erase restore only")
+    );
+    for seconds in ["0", "86401"] {
+        assert!(
+            Cli::try_parse_from(["zalivka", "usb-internet", "share", "--seconds", seconds])
+                .is_err()
+        );
+    }
+}

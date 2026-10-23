@@ -1,0 +1,389 @@
+mod events;
+mod setup;
+mod widgets;
+use setup::{Action, Setup};
+use widgets::*;
+mod theme;
+mod view;
+mod worker;
+
+use theme::{BLUE, RED, Tone, configure};
+
+use anyhow::Result;
+use eframe::egui::{self, Color32, RichText, Vec2};
+use std::{
+    collections::VecDeque,
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+    process::Child,
+    sync::mpsc::{self, Receiver, Sender},
+    time::{Duration, Instant},
+};
+use zalivka::{
+    device::{DeviceInfo, Mode, parse_ecid},
+    drivers, progress, usb,
+};
+
+const SCAN_INTERVAL: Duration = Duration::from_secs(2);
+
+pub fn run() -> Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1020.0, 800.0])
+            .with_min_inner_size([700.0, 640.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Zalivka",
+        options,
+        Box::new(|cc| {
+            #[cfg(windows)]
+            #[allow(unsafe_code)]
+            {
+                // Detach this GUI process after window creation. CLI workers retain their pipes.
+                unsafe { windows_sys::Win32::System::Console::FreeConsole() };
+            }
+            configure(&cc.egui_ctx);
+            Ok(Box::new(App::new()))
+        }),
+    )
+    .map_err(|error| anyhow::anyhow!("opening desktop interface: {error}"))
+}
+
+#[derive(Clone, Copy)]
+enum Picker {
+    Firmware,
+    Cache,
+    Tokens,
+    Connect,
+    Log,
+}
+enum Event {
+    Scan {
+        devices: std::result::Result<Vec<DeviceInfo>, String>,
+        host: std::result::Result<Option<drivers::HostStatus>, String>,
+    },
+    Line(u64, String),
+    ReaderDone(u64),
+    Picked(Picker, Option<PathBuf>),
+    Saved(std::result::Result<PathBuf, String>),
+}
+struct Job {
+    id: u64,
+    action: Action,
+    started: Instant,
+    child: Child,
+    log: File,
+    success: Option<bool>,
+    readers: u8,
+    cancelled: bool,
+}
+struct Transfer {
+    update: progress::Update,
+    received: Instant,
+}
+impl Transfer {
+    fn speed(&self, now: Instant) -> f64 {
+        if now.duration_since(self.received) > Duration::from_secs(2) {
+            0.0
+        } else {
+            self.update.bytes_per_second
+        }
+    }
+    fn remaining(&self, now: Instant) -> Option<u64> {
+        let bytes = self.update.total?.saturating_sub(self.update.completed);
+        let speed = self.speed(now);
+        (bytes > 0 && speed > 0.0 && !self.update.finished)
+            .then(|| (bytes as f64 / speed).ceil() as u64)
+    }
+}
+
+struct Notice {
+    title: String,
+    detail: String,
+    tone: Tone,
+}
+struct Confirmation {
+    action: Action,
+    ecid: u64,
+    accepted: bool,
+    erase: String,
+}
+impl Confirmation {
+    fn ready(&self, target: Option<&DeviceInfo>) -> bool {
+        self.accepted
+            && target.is_some_and(|d| d.ecid == self.ecid && d.mode == Mode::Dfu)
+            && (self.action != Action::Restore || self.erase == "ERASE")
+    }
+}
+
+struct App {
+    setup: Setup,
+    devices: Vec<DeviceInfo>,
+    scanning: bool,
+    scan_error: Option<String>,
+    host: std::result::Result<Option<drivers::HostStatus>, String>,
+    windows_reboot_required: bool,
+    last_scan: Instant,
+    tx: Sender<Event>,
+    rx: Receiver<Event>,
+    next_job: u64,
+    job: Option<Job>,
+    logs: VecDeque<String>,
+    log_path: Option<PathBuf>,
+    last_stats: Instant,
+    last_activity: Instant,
+    transfer: Option<Transfer>,
+    fraction: Option<f32>,
+    phase: String,
+    notice: Option<Notice>,
+    journal_open: bool,
+    settings_open: bool,
+    picking: bool,
+    confirmation: Option<Confirmation>,
+}
+
+impl App {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            setup: Setup::default(),
+            devices: vec![],
+            scanning: false,
+            scan_error: None,
+            host: Ok(None),
+            windows_reboot_required: false,
+            last_scan: Instant::now() - SCAN_INTERVAL,
+            tx,
+            rx,
+            next_job: 0,
+            job: None,
+            logs: VecDeque::new(),
+            log_path: None,
+            last_stats: Instant::now(),
+            last_activity: Instant::now(),
+            transfer: None,
+            fraction: None,
+            phase: String::new(),
+            notice: None,
+            journal_open: false,
+            settings_open: false,
+            picking: false,
+            confirmation: None,
+        }
+    }
+    fn target(&self) -> Option<&DeviceInfo> {
+        let ecid = parse_ecid(self.setup.ecid.trim()).ok()?;
+        self.devices.iter().find(|d| d.ecid == ecid)
+    }
+    fn blocked_reason(&self) -> Option<&'static str> {
+        if self.windows_reboot_required {
+            return Some("Перезагрузите Windows после установки драйвера");
+        }
+        match &self.host {
+            Err(_) => return Some("Не удалось проверить подготовку Windows"),
+            Ok(Some(host)) => {
+                if let Some(reason) = host.blocking_reason() {
+                    return Some(reason);
+                }
+            }
+            Ok(None) if cfg!(windows) => return Some("Проверяем подготовку Windows"),
+            _ => {}
+        }
+        match self.target() {
+            None => {
+                return Some(if self.devices.is_empty() {
+                    "Подключите Mac в режиме DFU"
+                } else {
+                    "Выберите Mac"
+                });
+            }
+            Some(d) if d.mode != Mode::Dfu => return Some("Переведите Mac в режим DFU"),
+            _ => {}
+        }
+        if !self.setup.automatic && self.setup.local_file().is_err() {
+            return Some("Выберите файл IPSW");
+        }
+        None
+    }
+    fn error(&mut self, title: impl Into<String>, error: impl std::fmt::Display) {
+        self.notice = Some(Notice {
+            title: title.into(),
+            detail: error.to_string(),
+            tone: Tone::Error,
+        });
+    }
+    fn journal_text(&self) -> String {
+        self.logs
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    fn log(&mut self, mut line: String) {
+        if line.starts_with("USB internet: waiting") {
+            self.phase = "Ожидание USB-сети Mac".into();
+        } else if line.starts_with("USB internet: preparing") {
+            self.phase = "Подтвердите запрос прав администратора Windows".into();
+        } else if line.starts_with("USB internet ready:") {
+            self.phase = "Интернет по USB · оставьте Zalivka открытой".into();
+            self.transfer = None;
+            self.fraction = None;
+        }
+        if self
+            .job
+            .as_ref()
+            .is_some_and(|j| j.action == Action::PrepareWindows)
+            && line == "Перезагрузите Windows перед восстановлением Mac."
+        {
+            self.windows_reboot_required = true;
+        }
+        self.last_activity = Instant::now();
+        if let Some(job) = &mut self.job {
+            let _ = writeln!(job.log, "{line}");
+        }
+        if let Some(update) = progress::Update::parse(&line) {
+            let keep = update.completed == 0
+                || update.finished
+                || self
+                    .transfer
+                    .as_ref()
+                    .is_none_or(|t| t.update.stage != update.stage)
+                || self.last_stats.elapsed() >= Duration::from_secs(10);
+            if keep {
+                line = format!(
+                    "{}: {}{} · {:.1} МиБ/с",
+                    update.stage,
+                    human_bytes(update.completed),
+                    update
+                        .total
+                        .map(|n| format!(" / {}", human_bytes(n)))
+                        .unwrap_or_default(),
+                    update.bytes_per_second / 1048576.0
+                );
+                self.last_stats = Instant::now();
+            }
+            self.transfer = Some(Transfer {
+                update,
+                received: Instant::now(),
+            });
+            if !keep {
+                return;
+            }
+        } else if line.starts_with("Checkpoint started:") {
+            let checkpoint = line
+                .split_once(", name=")
+                .map(|(_, s)| s.split(',').next().unwrap_or(s))
+                .unwrap_or("");
+            self.phase = friendly_phase(checkpoint).into();
+            self.fraction = None;
+            if self.transfer.as_ref().is_some_and(|t| t.update.finished) {
+                self.transfer = None;
+            }
+        } else if line.starts_with("Operation ") {
+            self.fraction = progress_value(&line);
+        }
+        self.logs.push_back(line);
+        while self.logs.len() > 4000 {
+            self.logs.pop_front();
+        }
+    }
+    fn background(
+        &self,
+        ctx: &egui::Context,
+        name: &str,
+        task: impl FnOnce() -> Event + Send + 'static,
+    ) -> std::io::Result<()> {
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name(format!("zalivka-{name}"))
+            .spawn(move || {
+                let _ = tx.send(task());
+                ctx.request_repaint();
+            })
+            .map(|_| ())
+    }
+    fn detect(&mut self, ctx: &egui::Context) {
+        if self.scanning || self.job.is_some() {
+            return;
+        }
+        self.scanning = true;
+        self.last_scan = Instant::now();
+        if let Err(e) = self.background(ctx, "detect", || Event::Scan {
+            host: drivers::host_status().map_err(|e| format!("{e:#}")),
+            devices: usb::detect().map_err(|e| format!("{e:#}")),
+        }) {
+            self.scanning = false;
+            self.scan_error = Some(e.to_string());
+        }
+    }
+    fn pick(&mut self, picker: Picker, ctx: &egui::Context) {
+        if self.picking {
+            return;
+        }
+        self.picking = true;
+        if let Err(e) = self.background(ctx, "file", move || {
+            let dialog = rfd::FileDialog::new();
+            let path = match picker {
+                Picker::Firmware => dialog
+                    .set_title("Выберите прошивку")
+                    .add_filter("Apple IPSW", &["ipsw"])
+                    .pick_file(),
+                Picker::Cache => dialog.set_title("Папка прошивок").pick_folder(),
+                Picker::Tokens => dialog
+                    .set_title("Файл токенов")
+                    .add_filter("Property list", &["plist"])
+                    .pick_file(),
+                Picker::Connect => dialog.set_title("Файл DAWTKN").pick_file(),
+                Picker::Log => dialog
+                    .set_title("Сохранить журнал")
+                    .set_file_name("zalivka.log")
+                    .save_file(),
+            };
+            Event::Picked(picker, path)
+        }) {
+            self.picking = false;
+            self.error("Не удалось открыть окно выбора", e);
+        }
+    }
+    fn start(&mut self, action: Action, ctx: &egui::Context) {
+        if self.job.is_some() {
+            return;
+        }
+        if action.writes_device()
+            && let Some(reason) = self.blocked_reason()
+        {
+            self.error("Операция недоступна", reason);
+            return;
+        }
+        if matches!(action, Action::Doctor | Action::PrepareWindows) {
+            self.journal_open = true;
+        }
+        self.next_job += 1;
+        let id = self.next_job;
+        let result = Job::spawn(id, action, &self.setup, &self.tx, ctx);
+        match result {
+            Ok((job, path)) => {
+                self.logs.clear();
+                self.log_path = Some(path);
+                self.transfer = None;
+                self.fraction = None;
+                self.notice = None;
+                self.phase = if action == Action::PrepareWindows {
+                    "Подтвердите запрос прав администратора Windows".into()
+                } else {
+                    "Подготовка".into()
+                };
+                self.last_activity = Instant::now();
+                self.job = Some(job);
+            }
+            Err(e) => self.error("Не удалось начать операцию", format!("{e:#}")),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/gui.rs"]
+mod tests;

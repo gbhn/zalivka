@@ -1,0 +1,324 @@
+use super::*;
+
+#[test]
+fn https_proxy_uses_its_own_roots_with_tss_destination_trust() {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    let certificate = include_bytes!("../../fixtures/proxy/localhost.der");
+    let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        oxitls_rustcrypto_provider::provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![CertificateDer::from(certificate.as_slice())],
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            include_bytes!("../../fixtures/proxy/localhost-key.der").to_vec(),
+        )),
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = ureq::Proxy::new(&format!("https://{}", listener.local_addr().unwrap())).unwrap();
+    let server = thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("HTTPS proxy accept failed: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let connection = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, stream);
+        for expected in ["CONNECT does-not-resolve.invalid:80 ", "POST /sign "] {
+            assert!(read_header(&mut stream).starts_with(expected));
+            if expected.starts_with("CONNECT") {
+                stream
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .unwrap();
+                stream.flush().unwrap();
+            }
+        }
+        let mut body = [0; 4];
+        stream.read_exact(&mut body).unwrap();
+        assert_eq!(body, *b"sign");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            .unwrap();
+        stream.flush().unwrap();
+    });
+    let tls = ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::new_with_certs(&[
+            ureq::tls::Certificate::from_der(certificate),
+        ]))
+        .unversioned_rustls_crypto_provider(Arc::new(oxitls_rustcrypto_provider::provider()))
+        .build();
+    let proxy_config = ureq::Agent::config_builder()
+        .tls_config(tls)
+        .proxy(None)
+        .build();
+    let client = ureq::Agent::with_parts(
+        tss_agent().config().clone(),
+        crate::proxy::HttpConnector::new(proxy_config),
+        ureq::unversioned::resolver::DefaultResolver::default(),
+    );
+    let request = Request::post("http://does-not-resolve.invalid/sign")
+        .body(b"sign".to_vec())
+        .unwrap();
+    let mut response = send_http_via(&client, &request, Some(proxy)).unwrap();
+    assert_eq!(response.body_mut().read_to_string().unwrap(), "OK");
+    server.join().unwrap();
+}
+
+#[test]
+fn http_proxy_tunnels_get_post_and_range_requests() {
+    for method in [Method::GET, Method::POST] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy =
+            ureq::Proxy::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let expected_method = method.clone();
+        let server = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(error) => panic!("HTTP proxy accept failed: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            assert!(
+                read_header(&mut stream)
+                    .to_ascii_lowercase()
+                    .starts_with("connect does-not-resolve.invalid:80 http/1.1\r\n")
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .unwrap();
+            let headers = read_header(&mut stream).to_ascii_lowercase();
+            assert!(headers.starts_with(
+                &format!("{expected_method} /asset HTTP/1.1\r\n").to_ascii_lowercase()
+            ));
+            assert!(headers.contains("range: bytes=8-\r\n"));
+            if expected_method == Method::POST {
+                let mut body = [0; 4];
+                stream.read_exact(&mut body).unwrap();
+                assert_eq!(body, *b"sign");
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nreply",
+                )
+                .unwrap();
+        });
+        let body = if method == Method::POST {
+            b"sign".to_vec()
+        } else {
+            vec![]
+        };
+        let request = Request::builder()
+            .method(method)
+            .uri("http://does-not-resolve.invalid/asset")
+            .header("Range", "bytes=8-")
+            .body(body)
+            .unwrap();
+        let mut response = send_http_via(&agent(), &request, Some(proxy)).unwrap();
+        assert_eq!(response.body_mut().read_to_string().unwrap(), "reply");
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn tss_tls_validates_apple_chain_hostname_signature_and_expiration() {
+    use rustls::{
+        RootCertStore,
+        client::WebPkiServerVerifier,
+        client::danger::ServerCertVerifier,
+        pki_types::{CertificateDer, ServerName, UnixTime},
+    };
+    let agent = tss_agent();
+    let tls = agent.config().tls_config();
+    assert!(!tls.disable_verification());
+    assert!(tls.use_sni());
+    let ureq::tls::RootCerts::Specific(certificates) = tls.root_certs() else {
+        panic!("TSS must use its explicit Apple trust anchor");
+    };
+    let mut roots = RootCertStore::empty();
+    for certificate in certificates.iter() {
+        roots.add(CertificateDer::from(certificate.der())).unwrap();
+    }
+    let verifier = WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::new(oxitls_rustcrypto_provider::provider()),
+    )
+    .build()
+    .unwrap();
+    let leaf =
+        CertificateDer::from(include_bytes!("../../fixtures/tss/gs-2026-04-28.der").as_slice());
+    let intermediates = [CertificateDer::from(
+        include_bytes!("../../fixtures/tss/apple-server-auth-ca.der").as_slice(),
+    )];
+    let host = ServerName::try_from("gs.apple.com").unwrap();
+    // Fixed capture date: this fixture remains reproducible after the leaf expires.
+    let now = UnixTime::since_unix_epoch(Duration::from_secs(1_792_454_400));
+    verifier
+        .verify_server_cert(&leaf, &intermediates, &host, &[], now)
+        .unwrap();
+    let wrong_host = ServerName::try_from("updates.cdn-apple.com").unwrap();
+    assert!(
+        verifier
+            .verify_server_cert(&leaf, &intermediates, &wrong_host, &[], now)
+            .is_err()
+    );
+    assert!(
+        verifier
+            .verify_server_cert(&leaf, &[], &host, &[], now)
+            .is_err()
+    );
+    let mut tampered = leaf.to_vec();
+    *tampered.last_mut().unwrap() ^= 1;
+    assert!(
+        verifier
+            .verify_server_cert(&tampered.into(), &intermediates, &host, &[], now)
+            .is_err()
+    );
+    let expired = UnixTime::since_unix_epoch(Duration::from_secs(1_794_528_000));
+    assert!(
+        verifier
+            .verify_server_cert(&leaf, &intermediates, &host, &[], expired)
+            .is_err()
+    );
+    // This extra root must never broaden the normal CDN/asset trust configuration.
+    assert!(matches!(
+        super::agent().config().tls_config().root_certs(),
+        ureq::tls::RootCerts::WebPki
+    ));
+}
+
+#[test]
+#[ignore = "requires HTTPS access to Apple's TSS; no USB or signing request"]
+fn live_tss_https_uses_verified_apple_private_pki() {
+    let request = Request::get("https://gs.apple.com/TSS/controller?action=2")
+        .body(vec![])
+        .unwrap();
+    let response = super::send_http(&tss_agent(), &request).unwrap();
+    println!(
+        "Apple TSS TLS certificate and hostname verified; HTTP {}",
+        response.status()
+    );
+}
+
+#[test]
+fn redirects_resolve_relative_paths_queries_and_only_allow_apple_https() {
+    let base = "https://updates.cdn-apple.com/a/b/file?old=1";
+    for (location, expected) in [
+        ("next", "https://updates.cdn-apple.com/a/b/next"),
+        (
+            "../next?new=1",
+            "https://updates.cdn-apple.com/a/next?new=1",
+        ),
+        ("../../../../next", "https://updates.cdn-apple.com/next"),
+        ("./", "https://updates.cdn-apple.com/a/b/"),
+        (".", "https://updates.cdn-apple.com/a/b/"),
+        ("..", "https://updates.cdn-apple.com/a/"),
+        ("", base),
+        ("../../../..", "https://updates.cdn-apple.com/"),
+        ("/a//b/../c", "https://updates.cdn-apple.com/a//c"),
+        (
+            "/a/%2e%2e/%2F?x=%23",
+            "https://updates.cdn-apple.com/a/%2e%2e/%2F?x=%23",
+        ),
+        (
+            "/absolute/./path/../file",
+            "https://updates.cdn-apple.com/absolute/file",
+        ),
+        (
+            "?new=2#fragment",
+            "https://updates.cdn-apple.com/a/b/file?new=2",
+        ),
+        ("#fragment", base),
+        ("//gs.apple.com/key", "https://gs.apple.com/key"),
+        ("https://gs.apple.com/key", "https://gs.apple.com/key"),
+        (
+            "%2e%2e/next",
+            "https://updates.cdn-apple.com/a/b/%2e%2e/next",
+        ),
+    ] {
+        assert_eq!(
+            redirect_url(base, location).unwrap(),
+            expected,
+            "{location}"
+        );
+    }
+    for location in [
+        "http://gs.apple.com/key",
+        "//evil.invalid/key",
+        "https://apple.com.evil.invalid/key",
+        "https://gs.apple.com:8443/key",
+        "file:///tmp/firmware",
+    ] {
+        assert!(redirect_url(base, location).is_err(), "{location}");
+    }
+}
+
+#[test]
+fn post_redirects_preserve_307_payload_and_drop_credentials_on_host_change() {
+    let original = Request::post("https://gs.apple.com/key")
+        .header("Authorization", "test-secret")
+        .header("Cookie", "test-cookie")
+        .header("Content-Type", "application/octet-stream")
+        .body(vec![0, 1, 255])
+        .unwrap();
+    let mut request = original.clone();
+    redirect_request(&mut request, StatusCode::TEMPORARY_REDIRECT, "next").unwrap();
+    assert_eq!(request.method(), Method::POST);
+    assert_eq!(request.body(), original.body());
+    assert!(request.headers().contains_key("authorization"));
+    redirect_request(
+        &mut request,
+        StatusCode::TEMPORARY_REDIRECT,
+        "https://GS.APPLE.COM:443/next",
+    )
+    .unwrap();
+    assert!(request.headers().contains_key("authorization"));
+    redirect_request(
+        &mut request,
+        StatusCode::PERMANENT_REDIRECT,
+        "https://updates.cdn-apple.com/key",
+    )
+    .unwrap();
+    assert_eq!(request.method(), Method::POST);
+    assert_eq!(request.body(), original.body());
+    assert!(!request.headers().contains_key("authorization"));
+    assert!(!request.headers().contains_key("cookie"));
+    for status in [
+        StatusCode::MOVED_PERMANENTLY,
+        StatusCode::FOUND,
+        StatusCode::SEE_OTHER,
+    ] {
+        let mut request = original.clone();
+        redirect_request(&mut request, status, "/result").unwrap();
+        assert_eq!(request.method(), Method::GET);
+        assert!(request.body().is_empty());
+        assert!(!request.headers().contains_key("content-type"));
+    }
+}

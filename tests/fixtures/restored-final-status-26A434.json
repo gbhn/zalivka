@@ -1,0 +1,7 @@
+{
+  "Status": 0,
+  "AMRError": 0,
+  "Successful": true,
+  "WillSendEOF": true,
+  "MsgType": "StatusMsg"
+}

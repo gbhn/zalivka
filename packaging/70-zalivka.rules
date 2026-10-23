@@ -1,0 +1,2 @@
+# Apple DFU/recovery and restore interfaces. Access for the active local seat.
+SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", TAG+="uaccess"

@@ -1,0 +1,10 @@
+/target/
+*.ipsw
+*.part
+/artifacts/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
+*~
