@@ -23,3 +23,7 @@ pub mod usb_internet;
 #[allow(unsafe_code)]
 mod windows;
 pub mod wire;
+
+#[cfg(test)]
+#[path = "../tests/support/mux.rs"]
+mod test_mux;

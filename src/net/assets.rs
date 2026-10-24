@@ -157,7 +157,7 @@ pub(super) fn asset_reply(mut response: Response<ureq::Body>, wrapped_key: bool)
         // restored_external from 24A335. The device unwraps the server's body
         // itself. Only LocalUnwrapped bypasses that step; never label a WKMS
         // response as a plaintext archive key. Apple's Windows host uses the
-        // KeySource value Remote. See docs/IPSW_ANALYSIS.md.
+        // KeySource value Remote.
         return Ok(wire::dict([
             ("KeyData", Value::Data(body)),
             ("KeySource", "Remote".into()),

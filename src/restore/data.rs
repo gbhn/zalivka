@@ -233,7 +233,7 @@ impl ContextState {
                 return Ok(());
             }
             // Apple's MobileDevice64.dll dispatches both names to the same
-            // request/response handler. See docs/IPSW_ANALYSIS.md for evidence.
+            // request/response handler (MobileDevice 1860.2.5.100.2).
             "FirmwareUpdaterData" | "FirmwareUpdaterDataV2" => {
                 let args = wire::get(message, &["Arguments"])?;
                 let response = if let Some(response) = crate::firmware::canary_response(args)? {
@@ -270,39 +270,33 @@ impl ContextState {
         let Some(id) = self.recovery.as_ref() else {
             return Ok(no_asset());
         };
-        let names: Vec<&str> = if let Some(name) = component {
+        let images = if let Some(name) = component {
             if !id.has(name) {
                 return Ok(no_asset());
             }
-            vec![name]
+            let ticket = self
+                .recovery_ticket
+                .as_ref()
+                .context("missing recovery ticket")?;
+            Value::Data(self.ipsw.personalized(id, name, ticket)?)
         } else {
-            id.manifest()?
+            let mut names = id
+                .manifest()?
                 .iter()
                 .filter(|(_, entry)| {
                     wire::boolean(entry, &["Info", "IsLoadedByiBoot"])
                         || wire::boolean(entry, &["Info", "IsLoadedByiBootStage1"])
                 })
                 .map(|(name, _)| name.as_str())
-                .collect()
-        };
-        if names.is_empty() {
-            return Ok(no_asset());
-        }
-        let ticket = self
-            .recovery_ticket
-            .as_ref()
-            .context("missing recovery ticket")?;
-        let mut images = Dictionary::new();
-        for name in names {
-            images.insert(
-                name.into(),
-                Value::Data(self.ipsw.personalized(id, name, ticket)?),
-            );
-        }
-        let images = if component.is_some() {
-            images.into_iter().next().unwrap().1
-        } else {
-            Value::Dictionary(images)
+                .peekable();
+            if names.peek().is_none() {
+                return Ok(no_asset());
+            }
+            let ticket = self
+                .recovery_ticket
+                .as_ref()
+                .context("missing recovery ticket")?;
+            Value::Dictionary(personalized_images(&mut self.ipsw, id, ticket, names)?)
         };
         Ok(wire::dict([("AdditionalBootImages", images)]))
     }
@@ -415,14 +409,26 @@ fn image_data(
             ("ImageName", name.into()),
         ]));
     }
-    let mut images = Dictionary::new();
-    for name in names {
-        images.insert(
-            name.into(),
-            Value::Data(ipsw.personalized(id, name, ticket)?),
-        );
-    }
-    Ok(wire::dict([(key, Value::Dictionary(images))]))
+    Ok(wire::dict([(
+        key,
+        Value::Dictionary(personalized_images(ipsw, id, ticket, names)?),
+    )]))
+}
+
+fn personalized_images<'a>(
+    ipsw: &mut Ipsw,
+    id: &Identity,
+    ticket: &Value,
+    names: impl Iterator<Item = &'a str>,
+) -> Result<Dictionary> {
+    names
+        .map(|name| {
+            Ok((
+                name.to_owned(),
+                Value::Data(ipsw.personalized(id, name, ticket)?),
+            ))
+        })
+        .collect()
 }
 
 fn nor_data(ipsw: &mut Ipsw, id: &Identity, ticket: &Value, message: &Value) -> Result<Value> {

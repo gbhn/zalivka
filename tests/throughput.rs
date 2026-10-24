@@ -17,6 +17,10 @@ use zalivka::{
     wire,
 };
 
+#[path = "support/mux.rs"]
+mod test_mux;
+use test_mux::{tcp, version_packet};
+
 #[derive(Default)]
 struct Counts {
     payload: Vec<u8>,
@@ -34,27 +38,11 @@ struct SimulatedUsb {
     queued_model: bool,
 }
 
-fn tcp(service: u16, port: u16, seq: u32, ack: u32, flags: u8, data: &[u8]) -> Vec<u8> {
-    let mut header = vec![0; 20];
-    header[..2].copy_from_slice(&service.to_be_bytes());
-    header[2..4].copy_from_slice(&port.to_be_bytes());
-    header[4..8].copy_from_slice(&seq.to_be_bytes());
-    header[8..12].copy_from_slice(&ack.to_be_bytes());
-    header[12] = 0x50;
-    header[13] = flags;
-    header[14..16].copy_from_slice(&1024u16.to_be_bytes());
-    header.extend_from_slice(data);
-    mux::encode_packet(6, 2, 0, 0, &header).unwrap()
-}
-
 impl SimulatedUsb {
     fn accept(&mut self, bytes: &[u8], wait: bool) -> Result<()> {
         let protocol = u32::from_be_bytes(bytes[..4].try_into()?);
         if protocol == 0 {
-            let mut response = 2u32.to_be_bytes().to_vec();
-            response.extend([0; 8]);
-            self.input
-                .push_back(mux::encode_packet(0, 0, 0, 0, &response)?);
+            self.input.push_back(version_packet());
             return Ok(());
         }
         if protocol != 6 {

@@ -16,19 +16,28 @@ fn ftab_roundtrip_preserves_entries_and_rejects_bad_offsets() {
     let parsed = Ftab::parse(&bytes).unwrap();
     assert_eq!(parsed.entries, table.entries);
     assert_eq!(parsed.encode().unwrap(), bytes);
+    // A streaming reader has the complete index, without the payload bytes.
+    assert_eq!(
+        zalivka::firmware::payload_ranges(&bytes[..80], bytes.len() as u64).unwrap(),
+        [80..83, 83..85]
+    );
+    let rejects = |bad: &[u8]| {
+        assert!(Ftab::parse(bad).is_err());
+        assert!(zalivka::firmware::payload_ranges(bad, bad.len() as u64).is_err());
+    };
     let mut bad = bytes.clone();
     bad[52..56].copy_from_slice(&u32::MAX.to_le_bytes());
-    assert!(Ftab::parse(&bad).is_err());
+    rejects(&bad);
     let mut bad = bytes.clone();
     bad[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
-    assert!(Ftab::parse(&bad).is_err());
+    rejects(&bad);
     let mut bad = bytes.clone();
     let first_offset = u32::from_le_bytes(bad[52..56].try_into().unwrap());
     bad[68..72].copy_from_slice(&(first_offset + 1).to_le_bytes());
-    assert!(Ftab::parse(&bad).is_err(), "overlapping firmware payloads");
+    rejects(&bad);
     let mut bad = bytes;
     bad[64..68].copy_from_slice(b"rkos");
-    assert!(Ftab::parse(&bad).is_err());
+    rejects(&bad);
 }
 
 #[test]

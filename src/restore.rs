@@ -5,7 +5,7 @@ use connection::{confirm_restore_service, wait_restored};
 pub use requests::AsyncRequests;
 mod data;
 mod file_data;
-pub use boot::{probe_boot_state, probe_saved_debug};
+pub use boot::probe_boot_state;
 pub use data::cpio_header;
 mod options;
 pub use options::{boot_arguments, options, supported_data_types};
@@ -212,7 +212,6 @@ pub fn run(
     usb.check_reset_access()?;
     let mut ipsw = Ipsw::open(path)?;
     let identity = ipsw.select_behavior(&usb.info, identity_index, behavior)?;
-    identity.validate_behavior(behavior)?;
     ipsw.preflight(&identity)?;
     let recovery = ipsw.recovery_identity(&usb.info, &identity)?;
     if let Some(id) = &recovery {
@@ -240,7 +239,7 @@ pub fn run(
         recovery_ticket: None,
         assets,
     };
-    let mut bootx_error = state.boot(usb, false)?;
+    let mut bootx_error = state.boot(usb)?;
     if let Some(id) = &state.recovery {
         let request = if state.identity.is_macos() {
             tss::recovery_request(&state.device, &state.identity)?

@@ -1,8 +1,11 @@
 use super::boot::{IBootStep, iboot_stage, reconnect_after_ibss};
-use super::file_data::{FILE_DATA_BATCH, FileDataWriter, send_file_data};
+use super::file_data::{
+    FILE_DATA_BATCH, FileDataWriter, ImagePrefix, key_exchange, send_file_data,
+};
 use super::*;
 use crate::dfu;
 use crate::mux::{self, PacketTransport};
+use crate::test_mux::{self, version_packet};
 use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
@@ -16,7 +19,7 @@ fn j313_identity() -> Identity {
 }
 
 fn stage_transcript(id: &Identity, stage1: bool) -> Vec<String> {
-    iboot_stage(id, stage1, false)
+    iboot_stage(id, stage1)
         .unwrap()
         .into_iter()
         .map(|step| match step {
@@ -181,34 +184,6 @@ fn bootstrap_respects_stage_flags_and_defers_logo_until_present_dcp() {
                 || s.starts_with("setpicture")
                 || s.starts_with("bgcolor"))
     );
-}
-
-#[test]
-fn diagnostic_stages_never_persist_settings_or_enable_reformatting() {
-    for behavior in ["Erase", "Update"] {
-        let mut id = j313_identity();
-        id.value.as_dictionary_mut().unwrap()["Info"]
-            .as_dictionary_mut()
-            .unwrap()
-            .insert("RestoreBehavior".into(), behavior.into());
-        for first in [true, false] {
-            let commands: Vec<_> = iboot_stage(&id, first, true)
-                .unwrap()
-                .into_iter()
-                .filter_map(|step| match step {
-                    IBootStep::Command(command) => Some(command),
-                    IBootStep::Component(_) => None,
-                })
-                .collect();
-            assert!(commands.contains(&"setenvnp auto-boot false"));
-            assert!(commands.contains(&"setenvnp boot-args rd=md0 -progress -restore"));
-            for command in commands {
-                assert!(!command.starts_with("setenv "), "{command}");
-                assert!(!command.contains("saveenv"), "{command}");
-                assert!(!command.contains("reformat"), "{command}");
-            }
-        }
-    }
 }
 
 #[test]
@@ -509,16 +484,7 @@ fn tcp(seq: u32, flags: u8, data: &[u8]) -> Vec<u8> {
     tcp_on(1234, 1, seq, flags, data)
 }
 fn tcp_on(port: u16, local: u16, seq: u32, flags: u8, data: &[u8]) -> Vec<u8> {
-    let mut tcp = vec![0; 20];
-    tcp[..2].copy_from_slice(&port.to_be_bytes());
-    tcp[2..4].copy_from_slice(&local.to_be_bytes());
-    tcp[4..8].copy_from_slice(&seq.to_be_bytes());
-    tcp[8..12].copy_from_slice(&1u32.to_be_bytes());
-    tcp[12] = 0x50;
-    tcp[13] = flags;
-    tcp[14..16].copy_from_slice(&1024u16.to_be_bytes());
-    tcp.extend(data);
-    mux::encode_packet(6, 2, 1, 0, &tcp).unwrap()
+    test_mux::tcp(port, local, seq, 1, flags, data)
 }
 
 fn bytes_on(output: &Arc<Mutex<Vec<Vec<u8>>>>, port: u16) -> Vec<u8> {
@@ -583,8 +549,7 @@ fn file_data_session(
 ) -> (Session, Arc<Mutex<Vec<Vec<u8>>>>) {
     let output = Arc::new(Mutex::new(vec![]));
     let session = Session::new(FileDataUsb {
-        input: vec![mux::encode_packet(0, 0, 0, 0, &[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap()]
-            .into(),
+        input: vec![version_packet()].into(),
         output: output.clone(),
         delay,
         fail_at,
@@ -720,7 +685,7 @@ fn aea_key_request_flushes_retained_plist_tail_before_reading_request() {
     let output = Arc::new(Mutex::new(Vec::new()));
     let session = Session::new(Usb {
         input: vec![
-            mux::encode_packet(0, 0, 0, 0, &[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            version_packet(),
             handshake,
             request_packet,
             tcp_on(23456, 2, 0, 0x12, &[]),
@@ -737,7 +702,7 @@ fn aea_key_request_flushes_retained_plist_tail_before_reading_request() {
     assert!(!writer.pending.is_empty());
     // Another service pumps a late request into this channel. Treat the AEA
     // prefix as already negotiated; no actual key client/network is involved.
-    writer.aea = true;
+    writer.prefix = ImagePrefix::Aea(None);
     let _other = session.connect(23456).unwrap();
     assert!(writer.stream.has_pending_input().unwrap());
     // Reject an unrelated request after flushing, so the test observes exactly
@@ -857,11 +822,7 @@ fn recorded_final_status_does_not_advertise_socket_eof_on_raw_usb_mux() {
     validate_final_status(&captured).unwrap();
     let output = Arc::new(Mutex::new(vec![]));
     let session = Session::new(Usb {
-        input: vec![
-            mux::encode_packet(0, 0, 0, 0, &[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            tcp_on(RESTORED_PORT, 1, 0, 0x12, &[]),
-        ]
-        .into(),
+        input: vec![version_packet(), tcp_on(RESTORED_PORT, 1, 0, 0x12, &[])].into(),
         output: output.clone(),
     })
     .unwrap();
@@ -884,7 +845,7 @@ fn final_ack_waits_for_peer_close_and_drains_trailing_bytes_without_fin() {
     let output = Arc::new(Mutex::new(vec![]));
     let session = Session::new(Usb {
         input: vec![
-            mux::encode_packet(0, 0, 0, 0, &[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            version_packet(),
             tcp_on(RESTORED_PORT, 1, 0, 0x12, &[]),
             tcp_on(RESTORED_PORT, 1, 1, 0x10, b"tail"),
             tcp_on(RESTORED_PORT, 1, 5, 0x04, &[]),
@@ -929,11 +890,7 @@ fn restore_close_requires_peer_close_or_physical_usb_removal() {
     }
     for removed in [false, true] {
         let session = Session::new(ClosingUsb {
-            input: vec![
-                mux::encode_packet(0, 0, 0, 0, &[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-                tcp_on(RESTORED_PORT, 1, 0, 0x12, &[]),
-            ]
-            .into(),
+            input: vec![version_packet(), tcp_on(RESTORED_PORT, 1, 0, 0x12, &[])].into(),
             removed,
         })
         .unwrap();
@@ -992,7 +949,7 @@ fn aea_public_key_reply_is_local_to_one_fragmented_image_transfer() {
     let output = Arc::new(Mutex::new(vec![]));
     let usb = Usb {
         input: vec![
-            mux::encode_packet(0, 0, 0, 0, &[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            version_packet(),
             tcp(0, 0x12, &[]),
             tcp(1, 0x10, &frames),
             tcp_on(23456, 2, 0, 0x12, &[]),
@@ -1012,7 +969,7 @@ fn aea_public_key_reply_is_local_to_one_fragmented_image_transfer() {
     // Network requests are not needed when this transfer's key is cached.
     writer.write_all(&prefix[2..]).unwrap();
     assert_eq!(writer.key_requests, 2);
-    assert!(writer.public_fcs.is_some());
+    assert!(matches!(writer.prefix, ImagePrefix::Aea(Some(_))));
     let mut input = Cursor::new(bytes_on(&output, 1234));
     assert_eq!(
         wire::get(&wire::receive(&mut input).unwrap(), &["FileData"])
@@ -1041,7 +998,8 @@ fn aea_public_key_reply_is_local_to_one_fragmented_image_transfer() {
         assert_eq!(input.position(), input.get_ref().len() as u64);
     }
     let next_image = FileDataWriter::new(&mut stream, &session, &assets, "test", None);
-    assert!(next_image.public_key.is_none() && next_image.public_fcs.is_none());
+    assert!(next_image.public_key.is_none());
+    assert!(matches!(next_image.prefix, ImagePrefix::Collecting(_)));
 }
 
 #[test]
@@ -1064,7 +1022,7 @@ fn aea_async_asset_replies_use_the_requested_ports_and_image_transfer_continues(
     let output = Arc::new(Mutex::new(Vec::new()));
     let session = Session::new(Usb {
         input: vec![
-            mux::encode_packet(0, 0, 0, 0, &[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            version_packet(),
             tcp(0, 0x12, &[]),
             tcp(1, 0x10, &frames),
             tcp_on(23456, 2, 0, 0x12, &[]),
@@ -1084,9 +1042,8 @@ fn aea_async_asset_replies_use_the_requested_ports_and_image_transfer_continues(
         &wire::dict([("FileData", Value::Data(prefix.to_vec()))]),
     )
     .unwrap();
-    writer.aea = true;
+    writer.prefix = ImagePrefix::Aea(None);
     writer.first = false;
-    writer.collecting_prefix = false;
     let responses = [
         wire::dict([
             ("ResponseStatus", 200u64.into()),
@@ -1098,8 +1055,11 @@ fn aea_async_asset_replies_use_the_requested_ports_and_image_transfer_continues(
         ]),
     ];
     let mut count = 0;
-    writer
-        .key_exchange(|request| {
+    key_exchange(
+        writer.stream,
+        &session,
+        &mut writer.key_requests,
+        |request| {
             assert_eq!(
                 wire::string(request, &["DataType"])?,
                 if count == 0 {
@@ -1111,8 +1071,9 @@ fn aea_async_asset_replies_use_the_requested_ports_and_image_transfer_continues(
             let reply = responses[count].clone();
             count += 1;
             Ok(reply)
-        })
-        .unwrap();
+        },
+    )
+    .unwrap();
     assert_eq!(count, 2);
     writer.write_all(b"remaining archive bytes").unwrap();
     writer.finish().unwrap();
@@ -1165,21 +1126,15 @@ fn aea_rejects_unrelated_or_invalid_async_requests_before_replying() {
         wire::send(&mut frame, &request).unwrap();
         let output = Arc::new(Mutex::new(Vec::new()));
         let session = Session::new(Usb {
-            input: vec![
-                mux::encode_packet(0, 0, 0, 0, &[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-                tcp(0, 0x12, &[]),
-                tcp(1, 0x10, &frame),
-            ]
-            .into(),
+            input: vec![version_packet(), tcp(0, 0x12, &[]), tcp(1, 0x10, &frame)].into(),
             output: output.clone(),
         })
         .unwrap();
         let mut stream = session.connect(1234).unwrap();
-        let assets = net::AssetClient::default();
-        let mut writer = FileDataWriter::new(&mut stream, &session, &assets, "test", None);
-        let error = writer
-            .key_exchange(|_| panic!("invalid request must not call the asset client"))
-            .unwrap_err();
+        let error = key_exchange(&mut stream, &session, &mut 0, |_| {
+            panic!("invalid request must not call the asset client")
+        })
+        .unwrap_err();
         let error = format!("{error:#}");
         assert!(
             error.contains(if kind == "KernelCache" {
@@ -1217,20 +1172,13 @@ fn aea_handles_multiple_key_requests_and_rejects_unrelated_messages() {
         }
         let output = Arc::new(Mutex::new(vec![]));
         let usb = Usb {
-            input: vec![
-                mux::encode_packet(0, 0, 0, 0, &[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-                tcp(0, 0x12, &[]),
-                tcp(1, 0x10, &frames),
-            ]
-            .into(),
+            input: vec![version_packet(), tcp(0, 0x12, &[]), tcp(1, 0x10, &frames)].into(),
             output: output.clone(),
         };
         let session = Session::new(usb).unwrap();
         let mut stream = session.connect(1234).unwrap();
-        let assets = net::AssetClient::default();
-        let mut writer = FileDataWriter::new(&mut stream, &session, &assets, "test", None);
         let mut count = 0u64;
-        let result = writer.key_exchange(|request| {
+        let result = key_exchange(&mut stream, &session, &mut 0, |request| {
             assert_eq!(wire::number(wire::get(request, &["index"])?)?, count);
             count += 1;
             Ok(wire::dict([("ResponseStatus", 200u64.into())]))

@@ -115,8 +115,17 @@ impl Connector for HttpConnector {
 }
 
 pub(crate) fn connect(host: &str, port: u16) -> Result<Tunnel> {
-    let uri: Uri = format!("https://{host}:{port}/").parse()?;
+    let uri = target_uri(host, port)?;
     connect_via(&uri, for_url(&uri)?)
+}
+
+/// A tunnel exposes the destination port, but no HTTP path or target TLS session.
+fn target_uri(host: &str, port: u16) -> Result<Uri> {
+    Ok(format!(
+        "{}://{host}:{port}/",
+        if port == 80 { "http" } else { "https" }
+    )
+    .parse()?)
 }
 
 fn connect_via(uri: &Uri, proxy: Option<Proxy>) -> Result<Tunnel> {

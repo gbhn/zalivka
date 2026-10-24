@@ -575,6 +575,24 @@ fn ticket_selection_uses_request_type_with_distinct_macos_identity() {
             &request("RecoveryOSFileAssetImage", true),
         )
         .unwrap();
+    for (name, flag) in [
+        ("KernelCache", "IsLoadedByiBoot"),
+        ("iBSS", "IsLoadedByiBootStage1"),
+    ] {
+        manifest_mut(state.recovery.as_mut().unwrap())[name]
+            .as_dictionary_mut()
+            .unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(flag.into(), true.into());
+    }
+    state
+        .serve(
+            &session,
+            &mut main,
+            &request("RecoveryOSIBootFWFilesImages", true),
+        )
+        .unwrap();
     state.recovery_ticket = None;
     assert!(
         state
@@ -646,11 +664,24 @@ fn ticket_selection_uses_request_type_with_distinct_macos_identity() {
         .unwrap()
         .as_data()
         .unwrap();
-    let (root, _) = img4::parse(data).unwrap();
-    let (_, fields) = img4::parse(root.content).unwrap();
-    let (_, fields) = img4::parse(fields).unwrap();
-    let (signed_ticket, _) = img4::parse(fields).unwrap();
-    assert_eq!(signed_ticket.content, recovery);
+    let group = wire::receive(&mut input).unwrap();
+    let images = wire::get(&group, &["AdditionalBootImages"])
+        .unwrap()
+        .as_dictionary()
+        .unwrap();
+    assert_eq!(images.len(), 2);
+    for data in [
+        data,
+        images["KernelCache"].as_data().unwrap(),
+        images["iBSS"].as_data().unwrap(),
+    ] {
+        let (root, _) = img4::parse(data).unwrap();
+        let (_, fields) = img4::parse(root.content).unwrap();
+        let (_, fields) = img4::parse(fields).unwrap();
+        let (signed_ticket, _) = img4::parse(fields).unwrap();
+        assert_eq!(signed_ticket.content, recovery);
+    }
+    assert_eq!(input.position(), input.get_ref().len() as u64);
 }
 
 #[test]

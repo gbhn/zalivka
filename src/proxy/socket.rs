@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
-use ureq::{Proxy, ProxyProtocol, http::Uri};
+use ureq::{Proxy, ProxyProtocol};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 enum Transport {
@@ -89,12 +89,7 @@ fn tls_config() -> Arc<ClientConfig> {
 }
 
 pub(crate) fn connect(host: &str, port: u16) -> Result<Stream> {
-    // A transparent stream exposes its origin, not the encrypted HTTP path.
-    let uri: Uri = format!(
-        "{}://{host}:{port}/",
-        if port == 80 { "http" } else { "https" }
-    )
-    .parse()?;
+    let uri = super::target_uri(host, port)?;
     connect_via(host, port, super::for_url(&uri)?)
 }
 fn tcp_connect(host: &str, port: u16) -> Result<TcpStream> {

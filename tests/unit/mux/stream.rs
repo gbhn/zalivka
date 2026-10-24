@@ -27,6 +27,45 @@ struct State {
 
 struct EventUsb(Arc<Mutex<State>>, InputReady);
 
+#[test]
+fn version_handshake_waits_for_fragmented_input_and_propagates_wait_errors() {
+    for fail in [false, true] {
+        let state = Arc::new(Mutex::new(State::default()));
+        let waiting = state.clone();
+        let ready = InputReady::new(move |timeout| {
+            assert_eq!(timeout, Duration::from_millis(1));
+            let mut state = waiting.lock().unwrap();
+            state.empty_reads = 0;
+            state.waits += 1;
+            ensure!(!fail, "injected handshake wait failure");
+            let packet = crate::test_mux::version_packet();
+            let fragment = if state.waits == 1 {
+                &packet[..5]
+            } else {
+                &packet[5..]
+            };
+            state.input.push_back(fragment.to_vec());
+            Ok(true)
+        });
+        let result = Session::new(EventUsb(state.clone(), ready));
+        if fail {
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("injected handshake wait failure")
+            );
+            assert_eq!(state.lock().unwrap().waits, 1);
+        } else {
+            let session = result.unwrap();
+            assert_eq!(session.lock().unwrap().version, 2);
+            assert_eq!(state.lock().unwrap().waits, 2);
+            assert_eq!(state.lock().unwrap().output.len(), 2);
+        }
+    }
+}
+
 fn tcp(ack: u32, flags: u8) -> Vec<u8> {
     let mut bytes = vec![0; 20];
     bytes[..2].copy_from_slice(&12345u16.to_be_bytes());

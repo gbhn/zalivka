@@ -1,13 +1,10 @@
-//! iBoot preparation and explicitly requested diagnostic boots.
-use super::{
-    ContextState, confirm_restore_service, options::behavior_boot_arguments, query_value,
-    wait_restored,
-};
+//! iBoot preparation and the explicitly requested RAM-only boot-state probe.
+use super::{ContextState, options::behavior_boot_arguments};
 use crate::{
     device::Mode,
     dfu, img4,
     ipsw::{Behavior, Identity, Ipsw},
-    net, tss,
+    tss,
     usb::RecoveryUsb,
     wire,
 };
@@ -26,7 +23,7 @@ pub(super) enum IBootStep {
 
 /// MobileDevice's stage preparation: ANS, parameters, iBootData, DCP, remainder.
 /// These are full restore stages, not the separate ApBootstrapOnly operation.
-pub(super) fn iboot_stage(id: &Identity, stage1: bool, diagnostic: bool) -> Result<Vec<IBootStep>> {
+pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>> {
     let mut firmware: Vec<_> = id
         .manifest()?
         .iter()
@@ -54,18 +51,11 @@ pub(super) fn iboot_stage(id: &Identity, stage1: bool, diagnostic: bool) -> Resu
         steps.push(IBootStep::Component(firmware.remove(index)));
         steps.push(IBootStep::Command("firmware"));
     }
-    // Diagnostic boots never generate persistent settings or reformat arguments.
-    let behavior = if diagnostic {
-        steps.push(IBootStep::Command("setenvnp auto-boot false"));
-        Behavior::Update
-    } else {
-        steps.extend([
-            IBootStep::Command("setenv auto-boot false"),
-            IBootStep::Command("saveenv"),
-        ]);
-        id.behavior()?
-    };
-    steps.push(IBootStep::Command(behavior_boot_arguments(behavior)));
+    steps.extend([
+        IBootStep::Command("setenv auto-boot false"),
+        IBootStep::Command("saveenv"),
+        IBootStep::Command(behavior_boot_arguments(id.behavior()?)),
+    ]);
     for priority in ["iBootData", "RestoreDCP"] {
         if let Some(index) = firmware.iter().position(|name| name == priority) {
             steps.push(IBootStep::Component(firmware.remove(index)));
@@ -172,63 +162,6 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
     }))
 }
 
-/// Load an Update restore environment into RAM, then query saved diagnostics.
-/// This performs DFU reset/boot, but sends no StartRestore or persistent setenv.
-/// No reboot is requested; the device's state after disconnect is not guaranteed.
-pub fn probe_saved_debug(path: &Path, ecid: u64) -> Result<serde_json::Value> {
-    let usb = RecoveryUsb::open(ecid)?;
-    ensure!(
-        usb.info.mode == Mode::Dfu,
-        "enter DFU before the RAM diagnostic boot"
-    );
-    usb.check_reset_access()?;
-    let mut ipsw = Ipsw::open(path)?;
-    let identity = ipsw.select_behavior(&usb.info, None, Behavior::Update)?;
-    ensure!(
-        identity.is_macos(),
-        "RAM diagnostic boot supports Apple silicon Macs only"
-    );
-    ipsw.preflight(&identity)?;
-    let ticket = tss::send(&tss::request(&usb.info, &identity)?)
-        .context("personalizing RAM diagnostic firmware")?;
-    for name in identity.manifest()?.keys() {
-        img4::restore_info(&ticket, name, &identity.value)?;
-    }
-    let mut state = ContextState {
-        ipsw,
-        identity,
-        recovery: None,
-        device: usb.info.clone(),
-        ticket,
-        recovery_ticket: None,
-        assets: net::AssetClient::default(),
-    };
-    eprintln!("RAM diagnostic boot only: no StartRestore, saveenv or NAND reformat argument");
-    let bootx_error = state.boot(usb, true)?;
-    let (session, mut main, version) =
-        confirm_restore_service(bootx_error, || wait_restored(&state.device))?;
-    main.set_read_timeout(Duration::from_secs(15));
-    eprintln!("Reading restored QueryValue: SavedDebugInfo");
-    let reply = query_value(&mut main, "SavedDebugInfo")?;
-    eprintln!("Reading restored QueryValue: Logs");
-    // Preserve SavedDebugInfo even if the optional log query fails. Some restore
-    // environments disappear after the host disconnects, so use this session.
-    let service_log = match query_value(&mut main, "Logs") {
-        Ok(reply) => serde_json::json!({"reply": reply}),
-        Err(error) => serde_json::json!({"error": format!("{error:#}")}),
-    };
-    drop(main);
-    drop(session);
-    Ok(serde_json::json!({
-        "ecid": format!("{ecid:016x}"),
-        "restore_protocol_version": version,
-        "saved_debug_info": reply,
-        "service_log": service_log,
-        "start_restore_sent": false,
-        "note": "Diagnostic firmware/kernel loaded into RAM; DFU reset performed. No StartRestore, saveenv, disk-install requests, reboot command or NAND reformat boot argument were sent. The device's state after host disconnect is not guaranteed. These logs may be empty or refer to an earlier event; they do not themselves confirm the cause or a successful disk boot."
-    }))
-}
-
 impl ContextState {
     pub(super) fn send_component(
         &mut self,
@@ -245,11 +178,7 @@ impl ContextState {
 
     // Errors before bootx stop immediately. A bootx USB error must be resolved
     // by checking the restore service's identity after closing iBoot USB.
-    pub(super) fn boot(
-        &mut self,
-        mut usb: RecoveryUsb,
-        diagnostic: bool,
-    ) -> Result<Option<anyhow::Error>> {
+    pub(super) fn boot(&mut self, mut usb: RecoveryUsb) -> Result<Option<anyhow::Error>> {
         ensure!(
             usb.info.mode == Mode::Dfu,
             "restore must start in ROM DFU mode"
@@ -283,7 +212,7 @@ impl ContextState {
             .context("personalizing initial Ap,LocalPolicy for iBoot")?;
             self.send_component(&mut usb, "Ap,LocalPolicy", Some(&local))?;
             dfu::command(&mut usb, "lpolrestore", false)?;
-            self.send_iboot_firmware(&mut usb, true, diagnostic)?;
+            self.send_iboot_firmware(&mut usb, true)?;
         }
         self.send_component(&mut usb, "iBEC", None)?;
         if usb.info.mode == Mode::Recovery {
@@ -291,7 +220,7 @@ impl ContextState {
         }
         drop(usb);
         let mut usb = wait_recovery(self.device.ecid, Some(Mode::Recovery))?;
-        self.send_iboot_firmware(&mut usb, false, diagnostic)?;
+        self.send_iboot_firmware(&mut usb, false)?;
         self.send_component(&mut usb, "RestoreRamDisk", None)?;
         dfu::command(&mut usb, "ramdisk", false)?;
         std::thread::sleep(Duration::from_secs(2));
@@ -309,10 +238,9 @@ impl ContextState {
         &mut self,
         usb: &mut RecoveryUsb,
         stage1: bool,
-        diagnostic: bool,
     ) -> Result<()> {
         eprintln!("Preparing iBoot stage {}", if stage1 { 1 } else { 2 });
-        for step in iboot_stage(&self.identity, stage1, diagnostic)? {
+        for step in iboot_stage(&self.identity, stage1)? {
             match step {
                 IBootStep::Component(name) => {
                     self.send_component(usb, &name, None)?;

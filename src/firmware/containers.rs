@@ -2,7 +2,7 @@
 use crate::wire;
 use anyhow::{Context, Result, ensure};
 use plist::Value;
-use std::{collections::HashSet, io::Cursor};
+use std::{collections::HashSet, io::Cursor, ops::Range};
 
 /// Baobab's plist bundle contains a firmware digest rather than a hash of the
 /// serialized container. Matching metadata is not payload digest verification.
@@ -24,7 +24,15 @@ pub fn tcon_metadata_matches(bytes: &[u8], digest: &[u8]) -> Result<bool> {
     Ok(false)
 }
 
-fn ftab_rows(bytes: &[u8]) -> Result<&[u8]> {
+struct FtabEntry {
+    tag: [u8; 4],
+    range: Range<u64>,
+    padding: u32,
+}
+
+/// Validate the complete index before either hashing ranges or copying payloads.
+/// Payload bytes may be absent from a streaming prefix.
+fn ftab_index(bytes: &[u8], length: u64) -> Result<Vec<FtabEntry>> {
     ensure!(
         bytes.len() >= 48 && &bytes[36..40] == b"ftab",
         "invalid FTAB header"
@@ -32,7 +40,30 @@ fn ftab_rows(bytes: &[u8]) -> Result<&[u8]> {
     let count = u32::from_le_bytes(bytes[40..44].try_into()?) as usize;
     ensure!(count <= 65536, "too many FTAB entries");
     let end = 48 + count * 16;
-    bytes.get(48..end).context("truncated FTAB index")
+    let rows = bytes.get(48..end).context("truncated FTAB index")?;
+    let mut entries = Vec::with_capacity(count);
+    let mut tags = HashSet::new();
+    for row in rows.chunks_exact(16) {
+        let tag = row[..4].try_into()?;
+        let offset = u64::from(u32::from_le_bytes(row[4..8].try_into()?));
+        let size = u64::from(u32::from_le_bytes(row[8..12].try_into()?));
+        ensure!(
+            offset >= end as u64 && offset + size <= length && tags.insert(tag),
+            "invalid or duplicate FTAB entry"
+        );
+        entries.push(FtabEntry {
+            tag,
+            range: offset..offset + size,
+            padding: u32::from_le_bytes(row[12..16].try_into()?),
+        });
+    }
+    let mut ranges: Vec<_> = entries.iter().map(|entry| &entry.range).collect();
+    ranges.sort_unstable_by_key(|range| (range.start, range.end));
+    ensure!(
+        ranges.windows(2).all(|w| w[0].end <= w[1].start),
+        "overlapping FTAB entries"
+    );
+    Ok(entries)
 }
 
 /// Byte ranges hashed by BuildManifest inside FTAB and UARP containers.
@@ -49,17 +80,11 @@ fn payload_ranges_inner(
     ensure!(depth <= 4, "firmware containers nested too deeply");
     let mut ranges = vec![];
     if prefix.get(36..40) == Some(b"ftab") {
-        let rows = ftab_rows(prefix)?;
-        let end = 48 + rows.len();
-        for row in rows.chunks_exact(16) {
-            let offset = u64::from(u32::from_le_bytes(row[4..8].try_into()?));
-            let size = u64::from(u32::from_le_bytes(row[8..12].try_into()?));
-            ensure!(
-                offset >= end as u64 && offset + size <= length,
-                "FTAB payload outside file"
-            );
-            ranges.push(offset..offset + size);
-        }
+        ranges.extend(
+            ftab_index(prefix, length)?
+                .into_iter()
+                .map(|entry| entry.range),
+        );
     } else if matches!(prefix.get(..8), Some([0, 0, 0, 2 | 3, 0, 0, 0, 44])) {
         ensure!(prefix.len() >= 44, "truncated UARP header");
         let header = u32::from_be_bytes(prefix[4..8].try_into()?) as usize;
@@ -121,38 +146,19 @@ pub struct Ftab {
 }
 impl Ftab {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        let rows = ftab_rows(bytes)?;
-        let index_end = 48 + rows.len();
-        let mut entries = Vec::new();
-        let mut tags = HashSet::new();
-        let mut ranges = Vec::new();
-        for entry in rows.chunks_exact(16) {
-            let tag: [u8; 4] = entry[..4].try_into()?;
-            let offset = u32::from_le_bytes(entry[4..8].try_into()?) as usize;
-            let size = u32::from_le_bytes(entry[8..12].try_into()?) as usize;
-            let end = offset.checked_add(size).context("FTAB entry overflow")?;
-            ensure!(
-                offset >= index_end && end <= bytes.len() && tags.insert(tag),
-                "invalid or duplicate FTAB entry"
-            );
-            ranges.push((offset, end));
-            entries.push((
-                tag,
-                &bytes[offset..end],
-                u32::from_le_bytes(entry[12..16].try_into()?),
-            ));
-        }
-        ranges.sort_unstable();
-        ensure!(
-            ranges.windows(2).all(|w| w[0].1 <= w[1].0),
-            "overlapping FTAB entries"
-        );
+        let entries = ftab_index(bytes, bytes.len() as u64)?;
         Ok(Self {
             header: bytes[..48].try_into()?,
             // Validate the entire index before copying any firmware payload.
             entries: entries
                 .into_iter()
-                .map(|(tag, data, padding)| (tag, data.to_vec(), padding))
+                .map(|entry| {
+                    (
+                        entry.tag,
+                        bytes[entry.range.start as usize..entry.range.end as usize].to_vec(),
+                        entry.padding,
+                    )
+                })
                 .collect(),
         })
     }

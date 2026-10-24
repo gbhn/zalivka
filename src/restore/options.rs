@@ -5,6 +5,11 @@ use crate::{
 use anyhow::Result;
 use plist::{Dictionary, Value};
 
+// Compatibility value used by idevicerestore's macOS path. Its formula is
+// unknown upstream too; preserve it until a Mac-specific calculation is verified.
+// https://cgit.libimobiledevice.org/idevicerestore.git/tree/src/restore.c?id=45145e9fdc8458022c61a4b87bd029b866d5bcdc
+const MACOS_RECOVERY_PARTITION_MIB: u64 = 58201;
+
 pub fn supported_data_types() -> Value {
     let mut types = async_data_types();
     // This is the protocol vocabulary, including field names and legacy types.
@@ -196,8 +201,10 @@ pub fn options(id: &Identity) -> Result<Value> {
             "AuthInstallRecoveryOSVariant".into(),
             id.info("MacOSVariant")?.clone(),
         );
-        // Units are MiB, matching restored's recoveryOS partition option.
-        d.insert("recoveryOSPartitionSize".into(), 58201u64.into());
+        d.insert(
+            "recoveryOSPartitionSize".into(),
+            MACOS_RECOVERY_PARTITION_MIB.into(),
+        );
         if let Ok(v) = id.info("MinimumSystemPartition") {
             d.insert("SystemPartitionSize".into(), v.clone());
         }

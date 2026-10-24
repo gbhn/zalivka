@@ -36,6 +36,31 @@ fn environment_policy_is_scheme_specific_and_invalid_config_does_not_bypass() {
 }
 
 #[test]
+fn tunnel_destination_selects_the_same_environment_and_windows_proxy() {
+    let read = |name: &str| match name {
+        "HTTP_PROXY" => Some("http://web:8080".to_owned()),
+        "HTTPS_PROXY" => Some("http://secure:3128".to_owned()),
+        _ => None,
+    };
+    for (port, expected) in [(80, "web"), (443, "secure"), (5223, "secure")] {
+        let uri = target_uri("example.apple.com", port).unwrap();
+        assert_eq!(uri.host(), Some("example.apple.com"));
+        assert_eq!(uri.port_u16(), Some(port));
+        assert_eq!(
+            environment_proxy(&uri, read).unwrap().unwrap().host(),
+            expected
+        );
+        assert_eq!(
+            from_windows_list(&uri, "http=web:8080;https=secure:3128", "")
+                .unwrap()
+                .unwrap()
+                .host(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn windows_proxy_list_selects_destination_scheme_and_transport() {
     let uri: Uri = "https://gs.apple.com/TSS/controller?action=2"
         .parse()
@@ -153,41 +178,45 @@ fn accept(listener: TcpListener) -> TcpStream {
 
 #[test]
 fn fdr_connect_tunnel_preserves_opaque_bytes_and_buffered_reply() {
-    let listener = listener();
-    let proxy = Proxy::new(&format!(
-        "http://user:pass@{}",
-        listener.local_addr().unwrap()
-    ))
-    .unwrap();
-    let server = thread::spawn(move || {
-        let mut stream = accept(listener);
-        let mut headers = Vec::new();
-        while !headers.ends_with(b"\r\n\r\n") {
-            let mut byte = [0];
-            stream.read_exact(&mut byte).unwrap();
-            headers.push(byte[0]);
-            assert!(headers.len() < 65536);
-        }
-        let headers = String::from_utf8(headers).unwrap();
-        assert!(headers.starts_with("CONNECT does-not-resolve.invalid:443 HTTP/1.1\r\n"));
-        assert!(headers.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
-        stream
-            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n\x16\x03\x03\x00\x02")
-            .unwrap();
+    for port in [80, 443] {
+        let listener = listener();
+        let proxy = Proxy::new(&format!(
+            "http://user:pass@{}",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let mut stream = accept(listener);
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                headers.push(byte[0]);
+                assert!(headers.len() < 65536);
+            }
+            let headers = String::from_utf8(headers).unwrap();
+            assert!(headers.starts_with(&format!(
+                "CONNECT does-not-resolve.invalid:{port} HTTP/1.1\r\n"
+            )));
+            assert!(headers.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n\x16\x03\x03\x00\x02")
+                .unwrap();
+            let mut bytes = [0; 5];
+            stream.read_exact(&mut bytes).unwrap();
+            assert_eq!(bytes, [0x16, 3, 1, 0, 0]);
+        });
+        let mut tunnel = connect_via(
+            &target_uri("does-not-resolve.invalid", port).unwrap(),
+            Some(proxy),
+        )
+        .unwrap();
         let mut bytes = [0; 5];
-        stream.read_exact(&mut bytes).unwrap();
-        assert_eq!(bytes, [0x16, 3, 1, 0, 0]);
-    });
-    let mut tunnel = connect_via(
-        &"https://does-not-resolve.invalid/".parse().unwrap(),
-        Some(proxy),
-    )
-    .unwrap();
-    let mut bytes = [0; 5];
-    tunnel.read_exact(&mut bytes).unwrap();
-    assert_eq!(bytes, [0x16, 3, 3, 0, 2]);
-    tunnel.write_all(&[0x16, 3, 1, 0, 0]).unwrap();
-    server.join().unwrap();
+        tunnel.read_exact(&mut bytes).unwrap();
+        assert_eq!(bytes, [0x16, 3, 3, 0, 2]);
+        tunnel.write_all(&[0x16, 3, 1, 0, 0]).unwrap();
+        server.join().unwrap();
+    }
 }
 
 #[test]

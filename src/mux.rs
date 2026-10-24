@@ -140,6 +140,11 @@ impl Session {
                 Instant::now() < deadline,
                 "USB mux version handshake timed out"
             );
+            if let Some(ready) = link.usb.input_ready() {
+                ready.wait(Duration::from_millis(1))?;
+            } else {
+                yield_link(false);
+            }
         };
         let response = decode_packet(&packet, 0)?;
         ensure!(
