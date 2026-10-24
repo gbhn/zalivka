@@ -97,12 +97,23 @@ fn legacy_request(
     parameters.insert("ApProductionMode".into(), true.into());
     parameters.insert("ApSecurityMode".into(), true.into());
     let mut request = tss::host_fields();
+    let prefix = match updater {
+        "SE" => Some("SE,"),
+        "AppleTCON" => Some("Baobab,"),
+        "AppleTypeCRetimer" => Some("Timer,"),
+        "Rose" => Some("Rap,"),
+        "T200" => Some("BMU,"),
+        _ => None,
+    };
+    if prefix.is_some() || matches!(updater, "Cryptex1" | "Cryptex1LocalPolicy") {
+        let ticket = legacy_ticket(updater, info, arguments, response_tags)?;
+        request.insert(format!("@{ticket}"), true.into());
+        if prefix.is_some() {
+            request.insert("@BBTicket".into(), true.into());
+        }
+    }
     match updater {
         "SE" => {
-            request.insert("@BBTicket".into(), true.into());
-            if wire::get(arguments, &["DeviceGeneratedRequest", "@SE2,Ticket"]).is_err() {
-                request.insert("@SE,Ticket".into(), true.into());
-            }
             for key in ["SE,ChipID", "SE,ID", "SE,Nonce", "SE,RootKeyIdentifier"] {
                 request.insert(
                     key.into(),
@@ -111,42 +122,6 @@ fn legacy_request(
                         .with_context(|| format!("missing {key}"))?
                         .clone(),
                 );
-            }
-            components(&mut request, id, "SE,", &parameters)?;
-            let is_dev = parameters
-                .get("SE,IsDev")
-                .and_then(Value::as_boolean)
-                .unwrap_or(false);
-            for (key, value) in &mut request {
-                if key.starts_with("SE,")
-                    && let Some(component) = value.as_dictionary_mut()
-                {
-                    let keys = if is_dev {
-                        ["ProductionCMAC", "ProductionUpdatePayloadHash"]
-                    } else {
-                        ["DevelopmentCMAC", "DevelopmentUpdatePayloadHash"]
-                    };
-                    for key in keys {
-                        component.remove(key);
-                    }
-                }
-            }
-        }
-        "AppleTCON" => {
-            request.insert("@BBTicket".into(), true.into());
-            request.insert("@Baobab,Ticket".into(), true.into());
-            copy_prefix(&mut request, &parameters, "Baobab,");
-            components(&mut request, id, "Baobab,", &parameters)?;
-            let production = parameters
-                .get("Baobab,ProductionMode")
-                .and_then(Value::as_boolean)
-                .unwrap_or(false);
-            for (key, value) in &mut request {
-                if key.starts_with("Baobab,")
-                    && let Some(component) = value.as_dictionary_mut()
-                {
-                    component.insert("EPRO".into(), production.into());
-                }
             }
         }
         "AppleTypeCRetimer" => {
@@ -157,8 +132,6 @@ fn legacy_request(
                 tag <= 255 && ticket_name.starts_with("Timer,"),
                 "invalid retimer tag/ticket"
             );
-            request.insert("@BBTicket".into(), true.into());
-            request.insert(format!("@{ticket_name}"), true.into());
             let hardware = wire::dictionary(wire::get(item, &["HardwareID"])?)?;
             for (target, source) in [
                 ("ChipID", "ChipID"),
@@ -177,27 +150,14 @@ fn legacy_request(
             if let Some(ap) = info.get("APInfo").and_then(Value::as_dictionary) {
                 parameters.extend(ap.clone());
             }
-            copy_prefix(&mut request, &parameters, "Timer,");
-            components(&mut request, id, "Timer,", &parameters)?;
-        }
-        "Rose" => {
-            request.insert("@BBTicket".into(), true.into());
-            request.insert("@Rap,Ticket".into(), true.into());
-            copy_prefix(&mut request, &parameters, "Rap,");
-            components(&mut request, id, "Rap,", &parameters)?;
         }
         "T200" => {
-            request.insert("@BBTicket".into(), true.into());
-            request.insert("@BMU,Ticket".into(), true.into());
-            if let Some(board) = parameters.get("BMU,BoardID") {
-                request.insert("BMU,BoardID".into(), board.clone());
-            }
+            wire::copy_keys(&mut request, &parameters, &["BMU,BoardID"]);
             for key in ["ChipID", "Nonce", "ProductionMode", "UniqueID"] {
                 if let Some(value) = parameters.get(key) {
                     request.insert(format!("BMU,{key}"), value.clone());
                 }
             }
-            components(&mut request, id, "BMU,", &parameters)?;
         }
         "Cryptex1" | "Cryptex1LocalPolicy" => {
             if let Ok(generated) = wire::get(arguments, &["DeviceGeneratedRequest"]) {
@@ -222,7 +182,6 @@ fn legacy_request(
                 }
             }
             if updater == "Cryptex1LocalPolicy" {
-                request.insert("@ApImg4Ticket".into(), true.into());
                 wire::copy_keys(
                     &mut request,
                     &parameters,
@@ -237,7 +196,6 @@ fn legacy_request(
                     ],
                 );
             } else {
-                request.insert("@Cryptex1,Ticket".into(), true.into());
                 copy_prefix(&mut request, &parameters, "Cryptex1");
             }
             ensure!(
@@ -245,12 +203,55 @@ fn legacy_request(
                 "Cryptex updater requested an unexpected raw FirmwareData payload"
             );
         }
+        "AppleTCON" | "Rose" => {}
         _ => {
             let generated = wire::dictionary(wire::get(arguments, &["DeviceGeneratedRequest"])?)?;
             ensure!(
                 !generated.is_empty(),
                 "empty device-generated firmware request"
             );
+        }
+    }
+    if let Some(prefix) = prefix {
+        if !matches!(updater, "SE" | "T200") {
+            copy_prefix(&mut request, &parameters, prefix);
+        }
+        for (name, value) in id.manifest()? {
+            if name.starts_with(prefix) {
+                request.insert(
+                    name.clone(),
+                    Value::Dictionary(tss::component_request(value, &parameters)?),
+                );
+            }
+        }
+        for (name, value) in &mut request {
+            if !name.starts_with(prefix) {
+                continue;
+            }
+            let Some(component) = value.as_dictionary_mut() else {
+                continue;
+            };
+            match updater {
+                "SE" => {
+                    let keys =
+                        if parameters.get("SE,IsDev").and_then(Value::as_boolean) == Some(true) {
+                            ["ProductionCMAC", "ProductionUpdatePayloadHash"]
+                        } else {
+                            ["DevelopmentCMAC", "DevelopmentUpdatePayloadHash"]
+                        };
+                    for key in keys {
+                        component.remove(key);
+                    }
+                }
+                "AppleTCON" => {
+                    let production = parameters
+                        .get("Baobab,ProductionMode")
+                        .and_then(Value::as_boolean)
+                        .unwrap_or(false);
+                    component.insert("EPRO".into(), production.into());
+                }
+                _ => {}
+            }
         }
     }
     if let Ok(generated) = wire::get(arguments, &["DeviceGeneratedRequest"]) {
@@ -338,7 +339,20 @@ fn legacy_response_tags(
     info: &Dictionary,
     arguments: &Value,
 ) -> Result<Vec<String>> {
-    let ticket = match updater {
+    let mut tags = vec![legacy_ticket(updater, info, arguments, &[])?.to_owned()];
+    if !matches!(updater, "Cryptex1" | "Cryptex1LocalPolicy") {
+        tags.push("FirmwareData".into());
+    }
+    Ok(tags)
+}
+
+fn legacy_ticket<'a>(
+    updater: &str,
+    info: &'a Dictionary,
+    arguments: &Value,
+    response_tags: &[String],
+) -> Result<&'a str> {
+    Ok(match updater {
         "SE" if wire::get(arguments, &["DeviceGeneratedRequest", "@SE2,Ticket"]).is_ok() => {
             "SE2,Ticket"
         }
@@ -348,14 +362,9 @@ fn legacy_response_tags(
         "T200" => "BMU,Ticket",
         "Cryptex1" => "Cryptex1,Ticket",
         "Cryptex1LocalPolicy" => "ApImg4Ticket",
-        "AppleTypeCRetimer" => wire::string(retimer_info(info, &[])?, &["TicketName"])?,
+        "AppleTypeCRetimer" => wire::string(retimer_info(info, response_tags)?, &["TicketName"])?,
         _ => anyhow::bail!("{updater} has no device-generated ResponseTags"),
-    };
-    let mut tags = vec![ticket.to_owned()];
-    if !matches!(updater, "Cryptex1" | "Cryptex1LocalPolicy") {
-        tags.push("FirmwareData".into());
-    }
-    Ok(tags)
+    })
 }
 
 fn retimer_info<'a>(info: &'a Dictionary, response_tags: &[String]) -> Result<&'a Value> {
@@ -426,21 +435,4 @@ fn copy_prefix(request: &mut Dictionary, parameters: &Dictionary, prefix: &str) 
             .filter(|(key, _)| key.starts_with(prefix))
             .map(|(key, value)| (key.clone(), value.clone())),
     );
-}
-fn components(
-    request: &mut Dictionary,
-    id: &Identity,
-    prefix: &str,
-    parameters: &Dictionary,
-) -> Result<()> {
-    for (key, value) in id.manifest()? {
-        if !key.starts_with(prefix) {
-            continue;
-        }
-        request.insert(
-            key.clone(),
-            Value::Dictionary(tss::component_request(value, parameters)?),
-        );
-    }
-    Ok(())
 }

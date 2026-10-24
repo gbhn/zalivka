@@ -51,6 +51,40 @@ fn automatic_retry_survives_http_and_body_failures_in_one_invocation() {
 }
 
 #[test]
+fn retry_budget_is_shared_by_http_errors_and_interrupted_bodies() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("retry.ipsw");
+    let part = directory.path().join("retry.ipsw.part");
+    std::fs::write(&part, b"firmware").unwrap();
+    let (url, server) = firmware_server(vec![
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        "HTTP/1.1 206 Partial Content\r\nContent-Length: 8\r\nContent-Range: bytes 8-15/16\r\nConnection: close\r\n\r\n pay".into(),
+    ]);
+    let agent = agent_with_body_timeout(None, ureq::tls::RootCerts::WebPki);
+    let result = download_from(
+        &destination,
+        &Sha256::digest(b"firmware payload"),
+        1,
+        |offset| {
+            let mut response = send_http(&agent, &firmware_request(&url, offset)?)?;
+            if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+                // A transient status takes precedence over unusable body metadata.
+                response
+                    .headers_mut()
+                    .insert("content-length", "invalid".parse()?);
+            }
+            Ok(response)
+        },
+    );
+    assert!(result.is_err());
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(part).unwrap(), b"firmware pay");
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|r| r.contains("range: bytes=8-\r\n")));
+}
+
+#[test]
 fn firmware_download_resumes_after_disconnect_and_verifies_the_entire_file() {
     for expected in [
         sha1::Sha1::digest(b"firmware payload").to_vec(),

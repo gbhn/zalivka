@@ -18,7 +18,11 @@ const FILE_DATA_CHUNK: usize = 8192;
 pub(super) enum ImagePrefix {
     Collecting(Vec<u8>),
     Plain,
-    Aea(Option<Box<crate::aea::PublicFcs>>),
+    Aea,
+    Public {
+        fcs: Box<crate::aea::PublicFcs>,
+        key: Option<[u8; 32]>,
+    },
 }
 
 impl ImagePrefix {
@@ -37,8 +41,8 @@ impl ImagePrefix {
         } else {
             match crate::aea::PublicFcs::from_prefix(prefix)? {
                 crate::aea::Prefix::Incomplete => return Ok(false),
-                crate::aea::Prefix::Unsupported => Self::Aea(None),
-                crate::aea::Prefix::Public(fcs) => Self::Aea(Some(fcs)),
+                crate::aea::Prefix::Unsupported => Self::Aea,
+                crate::aea::Prefix::Public(fcs) => Self::Public { fcs, key: None },
             }
         };
         Ok(true)
@@ -48,17 +52,12 @@ impl ImagePrefix {
         match self {
             Self::Collecting(prefix) => prefix.starts_with(b"AEA1"),
             Self::Plain => false,
-            Self::Aea(_) => true,
+            Self::Aea | Self::Public { .. } => true,
         }
     }
 
-    fn response(
-        &self,
-        request: &Value,
-        assets: &net::AssetClient,
-        key: &mut Option<[u8; 32]>,
-    ) -> Result<Value> {
-        if let Self::Aea(Some(fcs)) = self
+    fn response(&mut self, request: &Value, assets: &net::AssetClient) -> Result<Value> {
+        if let Self::Public { fcs, key } = self
             && net::wrapped_key_request(request)?
         {
             let archive_key = if let Some(key) = *key {
@@ -94,10 +93,9 @@ pub(super) struct FileDataWriter<'a> {
     pub(super) file_data: Value,
     pub(super) pending: Vec<u8>,
     pub(super) pending_payload: u64,
-    pub(super) first: bool,
     pub(super) prefix: ImagePrefix,
     pub(super) key_requests: usize,
-    pub(super) public_key: Option<[u8; 32]>,
+    failed: bool,
 }
 impl<'a> FileDataWriter<'a> {
     pub(super) fn new(
@@ -116,14 +114,14 @@ impl<'a> FileDataWriter<'a> {
             file_data: wire::dict([("FileData", Value::Data(Vec::with_capacity(FILE_DATA_CHUNK)))]),
             pending: Vec::with_capacity(FILE_DATA_BATCH + FILE_DATA_CHUNK),
             pending_payload: 0,
-            first: true,
             prefix: ImagePrefix::Collecting(Vec::new()),
             key_requests: 0,
-            public_key: None,
+            failed: false,
         }
     }
     fn write_chunk(&mut self, data: &[u8]) -> Result<usize> {
         let started = Instant::now();
+        let first = self.profile.bytes == 0;
         let n = data.len().min(FILE_DATA_CHUNK);
         let header_ready = self.prefix.observe(&data[..n])?;
         // Reuse the dictionary and payload allocation, and serialize straight
@@ -141,36 +139,33 @@ impl<'a> FileDataWriter<'a> {
         // Preserve 8-KiB plist frames, but amortize synchronous USB writes.
         // Deliver the prefix immediately so a device waiting for an AEA key
         // can make its request before the next batch has accumulated.
-        if self.first || matches!(self.prefix, ImagePrefix::Collecting(_)) || header_ready {
+        if first || matches!(self.prefix, ImagePrefix::Collecting(_)) || header_ready {
             self.flush_pending(true)?;
         } else if self.pending.len() >= FILE_DATA_BATCH {
             // Retain less than one mux packet for the next batch. Plist frames
             // may span mux packets; prefix/key exchanges still flush in full.
             self.flush_pending(false)?;
         }
-        if self.prefix.is_aea()
-            && (self.first || header_ready || self.stream.has_pending_input()?)
-        {
-            self.flush_pending(true)?;
-            self.progress.report();
-            let timeout = self.stream.read_timeout();
-            self.stream.set_read_timeout(Duration::from_secs(3));
-            let assets = self.assets;
-            let prefix = &self.prefix;
-            let key = &mut self.public_key;
-            let started = Instant::now();
-            let result = key_exchange(
-                self.stream,
-                self.session,
-                &mut self.key_requests,
-                |request| prefix.response(request, assets, key),
-            );
-            self.profile.key_exchange += started.elapsed();
-            self.stream.set_read_timeout(timeout);
-            result?;
+        if self.prefix.is_aea() && (first || header_ready || self.stream.has_pending_input()?) {
+            self.exchange_keys()?;
         }
-        self.first = false;
         Ok(n)
+    }
+    fn exchange_keys(&mut self) -> Result<()> {
+        self.flush_pending(true)?;
+        self.progress.report();
+        let timeout = self.stream.read_timeout();
+        self.stream.set_read_timeout(Duration::from_secs(3));
+        let started = Instant::now();
+        let result = key_exchange(
+            self.stream,
+            self.session,
+            &mut self.key_requests,
+            |request| self.prefix.response(request, self.assets),
+        );
+        self.profile.key_exchange += started.elapsed();
+        self.stream.set_read_timeout(timeout);
+        result
     }
     fn flush_pending(&mut self, complete: bool) -> Result<()> {
         let n = if complete {
@@ -202,6 +197,7 @@ impl<'a> FileDataWriter<'a> {
         Ok(())
     }
     pub(super) fn finish(mut self) -> Result<()> {
+        ensure!(!self.failed, "file transfer already failed");
         self.flush_pending(true)?;
         let started = Instant::now();
         let sent = wire::send(self.stream, &wire::dict([("FileDataDone", true.into())]));
@@ -224,16 +220,6 @@ pub(super) fn key_exchange(
         ensure!(*key_requests <= 64, "too many AEA key requests");
         let kind = wire::string(&request, &["MsgType"])
             .or_else(|_| wire::string(&request, &["DataType"]))?;
-        ensure!(
-            matches!(
-                kind,
-                "URLAsset"
-                    | "StreamedImageDecryptionKey"
-                    | "DataRequestMsg"
-                    | "AsyncDataRequestMsg"
-            ),
-            "unexpected AEA message {kind}"
-        );
         let data_type = if matches!(kind, "DataRequestMsg" | "AsyncDataRequestMsg") {
             wire::string(&request, &["DataType"])?
         } else {
@@ -266,14 +252,25 @@ pub(super) fn key_exchange(
 }
 impl Write for FileDataWriter<'_> {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.failed {
+            return Err(std::io::Error::other("file transfer already failed"));
+        }
         if data.is_empty() {
             return Ok(0);
         }
-        self.write_chunk(data).map_err(std::io::Error::other)
+        let result = self.write_chunk(data);
+        self.failed = result.is_err();
+        result.map_err(std::io::Error::other)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        self.flush_pending(true).map_err(std::io::Error::other)?;
-        self.stream.flush()
+        if self.failed {
+            return Err(std::io::Error::other("file transfer already failed"));
+        }
+        let result = self
+            .flush_pending(true)
+            .and_then(|()| Ok(self.stream.flush()?));
+        self.failed = result.is_err();
+        result.map_err(std::io::Error::other)
     }
 }
 pub(super) fn send_file_data(

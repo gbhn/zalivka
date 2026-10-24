@@ -702,7 +702,7 @@ fn aea_key_request_flushes_retained_plist_tail_before_reading_request() {
     assert!(!writer.pending.is_empty());
     // Another service pumps a late request into this channel. Treat the AEA
     // prefix as already negotiated; no actual key client/network is involved.
-    writer.prefix = ImagePrefix::Aea(None);
+    writer.prefix = ImagePrefix::Aea;
     let _other = session.connect(23456).unwrap();
     assert!(writer.stream.has_pending_input().unwrap());
     // Reject an unrelated request after flushing, so the test observes exactly
@@ -711,7 +711,7 @@ fn aea_key_request_flushes_retained_plist_tail_before_reading_request() {
     assert!(
         error
             .to_string()
-            .contains("unexpected AEA message StatusMsg")
+            .contains("unexpected AEA data type StatusMsg")
     );
     assert!(writer.pending.is_empty());
     assert_eq!(writer.profile.bytes, image.len() as u64 + 4);
@@ -724,28 +724,36 @@ fn aea_key_request_flushes_retained_plist_tail_before_reading_request() {
         .unwrap();
     }
     assert_eq!(bytes_on(&output, 1234), expected);
+    let count = output.lock().unwrap().len();
+    assert!(writer.write_all(b"retry").is_err());
+    assert!(writer.flush().is_err());
+    assert!(writer.finish().is_err());
+    assert_eq!(output.lock().unwrap().len(), count);
 }
 
 #[test]
 fn file_data_failed_batch_is_not_replayed_or_followed_by_done() {
-    let (session, output) = file_data_session(Duration::ZERO, Some(3));
-    let mut stream = session.connect(1234).unwrap();
-    let assets = net::AssetClient::default();
-    let mut writer = FileDataWriter::new(&mut stream, &session, &assets, "test", None);
-    // First frame succeeds; the following batch fails on its second mux packet.
-    writer.write_all(&[0; 8192]).unwrap();
-    assert!(writer.write_all(&[0; FILE_DATA_BATCH]).is_err());
-    assert!(writer.pending.is_empty());
-    let count = output.lock().unwrap().len();
-    writer.flush().unwrap();
-    assert_eq!(output.lock().unwrap().len(), count);
-    drop(writer);
-    let bytes = bytes_on(&output, 1234);
-    assert!(
-        !bytes
-            .windows(b"FileDataDone".len())
-            .any(|part| part == b"FileDataDone")
-    );
+    // Cover both a failed first frame and a partially written batch. The first
+    // failure does not cancel the mux session, so the writer must prevent Done.
+    for fail_at in [1, 3] {
+        let (session, output) = file_data_session(Duration::ZERO, Some(fail_at));
+        let mut stream = session.connect(1234).unwrap();
+        let assets = net::AssetClient::default();
+        let mut writer = FileDataWriter::new(&mut stream, &session, &assets, "test", None);
+        assert!(writer.write_all(&[0; FILE_DATA_BATCH + 8192]).is_err());
+        assert!(writer.pending.is_empty());
+        let count = output.lock().unwrap().len();
+        assert!(writer.write_all(b"retry").is_err());
+        assert!(writer.flush().is_err());
+        assert!(writer.finish().is_err());
+        assert_eq!(output.lock().unwrap().len(), count);
+        let bytes = bytes_on(&output, 1234);
+        assert!(
+            !bytes
+                .windows(b"FileDataDone".len())
+                .any(|part| part == b"FileDataDone")
+        );
+    }
 }
 
 #[test]
@@ -904,8 +912,7 @@ fn restore_close_requires_peer_close_or_physical_usb_removal() {
     }
 }
 
-#[test]
-fn aea_public_key_reply_is_local_to_one_fragmented_image_transfer() {
+fn public_fcs_fixture() -> (Vec<u8>, [u8; 32]) {
     use base64::Engine;
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../fixtures/fcs-synthetic.json")).unwrap();
@@ -916,6 +923,33 @@ fn aea_public_key_reply_is_local_to_one_fragmented_image_transfer() {
         .unwrap()
         .try_into()
         .unwrap();
+    (prefix, key)
+}
+
+#[test]
+fn aea_fragmented_prefix_collects_metadata_before_caching_a_key() {
+    let (prefix, _) = public_fcs_fixture();
+    let (session, output) = file_data_session(Duration::ZERO, None);
+    let mut stream = session.connect(1234).unwrap();
+    let assets = net::AssetClient::default();
+    let mut writer = FileDataWriter::new(&mut stream, &session, &assets, "test", None);
+    writer.write_all(&prefix[..2]).unwrap();
+    assert!(matches!(&writer.prefix, ImagePrefix::Collecting(bytes) if bytes == &prefix[..2]));
+    for chunk in prefix[2..].chunks(7) {
+        writer.write_all(chunk).unwrap();
+    }
+    assert!(matches!(
+        writer.prefix,
+        ImagePrefix::Public { key: None, .. }
+    ));
+    assert_eq!(writer.key_requests, 0);
+    writer.finish().unwrap();
+    verify_file_data(&output, &prefix);
+}
+
+#[test]
+fn aea_public_key_reply_is_bound_to_one_image_transfer() {
+    let (prefix, key) = public_fcs_fixture();
     let mut frames = vec![];
     for index in 0..2 {
         let mut request = wire::dict([
@@ -952,7 +986,8 @@ fn aea_public_key_reply_is_local_to_one_fragmented_image_transfer() {
             version_packet(),
             tcp(0, 0x12, &[]),
             tcp(1, 0x10, &frames),
-            tcp_on(23456, 2, 0, 0x12, &[]),
+            tcp_on(23457, 2, 0, 0x12, &[]),
+            tcp_on(23456, 3, 0, 0x12, &[]),
         ]
         .into(),
         output: output.clone(),
@@ -961,15 +996,26 @@ fn aea_public_key_reply_is_local_to_one_fragmented_image_transfer() {
     let mut stream = session.connect(1234).unwrap();
     let assets = net::AssetClient::default();
     let mut writer = FileDataWriter::new(&mut stream, &session, &assets, "test", None);
-    // Simulate a key fetched and authenticated earlier in this transfer.
-    // The public metadata still has to be assembled from fragmented data.
-    writer.public_key = Some(key);
     writer.write_all(&prefix[..2]).unwrap();
-    // Do not attempt an exchange until the AEA header has been received.
-    // Network requests are not needed when this transfer's key is cached.
+    assert!(matches!(&writer.prefix, ImagePrefix::Collecting(bytes) if bytes == &prefix[..2]));
+    // Simulate already authenticated metadata and its key. A key can only be
+    // cached together with this image's public FCS metadata, never on its own.
+    let crate::aea::Prefix::Public(fcs) = crate::aea::PublicFcs::from_prefix(&prefix).unwrap()
+    else {
+        panic!("fixture has no public FCS metadata")
+    };
+    writer.prefix = ImagePrefix::Public {
+        fcs,
+        key: Some(key),
+    };
+    // A second channel receives the queued requests while the file continues.
+    let _other = session.connect(23457).unwrap();
     writer.write_all(&prefix[2..]).unwrap();
     assert_eq!(writer.key_requests, 2);
-    assert!(matches!(writer.prefix, ImagePrefix::Aea(Some(_))));
+    assert!(matches!(
+        writer.prefix,
+        ImagePrefix::Public { key: Some(_), .. }
+    ));
     let mut input = Cursor::new(bytes_on(&output, 1234));
     assert_eq!(
         wire::get(&wire::receive(&mut input).unwrap(), &["FileData"])
@@ -998,7 +1044,6 @@ fn aea_public_key_reply_is_local_to_one_fragmented_image_transfer() {
         assert_eq!(input.position(), input.get_ref().len() as u64);
     }
     let next_image = FileDataWriter::new(&mut stream, &session, &assets, "test", None);
-    assert!(next_image.public_key.is_none());
     assert!(matches!(next_image.prefix, ImagePrefix::Collecting(_)));
 }
 
@@ -1042,8 +1087,8 @@ fn aea_async_asset_replies_use_the_requested_ports_and_image_transfer_continues(
         &wire::dict([("FileData", Value::Data(prefix.to_vec()))]),
     )
     .unwrap();
-    writer.prefix = ImagePrefix::Aea(None);
-    writer.first = false;
+    writer.prefix = ImagePrefix::Aea;
+    writer.profile.bytes = prefix.len() as u64;
     let responses = [
         wire::dict([
             ("ResponseStatus", 200u64.into()),
