@@ -392,17 +392,11 @@ pub fn send_response(out: &mut impl Write, mut response: Value, arguments: &Valu
     let fields = response
         .as_dictionary_mut()
         .context("invalid updater response")?;
-    if size == 0
-        || fields
-            .get("FirmwareData")
-            .and_then(Value::as_data)
-            .is_none()
-    {
-        return wire::send(out, &wire::dict([("FirmwareResponseData", response)]));
-    }
-    let Value::Data(bytes) = fields.remove("FirmwareData").unwrap() else {
-        unreachable!()
+    let bytes = match fields.get_mut("FirmwareData") {
+        Some(Value::Data(bytes)) if size != 0 => std::mem::take(bytes),
+        _ => return wire::send(out, &wire::dict([("FirmwareResponseData", response)])),
     };
+    fields.remove("FirmwareData");
     wire::send(
         out,
         &wire::dict([

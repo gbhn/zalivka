@@ -304,15 +304,16 @@ impl ContextState {
     fn bootability(&mut self, out: &mut impl Write) -> Result<()> {
         let mut count = 0;
         for path in self.ipsw.files()? {
-            let name = if let Some(name) = path
-                .strip_prefix("BootabilityBundle/Restore/Bootability/")
-                .or_else(|| path.strip_prefix("BootabilityBundleV2/Restore/Bootability/"))
-            {
-                name.to_owned()
-            } else if path == "BootabilityBundle/Restore/Firmware/Bootability.dmg.trustcache"
-                || path == "BootabilityBundleV2/Restore/Firmware/Bootability.dmg.trustcache"
-            {
-                "Bootability.trustcache".to_owned()
+            let Some(relative) = path
+                .strip_prefix("BootabilityBundle/")
+                .or_else(|| path.strip_prefix("BootabilityBundleV2/"))
+            else {
+                continue;
+            };
+            let name = if let Some(name) = relative.strip_prefix("Restore/Bootability/") {
+                name
+            } else if relative == "Restore/Firmware/Bootability.dmg.trustcache" {
+                "Bootability.trustcache"
             } else {
                 continue;
             };
@@ -321,7 +322,7 @@ impl ContextState {
             }
             let mode = self.ipsw.unix_mode(&path)?;
             let size = self.ipsw.size(&path)?;
-            cpio_header(out, &name, mode, size)?;
+            cpio_header(out, name, mode, size)?;
             ensure!(
                 self.ipsw.stream(&path, out)? == size,
                 "truncated Bootability entry"
@@ -445,21 +446,16 @@ fn nor_data(ipsw: &mut Ipsw, id: &Identity, ticket: &Value, message: &Value) -> 
         .collect();
     names.sort_by_key(|n| !n.starts_with("iBoot"));
     let flash_v1 = wire::get(message, &["Arguments", "FlashVersion1"]).is_ok();
-    let mut images = if flash_v1 {
-        Value::Dictionary(Dictionary::new())
+    let images = if flash_v1 {
+        Value::Dictionary(personalized_images(ipsw, id, ticket, names.into_iter())?)
     } else {
-        Value::Array(Vec::new())
+        Value::Array(
+            names
+                .into_iter()
+                .map(|name| ipsw.personalized(id, name, ticket).map(Value::Data))
+                .collect::<Result<_>>()?,
+        )
     };
-    for name in names {
-        let data = Value::Data(ipsw.personalized(id, name, ticket)?);
-        match &mut images {
-            Value::Dictionary(named) => {
-                named.insert(name.into(), data);
-            }
-            Value::Array(images) => images.push(data),
-            _ => unreachable!(),
-        }
-    }
     let mut d = Dictionary::new();
     d.insert(
         "LlbImageData".into(),

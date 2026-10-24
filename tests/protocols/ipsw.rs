@@ -2,6 +2,33 @@ use super::*;
 use zalivka::ipsw::Behavior;
 
 #[test]
+fn oversized_components_are_rejected_from_zip_metadata_before_reading() {
+    let file = fixture(None, false);
+    let mut bytes = std::fs::read(file.path()).unwrap();
+    let name = b"Firmware/iBSS";
+    let offset = bytes
+        .windows(4)
+        .enumerate()
+        .find_map(|(offset, signature)| {
+            (signature == b"PK\x01\x02"
+                && bytes.get(offset + 46..offset + 46 + name.len()) == Some(name))
+            .then_some(offset)
+        })
+        .unwrap();
+    let size = (zalivka::ipsw::MAX_COMPONENT + 1) as u32;
+    bytes[offset + 24..offset + 28].copy_from_slice(&size.to_le_bytes());
+    std::fs::write(file.path(), bytes).unwrap();
+    let error = Ipsw::open(file.path())
+        .unwrap()
+        .read("Firmware/iBSS")
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("exceeds memory limit"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn full_ipsw_verification_checks_all_streams_and_manifest_digests() {
     for compression in [
         zip::CompressionMethod::Stored,

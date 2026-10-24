@@ -7,7 +7,9 @@ use std::{
 
 pub(crate) fn read_limited(reader: impl Read, limit: u64, error: &str) -> Result<Vec<u8>> {
     let mut data = Vec::new();
-    reader.take(limit + 1).read_to_end(&mut data)?;
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut data)?;
     ensure!(data.len() as u64 <= limit, "{error}");
     Ok(data)
 }
@@ -88,3 +90,7 @@ pub fn log_directory() -> Result<PathBuf> {
     std::fs::create_dir_all(&directory)?;
     Ok(directory)
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/storage.rs"]
+mod tests;

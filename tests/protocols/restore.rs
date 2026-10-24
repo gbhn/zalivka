@@ -928,24 +928,29 @@ fn system_image_metadata_requests_use_manifest_components_and_exact_file_keys() 
 }
 
 #[test]
-fn both_bootability_requests_stream_the_v2_archive_as_cpio() {
-    let file = fixture_compression(
-        None,
-        false,
-        &[
-            (
-                "BootabilityBundleV2/Restore/Bootability/test.bin",
-                b"bootability fixture",
-            ),
-            (
-                "BootabilityBundleV2/Restore/Firmware/Bootability.dmg.trustcache",
-                b"trustcache fixture",
-            ),
-        ],
-        zip::CompressionMethod::Stored,
-    );
+fn both_bootability_requests_stream_both_archive_versions_as_cpio() {
     let mut previous = None;
-    for kind in ["BootabilityBundle", "BootabilityBundleV2"] {
+    for (bundle, kind) in ["BootabilityBundle", "BootabilityBundleV2"]
+        .into_iter()
+        .flat_map(|bundle| ["BootabilityBundle", "BootabilityBundleV2"].map(|kind| (bundle, kind)))
+    {
+        let image = format!("{bundle}/Restore/Bootability/test.bin");
+        let trustcache = format!("{bundle}/Restore/Firmware/Bootability.dmg.trustcache");
+        let directory = format!("{bundle}/Restore/Bootability/");
+        let file = fixture_compression(
+            None,
+            false,
+            &[
+                (image.as_str(), b"bootability fixture"),
+                (trustcache.as_str(), b"trustcache fixture"),
+                (directory.as_str(), b""),
+                (
+                    "BootabilityBundleV20/Restore/Bootability/ignored",
+                    b"ignored",
+                ),
+            ],
+            zip::CompressionMethod::Stored,
+        );
         let mut state = restore_state(file.path());
         let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
         let session = Session::new(usb).unwrap();

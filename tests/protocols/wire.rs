@@ -81,3 +81,50 @@ fn binary_plist_and_optional_frames_preserve_framing() {
     assert!(wire::try_receive(&mut Timeout).unwrap().is_none());
     assert!(wire::try_receive(&mut Cursor::new(vec![0, 0])).is_err());
 }
+
+#[test]
+fn optional_plists_retry_interrupted_reads_and_preserve_partial_frame_timeouts() {
+    struct Interrupted {
+        input: Cursor<Vec<u8>>,
+        interrupt: bool,
+    }
+    impl Read for Interrupted {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.interrupt = !self.interrupt;
+            if self.interrupt {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            self.input.read(&mut out[..1])
+        }
+    }
+    let value = wire::dict([("MsgType", "StatusMsg".into()), ("Status", 0u64.into())]);
+    let mut bytes = Vec::new();
+    wire::send(&mut bytes, &value).unwrap();
+    assert_eq!(
+        wire::try_receive(&mut Interrupted {
+            input: Cursor::new(bytes.clone()),
+            interrupt: false,
+        })
+        .unwrap(),
+        Some(value)
+    );
+
+    struct Timeout;
+    impl Read for Timeout {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::TimedOut.into())
+        }
+    }
+    for received in [0, 1, 2, 3, 4, 8] {
+        let mut input = (&bytes[..received]).chain(Timeout);
+        let result = wire::try_receive(&mut input);
+        if received == 0 {
+            assert!(result.unwrap().is_none());
+        } else {
+            assert!(
+                result.is_err(),
+                "timeout after {received} bytes was ignored"
+            );
+        }
+    }
+}

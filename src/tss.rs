@@ -177,16 +177,13 @@ pub fn send_raw(request: &Value) -> Result<Value> {
 
 pub fn parse_response(data: &[u8]) -> Result<Value> {
     let text = std::str::from_utf8(data).context("TSS response is not UTF-8")?;
-    let header = text
-        .split_once("&REQUEST_STRING=")
-        .map_or(text, |(header, _)| header);
+    let response = text.split_once("&REQUEST_STRING=");
+    let header = response.map_or(text, |(header, _)| header);
     ensure!(
         header.split('&').any(|s| s == "STATUS=0"),
         "Apple refused personalization: {header}"
     );
-    let (_, plist) = text
-        .split_once("&REQUEST_STRING=")
-        .context("TSS response has no REQUEST_STRING")?;
+    let (_, plist) = response.context("TSS response has no REQUEST_STRING")?;
     let value =
         Value::from_reader(std::io::Cursor::new(plist.as_bytes())).context("invalid TSS plist")?;
     Ok(value)

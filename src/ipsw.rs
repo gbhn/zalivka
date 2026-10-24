@@ -99,6 +99,10 @@ impl Ipsw {
             .archive
             .by_name(path)
             .with_context(|| format!("missing IPSW component {path}"))?;
+        ensure!(
+            entry.size() <= MAX_COMPONENT,
+            "IPSW entry exceeds memory limit {MAX_COMPONENT}"
+        );
         crate::storage::read_limited(
             entry,
             MAX_COMPONENT,

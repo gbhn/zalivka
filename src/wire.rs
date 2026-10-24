@@ -101,12 +101,11 @@ fn send_frame(w: &mut impl Write, mut bytes: Vec<u8>) -> Result<()> {
 /// A timeout is optional only when no byte of the next frame has arrived.
 pub fn try_receive(r: &mut impl Read) -> Result<Option<Value>> {
     let mut prefix = [0; 4];
-    let n = match r.read(&mut prefix) {
+    match r.read_exact(&mut prefix[..1]) {
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Ok(None),
-        result => result?,
+        result => result.context("service disconnected during optional message read")?,
     };
-    ensure!(n > 0, "service disconnected during optional message read");
-    r.read_exact(&mut prefix[n..])?;
+    r.read_exact(&mut prefix[1..])?;
     receive_body(r, u32::from_be_bytes(prefix)).map(Some)
 }
 
@@ -132,12 +131,12 @@ pub fn receive_xml(r: &mut impl Read) -> Result<Value> {
     let mut buf = Vec::new();
     let mut byte = [0];
     loop {
+        ensure!(buf.len() < MAX_PLIST, "unframed XML too large");
         r.read_exact(&mut byte)?;
         buf.push(byte[0]);
         if buf.ends_with(b"</plist>") {
             break;
         }
-        ensure!(buf.len() <= MAX_PLIST, "unframed XML too large");
     }
     Value::from_reader(std::io::Cursor::new(buf)).context("decoding ASR plist")
 }

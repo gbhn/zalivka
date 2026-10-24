@@ -28,11 +28,11 @@ impl Job {
     ) -> Result<(Self, PathBuf)> {
         let directory = zalivka::storage::log_directory()?;
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let name = format!("{}-{}-{stamp}", action.command(), setup.ecid.trim());
+        let name = format!("{}-{stamp}", action.command());
         let path = directory.join(format!("{name}.log"));
-        let log = File::options().write(true).create_new(true).open(&path)?;
         let transcript = directory.join(format!("{name}.jsonl"));
         let args = setup.arguments(action, Some(&transcript))?;
+        let log = File::options().write(true).create_new(true).open(&path)?;
         let mut command = Command::new(std::env::current_exe()?);
         command
             .args(args)

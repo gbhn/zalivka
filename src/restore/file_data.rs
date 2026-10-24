@@ -8,7 +8,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use plist::Value;
 use std::{
-    io::{Cursor, Write},
+    io::Write,
     time::{Duration, Instant},
 };
 
@@ -283,6 +283,6 @@ pub(super) fn send_file_data(
     input: &[u8],
 ) -> Result<()> {
     let mut writer = FileDataWriter::new(out, session, assets, name, Some(input.len() as u64));
-    std::io::copy(&mut Cursor::new(input), &mut writer)?;
+    writer.write_all(input)?;
     writer.finish()
 }
