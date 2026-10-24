@@ -1,5 +1,5 @@
 use super::*;
-use std::ffi::OsString;
+use std::{ffi::OsString, fs::File};
 
 fn job(action: Action) -> Job {
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -9,19 +9,7 @@ fn job(action: Action) -> Job {
         .spawn()
         .unwrap();
     assert!(child.wait().unwrap().success());
-    Job {
-        id: 7,
-        action,
-        started: Instant::now(),
-        child,
-        log: tempfile::tempfile().unwrap(),
-        success: None,
-        readers: 2,
-        cancelled: false,
-        restore_completed: false,
-        internet_error: None,
-        preparing_internet: false,
-    }
+    Job::new(7, action, child, tempfile::tempfile().unwrap())
 }
 
 fn worker_line(event: progress::Event) -> String {
@@ -237,11 +225,9 @@ fn exited_worker_keeps_final_lines_until_both_readers_finish() {
     let log = tempfile::NamedTempFile::new().unwrap();
     let mut app = App::new();
     let ctx = egui::Context::default();
-    app.job = Some(Job {
-        id: 7,
-        log: log.reopen().unwrap(),
-        ..job(Action::Restore)
-    });
+    let mut operation = job(Action::Restore);
+    operation.log = log.reopen().unwrap();
+    app.job = Some(operation);
     app.poll(&ctx);
     assert_eq!(app.job.as_ref().unwrap().success, Some(true));
     assert!(app.notice.is_none());
@@ -276,7 +262,9 @@ fn exited_worker_keeps_final_lines_until_both_readers_finish() {
 #[test]
 fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
     let mut job = job(Action::Restore);
-    job.internet_error = Some("no network".into());
+    job.worker_event(progress::Event::InternetUnavailable {
+        error: "no network".into(),
+    });
     job.cancelled = true;
     for success in [false, true] {
         let notice = job.completion_notice(success, true);
@@ -309,7 +297,7 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
     let notice = job.completion_notice(true, true);
     assert_eq!(notice.detail, "no network");
     assert_eq!(notice.tone, Tone::Neutral);
-    job.internet_error = None;
+    job.worker_event(progress::Event::InternetReady);
     for action in [
         Action::Restore,
         Action::Revive,
@@ -352,7 +340,7 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
             progress: 50,
         },
     );
-    assert_eq!(app.fraction, Some(0.5));
+    assert_eq!(app.job.as_ref().unwrap().fraction, Some(0.5));
     send_worker(
         &mut app,
         progress::Event::OperationProgress {
@@ -360,14 +348,14 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
             progress: -1,
         },
     );
-    assert_eq!(app.fraction, None);
+    assert_eq!(app.job.as_ref().unwrap().fraction, None);
     send_worker(
         &mut app,
         progress::Event::Checkpoint {
             name: "update_firmware".into(),
         },
     );
-    assert_eq!(app.phase, "Обновление прошивки");
+    assert_eq!(app.job.as_ref().unwrap().phase, "Обновление прошивки");
     send_worker(&mut app, progress::Event::RestoreCompleted);
     send_worker(&mut app, progress::Event::InternetWaiting);
     assert!(app.job.as_ref().unwrap().can_stop());
@@ -375,7 +363,10 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
     assert!(!app.job.as_ref().unwrap().can_stop());
     send_worker(&mut app, progress::Event::InternetReady);
     assert!(app.job.as_ref().unwrap().can_stop());
-    assert_eq!(app.phase, "Интернет по USB · оставьте Zalivka открытой");
+    assert_eq!(
+        app.job.as_ref().unwrap().phase,
+        "Интернет по USB · оставьте Zalivka открытой"
+    );
     send_worker(
         &mut app,
         progress::Event::InternetUnavailable {
@@ -413,7 +404,17 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
         finished: true,
     };
     send_worker(&mut app, progress::Event::Transfer(update.clone()));
-    assert_eq!(app.transfer.as_ref().unwrap().update.fraction(), Some(1.0));
+    assert_eq!(
+        app.job
+            .as_ref()
+            .unwrap()
+            .transfer
+            .as_ref()
+            .unwrap()
+            .update
+            .fraction(),
+        Some(1.0)
+    );
     send_worker(
         &mut app,
         progress::Event::OperationProgress {
@@ -421,8 +422,8 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
             progress: 50,
         },
     );
-    assert!(app.transfer.is_none());
-    assert_eq!(app.fraction, Some(0.5));
+    assert!(app.job.as_ref().unwrap().transfer.is_none());
+    assert_eq!(app.job.as_ref().unwrap().fraction, Some(0.5));
     send_worker(&mut app, progress::Event::RestoreCompleted);
     send_worker(&mut app, progress::Event::InternetWaiting);
     send_worker(&mut app, progress::Event::InternetReady);
@@ -431,10 +432,13 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
         .send(Event::worker_output(7, line.clone(), false))
         .unwrap();
     app.poll(&egui::Context::default());
-    assert!(app.transfer.is_none());
-    assert!(app.fraction.is_none());
+    assert!(app.job.as_ref().unwrap().transfer.is_none());
+    assert!(app.job.as_ref().unwrap().fraction.is_none());
     assert!(app.job.as_ref().unwrap().can_stop());
-    assert_eq!(app.phase, "Интернет по USB · оставьте Zalivka открытой");
+    assert_eq!(
+        app.job.as_ref().unwrap().phase,
+        "Интернет по USB · оставьте Zalivka открытой"
+    );
     assert_eq!(app.logs.back(), Some(&line));
 }
 
@@ -463,6 +467,70 @@ fn saving_a_journal_preserves_full_log_and_does_not_overwrite_its_source() {
         .is_err()
     );
     assert_eq!(std::fs::read_to_string(target).unwrap(), "visible tail");
+}
+
+#[test]
+fn saving_a_journal_through_a_hard_link_preserves_the_active_source() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("active.log");
+    let destination = directory.path().join("export.log");
+    let mut active = File::options()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    active.write_all(b"complete log\n").unwrap();
+    std::fs::hard_link(&source, &destination).unwrap();
+
+    worker::save_log(destination.clone(), Some(&source), "tail").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&destination).unwrap(),
+        "complete log\n"
+    );
+    active.write_all(b"next event\n").unwrap();
+    active.seek(SeekFrom::Start(0)).unwrap();
+    let mut full = String::new();
+    active.read_to_string(&mut full).unwrap();
+    assert_eq!(full, "complete log\nnext event\n");
+    assert_eq!(std::fs::read_to_string(source).unwrap(), full);
+    assert_eq!(
+        std::fs::read_to_string(destination).unwrap(),
+        "complete log\n"
+    );
+}
+
+#[test]
+fn failed_network_preparation_releases_stop_and_clears_stale_progress() {
+    let mut app = App::new();
+    app.job = Some(job(Action::Restore));
+    assert!(app.job.as_mut().unwrap().stop().is_err());
+    assert!(!app.job.as_ref().unwrap().cancelled);
+    send_worker(&mut app, progress::Event::RestoreCompleted);
+    send_worker(&mut app, progress::Event::InternetPreparing);
+    assert!(!app.job.as_ref().unwrap().can_stop());
+    send_worker(
+        &mut app,
+        progress::Event::InternetUnavailable {
+            error: "UAC cancelled".into(),
+        },
+    );
+    let operation = app.job.as_ref().unwrap();
+    assert!(operation.can_stop());
+    assert_eq!(operation.phase, "Интернет по USB недоступен");
+    assert!(operation.transfer.is_none());
+    assert!(operation.fraction.is_none());
+    assert_eq!(
+        operation.completion_notice(true, false).detail,
+        "UAC cancelled"
+    );
+
+    send_worker(&mut app, progress::Event::InternetWaiting);
+    send_worker(&mut app, progress::Event::InternetReady);
+    let operation = app.job.as_ref().unwrap();
+    assert_eq!(operation.completion_notice(true, false).tone, Tone::Success);
 }
 
 #[test]
@@ -524,7 +592,7 @@ fn dialogs_stay_open_and_escape_cancels_without_starting_a_job() {
 #[test]
 fn stalled_transfer_hides_speed_and_eta() {
     let now = Instant::now();
-    let mut t = Transfer {
+    let mut t = worker::Transfer {
         update: progress::Update {
             stage: "BaseSystem".into(),
             completed: 1048576,

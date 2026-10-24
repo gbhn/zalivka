@@ -6,6 +6,7 @@ use widgets::*;
 mod theme;
 mod view;
 mod worker;
+use worker::Job;
 
 use theme::{BLUE, RED, Tone, configure};
 
@@ -13,10 +14,7 @@ use anyhow::Result;
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::{
     collections::VecDeque,
-    fs::File,
-    io::Write,
     path::{Path, PathBuf},
-    process::Child,
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
 };
@@ -70,46 +68,6 @@ enum Event {
     Picked(Picker, Option<PathBuf>),
     Saved(std::result::Result<PathBuf, String>),
 }
-struct Job {
-    id: u64,
-    action: Action,
-    started: Instant,
-    child: Child,
-    log: File,
-    success: Option<bool>,
-    readers: u8,
-    cancelled: bool,
-    restore_completed: bool,
-    internet_error: Option<String>,
-    preparing_internet: bool,
-}
-
-impl Job {
-    fn can_stop(&self) -> bool {
-        (!self.action.writes_device() || self.restore_completed)
-            && self.action != Action::PrepareWindows
-            && !self.preparing_internet
-    }
-}
-struct Transfer {
-    update: progress::Update,
-    received: Instant,
-}
-impl Transfer {
-    fn speed(&self, now: Instant) -> f64 {
-        if now.duration_since(self.received) > Duration::from_secs(2) {
-            0.0
-        } else {
-            self.update.bytes_per_second
-        }
-    }
-    fn remaining(&self, now: Instant) -> Option<u64> {
-        let bytes = self.update.total?.saturating_sub(self.update.completed);
-        let speed = self.speed(now);
-        (bytes > 0 && speed > 0.0 && !self.update.finished)
-            .then(|| (bytes as f64 / speed).ceil() as u64)
-    }
-}
 
 struct Notice {
     title: String,
@@ -144,11 +102,6 @@ struct App {
     job: Option<Job>,
     logs: VecDeque<String>,
     log_path: Option<PathBuf>,
-    last_stats: Instant,
-    last_activity: Instant,
-    transfer: Option<Transfer>,
-    fraction: Option<f32>,
-    phase: String,
     notice: Option<Notice>,
     journal_open: bool,
     settings_open: bool,
@@ -173,11 +126,6 @@ impl App {
             job: None,
             logs: VecDeque::new(),
             log_path: None,
-            last_stats: Instant::now(),
-            last_activity: Instant::now(),
-            transfer: None,
-            fraction: None,
-            phase: String::new(),
             notice: None,
             journal_open: false,
             settings_open: false,
@@ -234,9 +182,8 @@ impl App {
             .join("\n")
     }
     fn log(&mut self, line: String) {
-        self.last_activity = Instant::now();
         if let Some(job) = &mut self.job {
-            let _ = writeln!(job.log, "{line}");
+            job.log_line(&line);
         }
         self.journal_line(line);
     }
@@ -325,15 +272,7 @@ impl App {
             Ok((job, path)) => {
                 self.logs.clear();
                 self.log_path = Some(path);
-                self.transfer = None;
-                self.fraction = None;
                 self.notice = None;
-                self.phase = if action == Action::PrepareWindows {
-                    "Подтвердите запрос прав администратора Windows".into()
-                } else {
-                    "Подготовка".into()
-                };
-                self.last_activity = Instant::now();
                 self.job = Some(job);
             }
             Err(e) => self.error("Не удалось начать операцию", format!("{e:#}")),

@@ -1,22 +1,243 @@
-use super::{Action, Event, Job, Setup, progress};
+//! Child-process lifetime, progress and completion for one GUI operation.
+use super::widgets::{elapsed_text, friendly_phase, human_bytes};
+use super::{Action, Event, Notice, Setup, Tone, progress};
 use anyhow::{Context, Result};
 use eframe::egui;
 use std::{
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::mpsc::Sender,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+pub(super) struct Job {
+    pub(super) id: u64,
+    pub(super) action: Action,
+    pub(super) started: Instant,
+    child: Child,
+    pub(super) log: File,
+    pub(super) success: Option<bool>,
+    pub(super) readers: u8,
+    pub(super) cancelled: bool,
+    pub(super) restore_completed: bool,
+    internet: Internet,
+    pub(super) transfer: Option<Transfer>,
+    pub(super) fraction: Option<f32>,
+    pub(super) phase: String,
+    last_stats: Instant,
+    pub(super) last_activity: Instant,
+}
+
+pub(super) struct Transfer {
+    pub(super) update: progress::Update,
+    pub(super) received: Instant,
+}
+impl Transfer {
+    pub(super) fn speed(&self, now: Instant) -> f64 {
+        if now.duration_since(self.received) > Duration::from_secs(2) {
+            0.0
+        } else {
+            self.update.bytes_per_second
+        }
+    }
+    pub(super) fn remaining(&self, now: Instant) -> Option<u64> {
+        let bytes = self.update.total?.saturating_sub(self.update.completed);
+        let speed = self.speed(now);
+        (bytes > 0 && speed > 0.0 && !self.update.finished)
+            .then(|| (bytes as f64 / speed).ceil() as u64)
+    }
+}
+
+enum Internet {
+    Idle,
+    Preparing,
+    Unavailable(String),
+}
+
 impl Job {
+    pub(super) fn new(id: u64, action: Action, child: Child, log: File) -> Self {
+        let now = Instant::now();
+        Self {
+            id,
+            action,
+            started: now,
+            child,
+            log,
+            success: None,
+            readers: 2,
+            cancelled: false,
+            restore_completed: false,
+            internet: Internet::Idle,
+            transfer: None,
+            fraction: None,
+            phase: if action == Action::PrepareWindows {
+                "Подтвердите запрос прав администратора Windows".into()
+            } else {
+                "Подготовка".into()
+            },
+            last_stats: now,
+            last_activity: now,
+        }
+    }
+
+    pub(super) fn can_stop(&self) -> bool {
+        (!self.action.writes_device() || self.restore_completed)
+            && self.action != Action::PrepareWindows
+            && !matches!(self.internet, Internet::Preparing)
+    }
+
+    pub(super) fn stop(&mut self) -> std::io::Result<()> {
+        if !self.can_stop() {
+            return Err(std::io::Error::other("Операцию сейчас нельзя остановить"));
+        }
+        if !self.cancelled {
+            self.child.kill()?;
+            self.cancelled = true;
+        }
+        Ok(())
+    }
+
+    pub(super) fn log_line(&mut self, line: &str) {
+        self.last_activity = Instant::now();
+        let _ = writeln!(self.log, "{line}");
+    }
+
+    pub(super) fn worker_event(&mut self, event: progress::Event) -> Option<String> {
+        let _ = event.write_to(&mut self.log);
+        self.last_activity = Instant::now();
+        let mut journal = None;
+        if matches!(
+            &event,
+            progress::Event::Checkpoint { .. } | progress::Event::OperationProgress { .. }
+        ) && self
+            .transfer
+            .as_ref()
+            .is_some_and(|transfer| transfer.update.finished)
+        {
+            self.transfer = None;
+        }
+        match event {
+            progress::Event::Transfer(update) => {
+                let keep = update.completed == 0
+                    || update.finished
+                    || self
+                        .transfer
+                        .as_ref()
+                        .is_none_or(|t| t.update.stage != update.stage)
+                    || self.last_stats.elapsed() >= Duration::from_secs(10);
+                if keep {
+                    journal = Some(format!(
+                        "{}: {}{} · {:.1} МиБ/с",
+                        update.stage,
+                        human_bytes(update.completed),
+                        update
+                            .total
+                            .map(|n| format!(" / {}", human_bytes(n)))
+                            .unwrap_or_default(),
+                        update.bytes_per_second / 1048576.0,
+                    ));
+                    self.last_stats = Instant::now();
+                }
+                self.transfer = Some(Transfer {
+                    update,
+                    received: Instant::now(),
+                });
+                self.fraction = None;
+            }
+            progress::Event::RestoreCompleted => {
+                self.restore_completed = true;
+                self.set_phase("Восстановление завершено");
+            }
+            progress::Event::RebootRequired => {}
+            progress::Event::InternetWaiting => {
+                self.internet = Internet::Idle;
+                self.set_phase("Ожидание USB-сети Mac");
+            }
+            progress::Event::InternetPreparing => {
+                self.internet = Internet::Preparing;
+                self.set_phase("Подтвердите запрос прав администратора Windows");
+            }
+            progress::Event::InternetReady => {
+                self.internet = Internet::Idle;
+                self.set_phase("Интернет по USB · оставьте Zalivka открытой");
+            }
+            progress::Event::InternetUnavailable { error } => {
+                self.internet = Internet::Unavailable(error);
+                self.set_phase("Интернет по USB недоступен");
+            }
+            progress::Event::Checkpoint { name } => {
+                self.phase = friendly_phase(&name).into();
+                self.fraction = None;
+            }
+            progress::Event::OperationProgress { progress, .. } => {
+                self.fraction = (progress >= 0).then(|| (progress as f32 / 100.0).clamp(0.0, 1.0));
+            }
+        }
+        journal
+    }
+
+    fn set_phase(&mut self, phase: &str) {
+        self.phase = phase.into();
+        self.transfer = None;
+        self.fraction = None;
+    }
+
     // The exit code can arrive before the final stdout/stderr lines.
     pub(super) fn finished(&mut self) -> std::io::Result<Option<bool>> {
         if self.success.is_none() {
             self.success = self.child.try_wait()?.map(|status| status.success());
         }
         Ok(self.success.filter(|_| self.readers == 0))
+    }
+
+    pub(super) fn completion_notice(&self, success: bool, reboot_required: bool) -> Notice {
+        let elapsed = elapsed_text(self.started.elapsed().as_secs());
+        let (title, detail, tone) = if self.cancelled {
+            (
+                if self.action == Action::Restore && self.restore_completed {
+                    "Восстановление завершено · раздача остановлена".into()
+                } else {
+                    "Операция остановлена".into()
+                },
+                elapsed,
+                Tone::Neutral,
+            )
+        } else if !success {
+            (
+                format!("{}: ошибка", self.action.title()),
+                "Подробности в журнале.".into(),
+                Tone::Error,
+            )
+        } else if self.action == Action::PrepareWindows && reboot_required {
+            (
+                "Перезагрузите Windows".into(),
+                "Драйвер установлен. Перезагрузите компьютер перед восстановлением Mac.".into(),
+                Tone::Neutral,
+            )
+        } else if let Internet::Unavailable(error) = &self.internet {
+            (
+                "Восстановление завершено · интернет по USB недоступен".into(),
+                error.clone(),
+                Tone::Neutral,
+            )
+        } else {
+            (
+                self.action.completed_title().into(),
+                if self.action.writes_device() {
+                    format!("{elapsed} · Проверьте запуск Mac.")
+                } else {
+                    elapsed
+                },
+                Tone::Success,
+            )
+        };
+        Notice {
+            title,
+            detail,
+            tone,
+        }
     }
 
     pub(super) fn spawn(
@@ -82,32 +303,7 @@ impl Job {
                 return Err(e.into());
             }
         }
-        Ok((
-            Job {
-                id,
-                action,
-                started: Instant::now(),
-                child,
-                log,
-                success: None,
-                readers: 2,
-                cancelled: false,
-                restore_completed: false,
-                internet_error: None,
-                preparing_internet: false,
-            },
-            path,
-        ))
-    }
-}
-
-impl Event {
-    pub(super) fn worker_output(id: u64, line: String, state_events: bool) -> Self {
-        if state_events && let Some(event) = progress::Event::parse(&line) {
-            Self::Worker(id, event)
-        } else {
-            Self::Line(id, line)
-        }
+        Ok((Self::new(id, action, child, log), path))
     }
 }
 
@@ -118,11 +314,23 @@ pub(super) fn save_log(path: PathBuf, source: Option<&Path>, text: &str) -> Resu
             .ok()
             .zip(path.canonicalize().ok())
             .is_some_and(|(a, b)| a == b);
-        if !same {
-            std::fs::copy(source, &path)?;
+        if same {
+            return Ok(path);
         }
-    } else {
-        std::fs::write(&path, text)?;
     }
+    // Write beside the destination, then replace it only after a complete copy.
+    // Distinct paths can be hard links to the active log; copying directly to
+    // such a destination would truncate the source before it can be read.
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut saved = tempfile::NamedTempFile::new_in(directory)?;
+    if let Some(source) = source {
+        std::io::copy(&mut File::open(source)?, &mut saved)?;
+    } else {
+        saved.write_all(text.as_bytes())?;
+    }
+    saved.persist(&path).context("saving operation log")?;
     Ok(path)
 }

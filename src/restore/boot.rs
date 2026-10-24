@@ -169,9 +169,11 @@ impl ContextState {
         name: &str,
         ticket: Option<&Value>,
     ) -> Result<()> {
-        let bytes = self
-            .ipsw
-            .personalized(&self.identity, name, ticket.unwrap_or(&self.ticket))?;
+        let bytes = self.ipsw.personalized(
+            &self.restore.identity,
+            name,
+            ticket.unwrap_or(&self.restore.ticket),
+        )?;
         eprintln!("Sending {name}: {} bytes", bytes.len());
         dfu::upload(usb, usb.info.mode, &bytes, true).with_context(|| format!("uploading {name}"))
     }
@@ -185,7 +187,7 @@ impl ContextState {
         );
         let upload = self.send_component(&mut usb, "iBSS", None);
         drop(usb);
-        let mode = self.identity.is_macos().then_some(Mode::Recovery);
+        let mode = self.restore.identity.is_macos().then_some(Mode::Recovery);
         let mut usb =
             reconnect_after_ibss(upload, mode, |mode| wait_recovery(self.device.ecid, mode))?;
         ensure!(
@@ -196,17 +198,18 @@ impl ContextState {
         {
             eprintln!("Device nonce changed after iBSS; obtaining new Apple signatures");
             self.device = usb.info.clone();
-            self.ticket = tss::send(&tss::request(&self.device, &self.identity)?)
-                .context("personalizing restore firmware after iBSS nonce change")?;
+            self.restore.ticket =
+                tss::send(&tss::request(&self.device, &self.restore.identity)?)
+                    .context("personalizing restore firmware after iBSS nonce change")?;
         }
-        if self.identity.is_macos() {
+        if self.restore.identity.is_macos() {
             ensure!(
                 usb.info.mode == Mode::Recovery,
                 "Apple Silicon iBSS did not expose the iBoot recovery transport"
             );
             let local = tss::send(&tss::local_policy_request(
                 &self.device,
-                tss::ticket(&self.ticket)?,
+                tss::ticket(&self.restore.ticket)?,
                 None,
             )?)
             .context("personalizing initial Ap,LocalPolicy for iBoot")?;
@@ -226,7 +229,7 @@ impl ContextState {
         std::thread::sleep(Duration::from_secs(2));
         self.send_component(&mut usb, "RestoreDeviceTree", None)?;
         dfu::command(&mut usb, "devicetree", false)?;
-        if self.identity.has("RestoreSEP") {
+        if self.restore.identity.has("RestoreSEP") {
             self.send_component(&mut usb, "RestoreSEP", None)?;
             dfu::command(&mut usb, "rsepfirmware", false)?;
         }
@@ -240,7 +243,7 @@ impl ContextState {
         stage1: bool,
     ) -> Result<()> {
         eprintln!("Preparing iBoot stage {}", if stage1 { 1 } else { 2 });
-        for step in iboot_stage(&self.identity, stage1)? {
+        for step in iboot_stage(&self.restore.identity, stage1)? {
             match step {
                 IBootStep::Component(name) => {
                     self.send_component(usb, &name, None)?;

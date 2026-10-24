@@ -297,11 +297,12 @@ fn component_entry(path: &str, bytes: &[u8]) -> Value {
 fn restore_state(file: &std::path::Path) -> restore::ContextState {
     restore::ContextState {
         ipsw: Ipsw::open(file).unwrap(),
-        identity: identity(),
+        restore: restore::SignedIdentity {
+            identity: identity(),
+            ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
+        },
         recovery: None,
         device: device_info(),
-        ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
-        recovery_ticket: None,
         assets: net::AssetClient::default(),
     }
 }

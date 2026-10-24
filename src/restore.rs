@@ -174,13 +174,18 @@ fn log_checkpoint(
         .then(|| crate::progress::Event::Checkpoint { name: name.into() }))
 }
 
+/// An identity and the signing response used to personalize its components.
+#[derive(Clone)]
+pub struct SignedIdentity {
+    pub identity: Identity,
+    pub ticket: Value,
+}
+
 pub struct ContextState {
     pub ipsw: Ipsw,
-    pub identity: Identity,
-    pub recovery: Option<Identity>,
+    pub restore: SignedIdentity,
+    pub recovery: Option<SignedIdentity>,
     pub device: DeviceInfo,
-    pub ticket: Value,
-    pub recovery_ticket: Option<Value>,
     pub assets: net::AssetClient,
 }
 
@@ -188,11 +193,9 @@ impl ContextState {
     fn reopen(&self) -> Result<Self> {
         Ok(Self {
             ipsw: self.ipsw.reopen()?,
-            identity: self.identity.clone(),
+            restore: self.restore.clone(),
             recovery: self.recovery.clone(),
             device: self.device.clone(),
-            ticket: self.ticket.clone(),
-            recovery_ticket: self.recovery_ticket.clone(),
             assets: self.assets.clone(),
         })
     }
@@ -232,22 +235,20 @@ pub fn run(
         .transpose()?;
     let mut state = ContextState {
         ipsw,
-        identity,
-        recovery,
+        restore: SignedIdentity { identity, ticket },
+        recovery: None,
         device: usb.info.clone(),
-        ticket,
-        recovery_ticket: None,
         assets,
     };
     let mut bootx_error = state.boot(usb)?;
-    if let Some(id) = &state.recovery {
-        let request = if state.identity.is_macos() {
-            tss::recovery_request(&state.device, &state.identity)?
+    if let Some(identity) = recovery {
+        let request = if state.restore.identity.is_macos() {
+            tss::recovery_request(&state.device, &state.restore.identity)?
         } else {
-            tss::request(&state.device, id)?
+            tss::request(&state.device, &identity)?
         };
-        state.recovery_ticket =
-            Some(tss::send(&request).context("personalizing RecoveryOS root ticket")?);
+        let ticket = tss::send(&request).context("personalizing RecoveryOS root ticket")?;
+        state.recovery = Some(SignedIdentity { identity, ticket });
     }
     let mut started = false;
     let mut final_received = false;
@@ -274,7 +275,7 @@ pub fn run(
                         ("Request", "StartRestore".into()),
                         ("Label", "zalivka".into()),
                         ("RestoreProtocolVersion", version.into()),
-                        ("RestoreOptions", options(&state.identity)?),
+                        ("RestoreOptions", options(&state.restore.identity)?),
                     ]),
                 )?;
             }

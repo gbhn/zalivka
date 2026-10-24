@@ -357,17 +357,17 @@ impl App {
                 ui.label(RichText::new(job.action.title()).size(21.0).strong());
             });
             ui.add_space(12.0);
-            let stage = self
+            let stage = job
                 .transfer
                 .as_ref()
                 .map(|t| t.update.stage.as_str())
-                .unwrap_or(&self.phase);
+                .unwrap_or(&job.phase);
             ui.label(RichText::new(stage).size(16.0));
-            let fraction = self
+            let fraction = job
                 .transfer
                 .as_ref()
                 .and_then(|t| t.update.fraction())
-                .or(self.fraction);
+                .or(job.fraction);
             if let Some(value) = fraction {
                 ui.add(
                     egui::ProgressBar::new(value)
@@ -399,7 +399,7 @@ impl App {
                     "Прошло",
                     &elapsed_text(job.started.elapsed().as_secs()),
                 );
-                if let Some(t) = &self.transfer {
+                if let Some(t) = &job.transfer {
                     metric(
                         &mut columns[1],
                         "Скорость",
@@ -412,7 +412,7 @@ impl App {
                     metric(&mut columns[2], "Осталось на этапе", &value);
                 }
             });
-            if let Some(t) = &self.transfer {
+            if let Some(t) = &job.transfer {
                 ui.add_space(8.0);
                 caption(
                     ui,
@@ -427,6 +427,7 @@ impl App {
                 );
             }
             ui.add_space(14.0);
+            let idle = job.last_activity.elapsed();
             if job.action.writes_device() && !job.restore_completed {
                 caption(ui, "Оставьте питание и USB подключёнными");
             } else if !job.can_stop() {
@@ -435,19 +436,14 @@ impl App {
                 .add_enabled(!job.cancelled, egui::Button::new("Остановить"))
                 .clicked()
                 && let Some(job) = &mut self.job
+                && let Err(e) = job.stop()
             {
-                match job.child.kill() {
-                    Ok(()) => job.cancelled = true,
-                    Err(e) => self.error("Не удалось остановить операцию", e),
-                }
+                self.error("Не удалось остановить операцию", e);
             }
-            if self.last_activity.elapsed() > Duration::from_secs(5) {
+            if idle > Duration::from_secs(5) {
                 caption(
                     ui,
-                    format!(
-                        "Ожидание ответа · {}",
-                        elapsed_text(self.last_activity.elapsed().as_secs())
-                    ),
+                    format!("Ожидание ответа · {}", elapsed_text(idle.as_secs())),
                 );
             }
         });
@@ -703,7 +699,7 @@ impl eframe::App for App {
                     "Дождитесь завершения перед закрытием окна.",
                 );
             } else {
-                let _ = job.child.kill();
+                let _ = job.stop();
             }
         }
         if self.job.is_none() && !self.picking && self.confirmation.is_none() {

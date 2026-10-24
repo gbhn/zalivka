@@ -222,7 +222,7 @@ fn personalized_data_enables_early_iboot_dcp_and_keeps_ean_separate() {
         ],
     );
     let mut state = restore_state(file.path());
-    let manifest = manifest_mut(&mut state.identity);
+    let manifest = manifest_mut(&mut state.restore.identity);
     for (name, path, bytes, early, fud, stage1) in [
         ("DCP", "Firmware/dcp.im4p", &dcp, true, false, false),
         ("Ap,DCP2", "Firmware/dcp.im4p", &dcp, false, true, false),
@@ -322,7 +322,7 @@ fn untrusted_input_device_uses_img4_for_fud_and_personalized_boot_objects() {
     let bytes = im4p(b"ipdf");
     let file = fixture_files(None, false, &[("Firmware/InputDevice.im4p", &bytes)]);
     let mut state = restore_state(file.path());
-    manifest_mut(&mut state.identity).insert(
+    manifest_mut(&mut state.restore.identity).insert(
         "InputDevice".into(),
         wire::dict([
             ("Trusted", false.into()),
@@ -341,7 +341,7 @@ fn untrusted_input_device_uses_img4_for_fud_and_personalized_boot_objects() {
     // Preserve Trusted=false in signing metadata while wrapping the payload.
     assert_eq!(
         wire::get(
-            &tss::request(&device_info(), &state.identity).unwrap(),
+            &tss::request(&device_info(), &state.restore.identity).unwrap(),
             &["InputDevice", "Trusted"]
         )
         .unwrap()
@@ -518,14 +518,15 @@ fn ticket_selection_uses_request_type_with_distinct_macos_identity() {
     let file = fixture(Some(recovery_identity()), false);
     let mut state = restore::ContextState {
         ipsw: Ipsw::open(file.path()).unwrap(),
-        identity: identity(),
-        recovery: Some(recovery_identity()),
+        restore: restore::SignedIdentity {
+            identity: identity(),
+            ticket: wire::dict([("ApImg4Ticket", Value::Data(normal.clone()))]),
+        },
+        recovery: Some(restore::SignedIdentity {
+            identity: recovery_identity(),
+            ticket: wire::dict([("ApImg4Ticket", Value::Data(recovery.clone()))]),
+        }),
         device: device_info(),
-        ticket: wire::dict([("ApImg4Ticket", Value::Data(normal.clone()))]),
-        recovery_ticket: Some(wire::dict([(
-            "ApImg4Ticket",
-            Value::Data(recovery.clone()),
-        )])),
         assets: net::AssetClient::default(),
     };
     let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
@@ -579,7 +580,7 @@ fn ticket_selection_uses_request_type_with_distinct_macos_identity() {
         ("KernelCache", "IsLoadedByiBoot"),
         ("iBSS", "IsLoadedByiBootStage1"),
     ] {
-        manifest_mut(state.recovery.as_mut().unwrap())[name]
+        manifest_mut(&mut state.recovery.as_mut().unwrap().identity)[name]
             .as_dictionary_mut()
             .unwrap()["Info"]
             .as_dictionary_mut()
@@ -593,22 +594,13 @@ fn ticket_selection_uses_request_type_with_distinct_macos_identity() {
             &request("RecoveryOSIBootFWFilesImages", true),
         )
         .unwrap();
-    state.recovery_ticket = None;
+    state.recovery = None;
     assert!(
         state
             .serve(
                 &session,
                 &mut main,
                 &request("RecoveryOSRootTicketData", true)
-            )
-            .is_err()
-    );
-    assert!(
-        state
-            .serve(
-                &session,
-                &mut main,
-                &request("RecoveryOSFileAssetImage", true)
             )
             .is_err()
     );
@@ -709,6 +701,7 @@ fn optional_global_manifest_completes_without_data_but_required_manifest_must_ex
         .serve(&session, &mut main, &request(false, ""))
         .unwrap();
     state
+        .restore
         .identity
         .value
         .as_dictionary_mut()
@@ -765,11 +758,14 @@ fn optional_global_manifest_completes_without_data_but_required_manifest_must_ex
 }
 
 #[test]
-fn missing_optional_recovery_assets_are_reported_without_requiring_a_ticket() {
+fn missing_optional_recovery_assets_are_reported_for_absent_or_unmatched_identities() {
     for recovery in [None, Some(recovery_identity())] {
         let file = fixture(None, false);
         let mut state = restore::ContextState {
-            recovery,
+            recovery: recovery.map(|identity| restore::SignedIdentity {
+                identity,
+                ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
+            }),
             ..restore_state(file.path())
         };
         let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
@@ -891,7 +887,7 @@ fn system_image_metadata_requests_use_manifest_components_and_exact_file_keys() 
             metadata.as_slice(),
         ),
     ] {
-        manifest_mut(&mut state.identity).insert(
+        manifest_mut(&mut state.restore.identity).insert(
             component.into(),
             wire::dict([
                 ("Trusted", false.into()),
@@ -1215,7 +1211,7 @@ fn async_asr_keeps_control_and_component_channels_responsive_with_independent_zi
         }
         let expected = state
             .ipsw
-            .personalized(&identity(), "iBSS", &state.ticket)
+            .personalized(&identity(), "iBSS", &state.restore.ticket)
             .unwrap();
         let mut expected_frames = vec![];
         wire::send_binary(
@@ -1245,13 +1241,63 @@ fn async_asr_keeps_control_and_component_channels_responsive_with_independent_zi
 }
 
 #[test]
+fn async_ticket_requests_keep_restore_and_recovery_signatures_distinct() {
+    let file = fixture(Some(recovery_identity()), false);
+    let mut state = restore_state(file.path());
+    let recovery_ticket = b"separate recoveryOS signature";
+    state.recovery = Some(restore::SignedIdentity {
+        identity: recovery_identity(),
+        ticket: wire::dict([("ApImg4Ticket", Value::Data(recovery_ticket.to_vec()))]),
+    });
+    let (usb, output) = mock_mux(vec![
+        version_packet(),
+        tcp(23456, 1, 0, 1, 0x12, &[]),
+        tcp(34567, 2, 0, 1, 0x12, &[]),
+    ]);
+    let session = Session::new(usb).unwrap();
+    let mut requests = restore::AsyncRequests::new(&session);
+    for (kind, port, expected) in [
+        (
+            "RecoveryOSRootTicketData",
+            23456,
+            recovery_ticket.as_slice(),
+        ),
+        (
+            "RootTicket",
+            34567,
+            tss::ticket(&state.restore.ticket).unwrap(),
+        ),
+    ] {
+        requests
+            .spawn(
+                &state,
+                wire::dict([
+                    ("DataType", kind.into()),
+                    ("DataPort", u64::from(port).into()),
+                    ("Arguments", wire::dict([("IsRecoveryOS", true.into())])),
+                ]),
+            )
+            .unwrap();
+        requests.finish().unwrap();
+        let reply = wire::receive(&mut mux_output(&output, port)).unwrap();
+        assert_eq!(
+            wire::get(&reply, &["RootTicketData"]).unwrap().as_data(),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
 fn async_recovery_asr_selects_recovery_image_and_uses_its_explicit_port() {
     let image = b"separate recoveryOS image";
     let mut recovery = recovery_identity();
     manifest_mut(&mut recovery).insert("OS".into(), component_entry("recovery.dmg", image));
     let file = fixture_files(Some(recovery.clone()), false, &[("recovery.dmg", image)]);
     let mut state = restore_state(file.path());
-    state.recovery = Some(recovery);
+    state.recovery = Some(restore::SignedIdentity {
+        identity: recovery,
+        ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
+    });
     let initiate = wire::xml(&wire::dict([("Command", "Initiate".into())])).unwrap();
     let payload = wire::xml(&wire::dict([("Command", "Payload".into())])).unwrap();
     let (usb, output) = mock_mux(vec![
@@ -1387,7 +1433,7 @@ fn async_completion_releases_ports_and_leaves_the_control_channel_available() {
                 .unwrap()
                 .as_data()
                 .unwrap(),
-            tss::ticket(&state.ticket).unwrap()
+            tss::ticket(&state.restore.ticket).unwrap()
         );
     }
     assert_eq!(replies.position(), replies.get_ref().len() as u64);
@@ -1407,7 +1453,7 @@ fn nor_formats_preserve_firmware_order_and_separate_llb_and_sep_images() {
         .collect();
     let file = fixture_files(None, false, &files);
     let mut state = restore_state(file.path());
-    let manifest = manifest_mut(&mut state.identity);
+    let manifest = manifest_mut(&mut state.restore.identity);
     for (name, path) in names.into_iter().zip(&paths) {
         let mut entry = component_entry(path, &bytes);
         entry.as_dictionary_mut().unwrap()["Info"]
@@ -1416,12 +1462,17 @@ fn nor_formats_preserve_firmware_order_and_separate_llb_and_sep_images() {
             .insert("IsFirmwarePayload".into(), (name != "SEP").into());
         manifest.insert(name.into(), entry);
     }
-    let id = state.identity.clone();
+    let id = state.restore.identity.clone();
     let mut expected = plist::Dictionary::new();
     for name in names {
         expected.insert(
             name.into(),
-            Value::Data(state.ipsw.personalized(&id, name, &state.ticket).unwrap()),
+            Value::Data(
+                state
+                    .ipsw
+                    .personalized(&id, name, &state.restore.ticket)
+                    .unwrap(),
+            ),
         );
     }
     let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
@@ -1494,14 +1545,19 @@ fn large_nor_reply_crosses_mux_windows_and_allows_the_next_checkpoint() {
             .as_dictionary_mut()
             .unwrap()
             .insert("IsFirmwarePayload".into(), (name != "SEP").into());
-        manifest_mut(&mut state.identity).insert(name.into(), entry);
+        manifest_mut(&mut state.restore.identity).insert(name.into(), entry);
     }
-    let id = state.identity.clone();
+    let id = state.restore.identity.clone();
     let mut expected = plist::Dictionary::new();
     for name in names {
         expected.insert(
             name.into(),
-            Value::Data(state.ipsw.personalized(&id, name, &state.ticket).unwrap()),
+            Value::Data(
+                state
+                    .ipsw
+                    .personalized(&id, name, &state.restore.ticket)
+                    .unwrap(),
+            ),
         );
     }
     let (to_device, peer_input) = mpsc::channel::<Vec<u8>>();

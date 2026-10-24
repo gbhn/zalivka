@@ -48,11 +48,13 @@ impl ContextState {
         let id = if wire::string(message, &["DataType"])? == "RecoveryOSASRImage"
             || wire::boolean(message, &["Arguments", "IsRecoveryOS"])
         {
-            self.recovery
+            &self
+                .recovery
                 .as_ref()
                 .context("device requested a recoveryOS identity absent from this IPSW")?
+                .identity
         } else {
-            &self.identity
+            &self.restore.identity
         };
         let path = id.path("OS")?;
         let length = self.ipsw.size(path)?;
@@ -87,14 +89,16 @@ impl ContextState {
                 kind,
                 "RecoveryOSFileAssetImage" | "RecoveryOSIBootFWFilesImages"
             ) {
-            self.recovery
+            &self
+                .recovery
                 .as_ref()
                 .context("device requested a recoveryOS identity absent from this IPSW")?
+                .identity
         } else {
-            &self.identity
+            &self.restore.identity
         };
         // Generic boot objects use the restore ticket even for MacOSVariant
-        // paths. Dedicated RecoveryOS* requests use recovery_ticket instead.
+        // paths. Dedicated RecoveryOS* requests use the recovery signature instead.
         let response = match kind {
             "BuildIdentityDict" | "BuildIdentityDictV2" => wire::dict([
                 ("BuildIdentityDict", id.value.clone()),
@@ -110,14 +114,17 @@ impl ContextState {
             }
             "RootTicket" => wire::dict([(
                 "RootTicketData",
-                Value::Data(tss::ticket(&self.ticket)?.to_vec()),
+                Value::Data(tss::ticket(&self.restore.ticket)?.to_vec()),
             )]),
             "RecoveryOSRootTicketData" => {
-                let ticket = self
-                    .recovery_ticket
+                let recovery = self
+                    .recovery
                     .as_ref()
-                    .context("missing recoveryOS ticket")?;
-                wire::dict([("RootTicketData", Value::Data(tss::ticket(ticket)?.to_vec()))])
+                    .context("missing recoveryOS identity")?;
+                wire::dict([(
+                    "RootTicketData",
+                    Value::Data(tss::ticket(&recovery.ticket)?.to_vec()),
+                )])
             }
             "FDRTrustData" | "FirmwareUpdaterPreflight" | "DeviceRestoreInfoPreflight" => {
                 Value::Dictionary(Dictionary::new())
@@ -135,7 +142,9 @@ impl ContextState {
                     }
                     _ => kind,
                 };
-                let bytes = self.ipsw.personalized(id, component, &self.ticket)?;
+                let bytes = self
+                    .ipsw
+                    .personalized(id, component, &self.restore.ticket)?;
                 wire::dict([(format!("{kind}File"), Value::Data(bytes))])
             }
             "PersonalizedBootObjectV3"
@@ -158,7 +167,7 @@ impl ContextState {
                     return Ok(());
                 }
                 if kind == "PersonalizedBootObjectV3" && !name.starts_with("__") {
-                    let bytes = self.ipsw.personalized(id, name, &self.ticket)?;
+                    let bytes = self.ipsw.personalized(id, name, &self.restore.ticket)?;
                     send_file_data(out, session, &self.assets, name, &bytes)?;
                 } else {
                     self.stream_file(out, session, name, &path)?;
@@ -170,15 +179,17 @@ impl ContextState {
                     .recovery
                     .as_ref()
                     .context("missing recovery identity")?
+                    .identity
                     .path("OS")?
                     .to_owned();
                 return self.stream_file(out, session, "RecoveryOS", &path);
             }
             "RecoveryOSVersionData" => {
-                let id = self
+                let id = &self
                     .recovery
                     .as_ref()
-                    .context("missing recovery identity")?;
+                    .context("missing recovery identity")?
+                    .identity;
                 let mut version = Dictionary::new();
                 for k in ["BuildNumber", "Variant", "BuildTrain"] {
                     if let Ok(v) = id.info(k) {
@@ -209,7 +220,7 @@ impl ContextState {
                 let args = wire::get(message, &["Arguments"])?;
                 let local = tss::send(&tss::local_policy_request(
                     &self.device,
-                    tss::ticket(&self.ticket)?,
+                    tss::ticket(&self.restore.ticket)?,
                     Some(args),
                 )?)
                 .context("personalizing RecoveryOS Ap,LocalPolicy")?;
@@ -221,9 +232,9 @@ impl ContextState {
                 wire::dict([("Ap,LocalPolicy", Value::Data(bytes))])
             }
             "FUDData" | "PersonalizedData" | "ImageData" | "EANData" => {
-                image_data(&mut self.ipsw, id, &self.ticket, kind, message)?
+                image_data(&mut self.ipsw, id, &self.restore.ticket, kind, message)?
             }
-            "NORData" => nor_data(&mut self.ipsw, id, &self.ticket, message)?,
+            "NORData" => nor_data(&mut self.ipsw, id, &self.restore.ticket, message)?,
             "BootabilityBundle" | "BootabilityBundleV2" => {
                 self.bootability(out)?;
                 return Ok(());
@@ -267,17 +278,15 @@ impl ContextState {
 
     fn recovery_assets(&mut self, component: Option<&str>) -> Result<Value> {
         let no_asset = || wire::dict([("RecoveryOSNoAssetFound", true.into())]);
-        let Some(id) = self.recovery.as_ref() else {
+        let Some(recovery) = self.recovery.as_ref() else {
             return Ok(no_asset());
         };
+        let id = &recovery.identity;
+        let ticket = &recovery.ticket;
         let images = if let Some(name) = component {
             if !id.has(name) {
                 return Ok(no_asset());
             }
-            let ticket = self
-                .recovery_ticket
-                .as_ref()
-                .context("missing recovery ticket")?;
             Value::Data(self.ipsw.personalized(id, name, ticket)?)
         } else {
             let mut names = id
@@ -292,10 +301,6 @@ impl ContextState {
             if names.peek().is_none() {
                 return Ok(no_asset());
             }
-            let ticket = self
-                .recovery_ticket
-                .as_ref()
-                .context("missing recovery ticket")?;
             Value::Dictionary(personalized_images(&mut self.ipsw, id, ticket, names)?)
         };
         Ok(wire::dict([("AdditionalBootImages", images)]))
