@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn serialized_connection_headers_never_reach_the_origin() {
+    let request = serialized_asset_request(
+        b"POST /key HTTP/1.1\r\nHost: gs.apple.com\r\nContent-Length: 3\r\nConnection: keep-alive, X-Private\r\nConnection: X-Other\r\nX-Private: first\r\nX-Other: second\r\nKeep-Alive: timeout=5\r\nProxy-Connection: keep-alive\r\nProxy-Authorization: secret\r\nUpgrade: h2c\r\nTE: trailers\r\nContent-Type: application/octet-stream\r\nAuthorization: Bearer fixture\r\n\r\nabc"
+    ).unwrap();
+    assert_eq!(request.body(), b"abc");
+    assert_eq!(request.headers().len(), 2);
+    assert_eq!(
+        request.headers()["content-type"],
+        "application/octet-stream"
+    );
+    assert_eq!(request.headers()["authorization"], "Bearer fixture");
+    for value in ["", "x-private,", "invalid name"] {
+        let raw = format!("GET /key HTTP/1.1\r\nHost: gs.apple.com\r\nConnection: {value}\r\n\r\n");
+        assert!(serialized_asset_request(raw.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn asset_requests_bound_headers_and_preserve_the_plist_get_contract() {
+    let direct = |method: &str, body: Vec<u8>| {
+        wire::dict([
+            ("RequestURL", "https://gs.apple.com/key".into()),
+            ("RequestMethod", method.into()),
+            ("RequestBody", Value::Data(body)),
+        ])
+    };
+    assert!(
+        asset_request(&direct("GET", vec![1]))
+            .unwrap()
+            .body()
+            .is_empty()
+    );
+    assert!(asset_request(&direct("DELETE", vec![1])).is_err());
+    for method in ["GET", "DELETE"] {
+        let raw =
+            format!("{method} /key HTTP/1.1\r\nHost: gs.apple.com\r\nContent-Length: 1\r\n\r\nx");
+        assert!(serialized_asset_request(raw.as_bytes()).is_err());
+    }
+    let mut args = direct("POST", vec![1]);
+    args.as_dictionary_mut().unwrap().insert(
+        "RequestURL".into(),
+        "https://gs.apple.com/key#fragment".into(),
+    );
+    assert!(asset_request(&args).is_err());
+    args.as_dictionary_mut()
+        .unwrap()
+        .insert("RequestURL".into(), "https://gs.apple.com/key".into());
+    args.as_dictionary_mut().unwrap().insert(
+        "RequestAdditionalHeaders".into(),
+        wire::dict([("X-Large", "a".repeat(65536).into())]),
+    );
+    assert!(asset_request(&args).is_err());
+    for name in [
+        "Keep-Alive",
+        "Proxy-Connection",
+        "Proxy-Authorization",
+        "TE",
+        "Trailer",
+        "Upgrade",
+    ] {
+        args.as_dictionary_mut().unwrap().insert(
+            "RequestAdditionalHeaders".into(),
+            wire::dict([(name, "value".into())]),
+        );
+        assert!(asset_request(&args).is_err(), "{name}");
+    }
+}
+
+#[test]
 fn serialized_assets_support_origin_form_and_absolute_urls_with_binary_bodies() {
     let request = asset_request(&wire::dict([(
         "SerializedRequest",

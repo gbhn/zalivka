@@ -1,5 +1,67 @@
 use super::*;
 
+fn chained_tables() -> Vec<u8> {
+    let mut block = vec![0; 104];
+    block[..4].copy_from_slice(b"NCMH");
+    for (at, value) in [(4, 12u16), (8, 104), (10, 12)] {
+        block[at..at + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    for (table, next, frame) in [(12, 36u16, 64u16), (36, 0, 88)] {
+        block[table..table + 4].copy_from_slice(b"NCM0");
+        for (at, value) in [(4, 16u16), (6, next), (8, frame), (10, 16)] {
+            block[table + at..table + at + 2].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    block[64..80].fill(0x11);
+    block[88..104].fill(0x22);
+    block
+}
+
+#[test]
+fn chained_tables_preserve_wire_order_even_with_reversed_datagram_offsets() {
+    let mut block = chained_tables();
+    assert_eq!(decode(&block).unwrap(), [vec![0x11; 16], vec![0x22; 16]]);
+    block[20..22].copy_from_slice(&88u16.to_le_bytes());
+    block[44..46].copy_from_slice(&64u16.to_le_bytes());
+    assert_eq!(decode(&block).unwrap(), [vec![0x22; 16], vec![0x11; 16]]);
+}
+
+#[test]
+fn a_datagram_cannot_overlap_other_tables_or_datagrams() {
+    for (at, start) in [(20, 36u16), (44, 12), (44, 64), (44, 70)] {
+        let mut block = chained_tables();
+        block[at..at + 2].copy_from_slice(&start.to_le_bytes());
+        assert!(
+            decode(&block)
+                .unwrap_err()
+                .to_string()
+                .contains("overlapping")
+        );
+    }
+    let mut block = chained_tables();
+    // The first table ends after the second table begins; its early terminator
+    // otherwise lets a parser accept both tables as individually valid.
+    block.copy_within(36..52, 28);
+    block[16..18].copy_from_slice(&32u16.to_le_bytes());
+    block[18..20].copy_from_slice(&28u16.to_le_bytes());
+    assert!(
+        decode(&block)
+            .unwrap_err()
+            .to_string()
+            .contains("overlapping")
+    );
+}
+
+#[test]
+fn truncated_parameters_and_unbounded_word_offsets_return_errors() {
+    for length in 0..28 {
+        assert!(Parameters::parse(&vec![0; length]).is_err());
+    }
+    for offset in [0, 1, usize::MAX - 1, usize::MAX] {
+        assert!(word(&[0], offset).is_err());
+    }
+}
+
 #[test]
 fn concatenated_blocks_apply_the_datagram_limit_to_each_block() {
     let params = Parameters {

@@ -122,8 +122,7 @@ fn bearer_token(token: &str) -> Result<ureq::http::HeaderValue> {
 }
 
 pub(crate) fn wrapped_key_request(message: &Value) -> Result<bool> {
-    let kind =
-        wire::string(message, &["DataType"]).or_else(|_| wire::string(message, &["MsgType"]))?;
+    let kind = wire::data_type(message)?;
     if kind != "StreamedImageDecryptionKey" {
         return Ok(false);
     }

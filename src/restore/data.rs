@@ -4,7 +4,6 @@ use super::data_type::DataType;
 use super::file_data::{FileDataWriter, send_file_data};
 use super::images::{boot_object_path, image_data, nor_data, serve_asr};
 use crate::{
-    asr,
     ipsw::Identity,
     mux::{MuxStream, Session},
     net, tss, wire,
@@ -20,7 +19,7 @@ impl ContextState {
         main: &mut MuxStream,
         message: &Value,
     ) -> Result<()> {
-        let kind = wire::string(message, &["DataType"])?;
+        let kind = wire::data_type(message)?;
         let data_type = DataType::parse(kind)?;
         eprintln!("restored requests {kind}");
         for key in [
@@ -33,7 +32,7 @@ impl ContextState {
                 eprintln!("  {key}: {value}");
             }
         }
-        let port = asr::data_port(message, data_type.default_port())?;
+        let port = data_type.data_port(message, false)?;
         if port != 0 {
             let mut service = session.connect_retry(port, Duration::from_secs(60))?;
             self.serve_on(session, &mut service, message, data_type)
@@ -49,7 +48,7 @@ impl ContextState {
         message: &Value,
         data_type: DataType,
     ) -> Result<()> {
-        let kind = wire::string(message, &["DataType"])?;
+        let kind = wire::data_type(message)?;
         // Resolve firmware identity only for handlers that consume it. Network,
         // preflight and optional RecoveryOS probes do not depend on an identity.
         let restore = &self.restore.identity;

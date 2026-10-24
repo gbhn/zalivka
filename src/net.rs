@@ -66,6 +66,7 @@ pub(crate) fn is_apple_host(host: &str) -> bool {
 
 /// Return the validated URI so callers can use it without parsing again.
 pub(crate) fn apple_url(url: &str) -> Result<Uri> {
+    ensure!(!url.contains('#'), "Apple URL contains a fragment");
     let uri: Uri = url.parse().context("invalid URL")?;
     validate_apple_uri(&uri)?;
     Ok(uri)
@@ -173,7 +174,16 @@ fn redirect_request(
     {
         *request.method_mut() = Method::GET;
         request.body_mut().clear();
-        request.headers_mut().remove("content-type");
+        for name in [
+            "content-type",
+            "content-length",
+            "content-encoding",
+            "transfer-encoding",
+            "trailer",
+            "expect",
+        ] {
+            request.headers_mut().remove(name);
+        }
     }
     *request.uri_mut() = next;
     Ok(())

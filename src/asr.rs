@@ -1,5 +1,6 @@
 //! Apple Software Restore image transfer, including validation reads and SHA-1 chunks.
 use crate::wire;
+pub use crate::wire::data_port;
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use sha1::{Digest, Sha1};
@@ -121,15 +122,5 @@ fn checksum_mode(message: &Value, previous: bool) -> Result<bool> {
     match wire::dictionary(message)?.get("Checksum Chunks") {
         Some(value) => value.as_boolean().context("invalid ASR checksum mode"),
         None => Ok(previous),
-    }
-}
-
-pub fn data_port(message: &Value, default: u16) -> Result<u16> {
-    let port = message.as_dictionary().and_then(|d| d.get("DataPort"));
-    if let Some(v) = port {
-        let port = u16::try_from(wire::number(v)?)?;
-        Ok(if port == 0 { default } else { port })
-    } else {
-        Ok(default)
     }
 }

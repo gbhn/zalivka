@@ -1,7 +1,6 @@
 //! AEA prefix classification, public FCS keys and restored key exchanges.
-use super::RESTORED_PORT;
+use super::data_type::DataType;
 use crate::{
-    asr,
     mux::{MuxStream, Session},
     net, wire,
 };
@@ -87,25 +86,17 @@ pub(super) fn key_exchange(
     while let Some(request) = wire::try_receive(stream)? {
         *key_requests += 1;
         ensure!(*key_requests <= 64, "too many AEA key requests");
-        let kind = wire::string(&request, &["MsgType"])
-            .or_else(|_| wire::string(&request, &["DataType"]))?;
-        let data_type = if matches!(kind, "DataRequestMsg" | "AsyncDataRequestMsg") {
-            wire::string(&request, &["DataType"])?
-        } else {
-            kind
-        };
+        let name = wire::data_type(&request)?;
+        let data_type =
+            DataType::parse(name).with_context(|| format!("unexpected AEA data type {name}"))?;
         ensure!(
-            matches!(data_type, "URLAsset" | "StreamedImageDecryptionKey"),
-            "unexpected AEA data type {data_type} in {kind}"
+            data_type == DataType::Asset,
+            "unexpected AEA data type {name}"
         );
-        let port = asr::data_port(&request, 0).context("invalid AEA DataPort")?;
-        if kind == "AsyncDataRequestMsg" {
-            ensure!(
-                port != 0 && port != RESTORED_PORT,
-                "asynchronous AEA {data_type} requires a separate DataPort"
-            );
-        }
-        eprintln!("AEA requests {data_type} via {kind}, DataPort={port}");
+        let asynchronous =
+            wire::string(&request, &["MsgType"]).is_ok_and(|kind| kind == "AsyncDataRequestMsg");
+        let port = data_type.data_port(&request, asynchronous)?;
+        eprintln!("AEA requests {name}, DataPort={port}");
         let response = reply(&request)?;
         if port != 0 {
             let mut service = session.connect_retry(port, Duration::from_secs(60))?;

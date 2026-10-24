@@ -7,10 +7,10 @@ use super::session::{
     wait_for_restore_close,
 };
 use super::*;
-use crate::dfu;
 use crate::mux::Session;
 use crate::mux::{self, PacketTransport};
 use crate::test_mux::{self, version_packet};
+use crate::{asr, dfu};
 use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,61 @@ use std::{
     io::{Read, Write},
     time::{Duration, Instant},
 };
+
+#[test]
+fn synchronous_and_async_data_ports_share_bounds_but_only_sync_asr_has_a_default() {
+    use super::data_type::DataType;
+    for kind in [
+        DataType::Asr,
+        DataType::RecoveryAsr,
+        DataType::Asset,
+        DataType::BuildIdentity,
+    ] {
+        let default = if matches!(kind, DataType::Asr | DataType::RecoveryAsr) {
+            12345
+        } else {
+            0
+        };
+        for value in [
+            None,
+            Some(0u64.into()),
+            Some(23456u64.into()),
+            Some(65535u64.into()),
+        ] {
+            let mut message = wire::dict([] as [(&str, Value); 0]);
+            if let Some(value) = value {
+                message
+                    .as_dictionary_mut()
+                    .unwrap()
+                    .insert("DataPort".into(), value);
+            }
+            let explicit = asr::data_port(&message, 0).unwrap();
+            assert_eq!(
+                kind.data_port(&message, false).unwrap(),
+                if explicit == 0 { default } else { explicit }
+            );
+            assert_eq!(kind.data_port(&message, true).is_ok(), explicit != 0);
+        }
+        let control = wire::dict([("DataPort", u64::from(RESTORED_PORT).into())]);
+        assert!(kind.data_port(&control, true).is_err());
+        for port in [
+            (-1i64).into(),
+            65536u64.into(),
+            true.into(),
+            "invalid".into(),
+        ] {
+            let message = wire::dict([("DataPort", port)]);
+            for asynchronous in [false, true] {
+                assert!(
+                    kind.data_port(&message, asynchronous)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("DataPort")
+                );
+            }
+        }
+    }
+}
 
 fn j313_identity() -> Identity {
     Identity {

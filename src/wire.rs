@@ -29,6 +29,44 @@ pub fn string<'a>(v: &'a Value, path: &[&str]) -> Result<&'a str> {
     get(v, path)?.as_string().context("expected plist string")
 }
 
+/// Data requests use DataType; image key channels also accept a direct MsgType.
+/// A present but malformed DataType must not fall back to another interpretation.
+pub(crate) fn data_type(message: &Value) -> Result<&str> {
+    let fields = dictionary(message)?;
+    let name = fields
+        .get("DataType")
+        .map(|value| value.as_string().context("invalid DataType"))
+        .transpose()?;
+    let envelope = fields
+        .get("MsgType")
+        .map(|value| value.as_string().context("invalid MsgType"))
+        .transpose()?;
+    match (name, envelope) {
+        (Some(name), Some("DataRequestMsg" | "AsyncDataRequestMsg") | None) => Ok(name),
+        (Some(name), Some(kind)) => {
+            ensure!(
+                name == kind,
+                "conflicting DataType {name} and MsgType {kind}"
+            );
+            Ok(name)
+        }
+        (None, Some("DataRequestMsg" | "AsyncDataRequestMsg")) => {
+            bail!("data request has no DataType")
+        }
+        (None, Some(kind)) => Ok(kind),
+        (None, None) => bail!("data request has no DataType or MsgType"),
+    }
+}
+
+/// A missing or zero service port uses the caller's protocol-specific default.
+pub fn data_port(message: &Value, default: u16) -> Result<u16> {
+    let port = dictionary(message)?
+        .get("DataPort")
+        .map(|value| -> Result<u16> { Ok(u16::try_from(number(value)?)?) })
+        .transpose()?;
+    Ok(port.filter(|port| *port != 0).unwrap_or(default))
+}
+
 pub fn number(v: &Value) -> Result<u64> {
     if let Some(n) = v.as_unsigned_integer() {
         return Ok(n);

@@ -286,6 +286,9 @@ fn post_redirects_preserve_307_payload_and_drop_credentials_on_host_change() {
         .header("Authorization", "test-secret")
         .header("Cookie", "test-cookie")
         .header("Content-Type", "application/octet-stream")
+        .header("Content-Length", "3")
+        .header("Content-Encoding", "gzip")
+        .header("Expect", "100-continue")
         .body(vec![0, 1, 255])
         .unwrap();
     let mut request = original.clone();
@@ -293,6 +296,8 @@ fn post_redirects_preserve_307_payload_and_drop_credentials_on_host_change() {
     assert_eq!(request.method(), Method::POST);
     assert_eq!(request.body(), original.body());
     assert!(request.headers().contains_key("authorization"));
+    assert_eq!(request.headers()["content-length"], "3");
+    assert_eq!(request.headers()["content-encoding"], "gzip");
     redirect_request(
         &mut request,
         StatusCode::TEMPORARY_REDIRECT,
@@ -320,5 +325,8 @@ fn post_redirects_preserve_307_payload_and_drop_credentials_on_host_change() {
         assert_eq!(request.method(), Method::GET);
         assert!(request.body().is_empty());
         assert!(!request.headers().contains_key("content-type"));
+        for name in ["content-length", "content-encoding", "expect"] {
+            assert!(!request.headers().contains_key(name));
+        }
     }
 }

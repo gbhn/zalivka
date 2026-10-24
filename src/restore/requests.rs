@@ -1,6 +1,6 @@
 //! Asynchronous restored requests, isolated archives and worker lifetime.
-use super::{ContextState, RESTORED_PORT, data::serve_asset, data_type::DataType};
-use crate::{asr, mux::Session, wire};
+use super::{ContextState, data::serve_asset, data_type::DataType};
+use crate::{mux::Session, wire};
 use anyhow::{Context, Result, ensure};
 use plist::Value;
 use std::{
@@ -34,7 +34,7 @@ impl AsyncRequests {
     }
 
     pub fn spawn(&mut self, state: &ContextState, request: Value) -> Result<()> {
-        let kind = wire::string(&request, &["DataType"])?;
+        let kind = wire::data_type(&request)?;
         let data_type =
             DataType::parse(kind).with_context(|| format!("unsupported async data type {kind}"))?;
         self.check()?;
@@ -42,11 +42,7 @@ impl AsyncRequests {
             self.workers.len() < MAX_WORKERS,
             "too many active asynchronous data requests"
         );
-        let port = asr::data_port(&request, 0)?;
-        ensure!(
-            port != 0 && port != RESTORED_PORT,
-            "async request requires a separate DataPort"
-        );
+        let port = data_type.data_port(&request, true)?;
         ensure!(
             !self.workers.contains_key(&port),
             "async DataPort {port} is already in use"

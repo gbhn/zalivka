@@ -1,6 +1,8 @@
 //! Implemented restored requests. Dispatch and async capabilities share this table.
-use anyhow::{Context, Result};
-use plist::Dictionary;
+use super::RESTORED_PORT;
+use crate::wire;
+use anyhow::{Context, Result, ensure};
+use plist::{Dictionary, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DataType {
@@ -90,11 +92,17 @@ impl DataType {
             .collect()
     }
 
-    pub(super) fn default_port(self) -> u16 {
-        if matches!(self, Self::Asr | Self::RecoveryAsr) {
+    pub(super) fn data_port(self, message: &Value, asynchronous: bool) -> Result<u16> {
+        let default = if !asynchronous && matches!(self, Self::Asr | Self::RecoveryAsr) {
             12345
         } else {
             0
-        }
+        };
+        let port = wire::data_port(message, default).context("invalid DataPort")?;
+        ensure!(
+            !asynchronous || (port != 0 && port != RESTORED_PORT),
+            "async request requires a separate DataPort"
+        );
+        Ok(port)
     }
 }

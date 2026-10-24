@@ -1,4 +1,45 @@
 use super::*;
+
+#[test]
+fn data_request_names_are_consistent_across_envelopes_and_direct_messages() {
+    for envelope in [
+        None,
+        Some("DataRequestMsg"),
+        Some("AsyncDataRequestMsg"),
+        Some("URLAsset"),
+    ] {
+        let mut message = dict([("DataType", "URLAsset".into())]);
+        if let Some(envelope) = envelope {
+            message
+                .as_dictionary_mut()
+                .unwrap()
+                .insert("MsgType".into(), envelope.into());
+        }
+        assert_eq!(data_type(&message).unwrap(), "URLAsset");
+    }
+    assert_eq!(
+        data_type(&dict([("MsgType", "URLAsset".into())])).unwrap(),
+        "URLAsset"
+    );
+    for message in [
+        dict([("MsgType", "DataRequestMsg".into())]),
+        dict([("MsgType", "AsyncDataRequestMsg".into())]),
+        dict([("MsgType", "URLAsset".into()), ("DataType", false.into())]),
+        dict([("MsgType", false.into()), ("DataType", "URLAsset".into())]),
+        dict([
+            ("MsgType", "StatusMsg".into()),
+            ("DataType", "URLAsset".into()),
+        ]),
+        dict([
+            ("MsgType", "URLAsset".into()),
+            ("DataType", "StreamedImageDecryptionKey".into()),
+        ]),
+        dict([] as [(&str, Value); 0]),
+        Value::Boolean(false),
+    ] {
+        assert!(data_type(&message).is_err(), "{message:?}");
+    }
+}
 use serde::{
     Serialize, Serializer,
     ser::{Error, SerializeMap},

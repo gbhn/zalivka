@@ -7,9 +7,23 @@ use ureq::http::{Method, Request};
 
 const MAX_BODY: usize = 16 * 1024 * 1024;
 const MAX_HEADERS: usize = 65536;
+const TRANSPORT_HEADERS: &[&str] = &[
+    "host",
+    "connection",
+    "content-length",
+    "transfer-encoding",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "upgrade",
+];
 
 pub(super) fn asset_request(args: &Value) -> Result<Request<Vec<u8>>> {
-    if let Some(serialized) = wire::dictionary(args)?.get("SerializedRequest") {
+    let fields = wire::dictionary(args)?;
+    if let Some(serialized) = fields.get("SerializedRequest") {
         return serialized_asset_request(
             serialized
                 .as_data()
@@ -17,26 +31,23 @@ pub(super) fn asset_request(args: &Value) -> Result<Request<Vec<u8>>> {
         );
     }
     let url = apple_url(wire::string(args, &["RequestURL"])?)?;
-    let (method, body) = match wire::string(args, &["RequestMethod"])? {
-        "GET" => (Method::GET, Vec::new()),
-        "POST" => {
-            let body = wire::get(args, &["RequestBody"])?
-                .as_data()
-                .context("asset POST has no body")?;
-            ensure!(body.len() <= MAX_BODY, "asset request body too large");
-            (Method::POST, body.to_vec())
-        }
-        method => anyhow::bail!("unsupported asset HTTP method {method}"),
+    let method: Method = wire::string(args, &["RequestMethod"])?.parse()?;
+    // RequestBody is POST-only metadata in this plist contract. A GET may carry
+    // an unused value; a serialized HTTP GET must actually have an empty body.
+    let body = if method == Method::POST {
+        wire::get(args, &["RequestBody"])?
+            .as_data()
+            .context("asset POST has no body")?
+    } else {
+        &[]
     };
+    ensure!(body.len() <= MAX_BODY, "asset request body too large");
     let mut request = Request::builder().method(method).uri(url);
-    if let Some(headers) = wire::dictionary(args)?.get("RequestAdditionalHeaders") {
+    if let Some(headers) = fields.get("RequestAdditionalHeaders") {
         for (name, value) in wire::dictionary(headers)? {
             let name: ureq::http::HeaderName = name.parse()?;
             ensure!(
-                !matches!(
-                    name.as_str(),
-                    "host" | "connection" | "content-length" | "transfer-encoding"
-                ),
+                !TRANSPORT_HEADERS.contains(&name.as_str()),
                 "asset request overrides HTTP framing"
             );
             request = request.header(
@@ -45,7 +56,47 @@ pub(super) fn asset_request(args: &Value) -> Result<Request<Vec<u8>>> {
             );
         }
     }
-    Ok(request.body(body)?)
+    finish_request(request.body(body.to_vec())?)
+}
+
+/// Both device representations produce the same bounded end-to-end request.
+/// Connection-specific headers belong to ureq's transport, not the Apple origin.
+fn finish_request(mut request: Request<Vec<u8>>) -> Result<Request<Vec<u8>>> {
+    ensure!(
+        matches!(*request.method(), Method::GET | Method::POST),
+        "unsupported asset HTTP method {}",
+        request.method()
+    );
+    ensure!(
+        request.method() != Method::GET || request.body().is_empty(),
+        "asset GET has a body"
+    );
+    let header_size: usize = request
+        .headers()
+        .iter()
+        .map(|(name, value)| name.as_str().len() + value.as_bytes().len() + 4)
+        .sum();
+    ensure!(
+        header_size <= MAX_HEADERS,
+        "asset request headers too large"
+    );
+    let connection_headers = request
+        .headers()
+        .get_all("connection")
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
+        .map(|name| {
+            ureq::http::HeaderName::from_bytes(name.trim_ascii())
+                .context("invalid HTTP Connection header")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for name in connection_headers {
+        request.headers_mut().remove(name);
+    }
+    for name in TRANSPORT_HEADERS {
+        request.headers_mut().remove(*name);
+    }
+    Ok(request)
 }
 
 // Apple's URLAsset handler passes these bytes to CFHTTPMessageAppendBytes:
@@ -104,7 +155,6 @@ pub(super) fn serialized_asset_request(bytes: &[u8]) -> Result<Request<Vec<u8>>>
                 );
                 chunked = true;
             }
-            "connection" | "trailer" | "te" => {}
             _ => request = request.header(name, checked),
         }
     }
@@ -123,10 +173,6 @@ pub(super) fn serialized_asset_request(bytes: &[u8]) -> Result<Request<Vec<u8>>>
         );
         body.to_vec()
     };
-    ensure!(
-        method == "POST" || body.is_empty(),
-        "serialized GET has a body"
-    );
     let url = if target.starts_with('/') && !target.starts_with("//") {
         format!(
             "https://{}{}",
@@ -149,7 +195,7 @@ pub(super) fn serialized_asset_request(bytes: &[u8]) -> Result<Request<Vec<u8>>>
             "serialized Host differs from the Apple HTTPS URL"
         );
     }
-    Ok(request.uri(uri).body(body)?)
+    finish_request(request.uri(uri).body(body)?)
 }
 
 fn http_line<'a>(input: &mut &'a [u8]) -> Result<&'a [u8]> {

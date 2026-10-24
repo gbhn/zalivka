@@ -1,10 +1,16 @@
 //! CDC-NCM 1.0 NTB16 framing. Lengths and offsets are untrusted USB input.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
+use std::ops::Range;
+
 const MAX_FRAME: usize = 16014;
 const MAX_DATAGRAMS: usize = 128;
+
 fn word(bytes: &[u8], at: usize) -> Result<usize> {
-    ensure!(at + 2 <= bytes.len(), "truncated NCM word");
-    Ok(u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize)
+    let bytes = bytes
+        .get(at..)
+        .and_then(|bytes| bytes.first_chunk::<2>())
+        .context("truncated NCM word")?;
+    Ok(u16::from_le_bytes(*bytes) as usize)
 }
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Parameters {
@@ -22,9 +28,8 @@ impl Parameters {
             "short NCM parameters"
         );
         ensure!(word(bytes, 2)? & 1 != 0, "NCM NTB16 format is unavailable");
-        let dword = |n| u32::from_le_bytes(bytes[n..n + 4].try_into().unwrap()) as usize;
-        let input_size = dword(4).min(32768);
-        let output_size = dword(16).min(65535);
+        let input_size = (u32::from_le_bytes(bytes[4..8].try_into()?) as usize).min(32768);
+        let output_size = (u32::from_le_bytes(bytes[16..20].try_into()?) as usize).min(65535);
         let divisor = word(bytes, 20)?;
         let remainder = word(bytes, 22)?;
         let alignment = word(bytes, 24)?;
@@ -104,65 +109,76 @@ impl Parameters {
         Ok((bytes, count))
     }
 }
-pub(super) fn decode(bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
+pub(super) fn decode(mut bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut frames = vec![];
-    let mut base = 0;
-    while base < bytes.len() {
-        let ntb = &bytes[base..];
+    while !bytes.is_empty() {
         ensure!(
-            ntb.len() >= 12 && &ntb[..4] == b"NCMH" && word(ntb, 4)? == 12,
+            bytes.len() >= 12 && &bytes[..4] == b"NCMH" && word(bytes, 4)? == 12,
             "invalid NCM NTB16 header"
         );
-        let length = word(ntb, 8)?;
+        let length = word(bytes, 8)?;
         ensure!(
-            (12..=ntb.len()).contains(&length),
+            (12..=bytes.len()).contains(&length),
             "invalid NCM block length"
         );
-        let ntb = &ntb[..length];
-        let frame_start = frames.len();
-        let mut table = word(ntb, 10)?;
-        let mut seen = vec![];
-        while table != 0 {
-            ensure!(
-                table >= 12 && table + 8 <= length && !seen.contains(&table) && seen.len() < 32,
-                "invalid or cyclic NCM table"
-            );
-            seen.push(table);
-            ensure!(
-                &ntb[table..table + 4] == b"NCM0",
-                "unsupported NCM datagram signature"
-            );
-            let size = word(ntb, table + 4)?;
-            ensure!(
-                size >= 12 && size.is_multiple_of(4) && table + size <= length,
-                "invalid NCM table length"
-            );
-            let mut terminated = false;
-            for at in (table + 8..table + size).step_by(4) {
-                let start = word(ntb, at)?;
-                let count = word(ntb, at + 2)?;
-                if start == 0 && count == 0 {
-                    terminated = true;
-                    break;
-                }
-                ensure!(
-                    start >= 12
-                        && (14..=MAX_FRAME).contains(&count)
-                        && start + count <= length
-                        && frames.len() - frame_start < MAX_DATAGRAMS,
-                    "invalid NCM datagram bounds"
-                );
-                ensure!(
-                    start + count <= table || start >= table + size,
-                    "NCM datagram overlaps its table"
-                );
-                frames.push(ntb[start..start + count].to_vec());
-            }
-            ensure!(terminated, "unterminated NCM datagram table");
-            table = word(ntb, table + 6)?;
-        }
-        base += length;
+        let (block, rest) = bytes.split_at(length);
+        let ranges = datagrams(block)?;
+        frames.extend(ranges.into_iter().map(|range| block[range].to_vec()));
+        bytes = rest;
     }
+    Ok(frames)
+}
+
+/// Validate the whole NTB before copying frames. A datagram may not overlap any
+/// table or another datagram, including tables encountered later in the chain.
+fn datagrams(block: &[u8]) -> Result<Vec<Range<usize>>> {
+    let mut frames = Vec::new();
+    let mut tables: Vec<Range<usize>> = Vec::new();
+    let mut table = word(block, 10)?;
+    while table != 0 {
+        ensure!(
+            table >= 12
+                && table + 8 <= block.len()
+                && tables.len() < 32
+                && tables.iter().all(|range| range.start != table),
+            "invalid or cyclic NCM table"
+        );
+        ensure!(
+            &block[table..table + 4] == b"NCM0",
+            "unsupported NCM datagram signature"
+        );
+        let size = word(block, table + 4)?;
+        ensure!(
+            size >= 12 && size.is_multiple_of(4) && table + size <= block.len(),
+            "invalid NCM table length"
+        );
+        tables.push(table..table + size);
+        let mut terminated = false;
+        for at in (table + 8..table + size).step_by(4) {
+            let start = word(block, at)?;
+            let count = word(block, at + 2)?;
+            if start == 0 && count == 0 {
+                terminated = true;
+                break;
+            }
+            ensure!(
+                start >= 12
+                    && (14..=MAX_FRAME).contains(&count)
+                    && start + count <= block.len()
+                    && frames.len() < MAX_DATAGRAMS,
+                "invalid NCM datagram bounds"
+            );
+            frames.push(start..start + count);
+        }
+        ensure!(terminated, "unterminated NCM datagram table");
+        table = word(block, table + 6)?;
+    }
+    tables.extend(frames.iter().cloned());
+    tables.sort_unstable_by_key(|range| range.start);
+    ensure!(
+        tables.windows(2).all(|pair| pair[0].end <= pair[1].start),
+        "overlapping NCM tables or datagrams"
+    );
     Ok(frames)
 }
 #[cfg(test)]
