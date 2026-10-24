@@ -1,6 +1,93 @@
 use super::*;
 use std::net::{TcpListener, TcpStream};
 const PEER: EthernetAddress = EthernetAddress([2, 0, 0, 0, 0, 2]);
+const DNS_QUERY: &[u8] =
+    b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x01x\x07invalid\x00\x00\x01\x00\x01";
+
+struct Client {
+    ethernet: Ethernet,
+    interface: Interface,
+    sockets: SocketSet<'static>,
+    handle: SocketHandle,
+}
+
+impl Client {
+    fn new() -> Self {
+        let mut ethernet = Ethernet::default();
+        let mut interface = Interface::new(Config::new(PEER.into()), &mut ethernet, Instant::ZERO);
+        interface
+            .update_ip_addrs(|addresses| addresses.push(IpCidr::new(CLIENT.into(), 24)).unwrap());
+        interface
+            .routes_mut()
+            .add_default_ipv4_route(GATEWAY)
+            .unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+        let handle = sockets.add(tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; BUFFER]),
+            tcp::SocketBuffer::new(vec![0; BUFFER]),
+        ));
+        Self {
+            ethernet,
+            interface,
+            sockets,
+            handle,
+        }
+    }
+
+    fn connect(&mut self, destination: Ipv4Addr, port: u16, source: u16) {
+        self.sockets
+            .get_mut::<tcp::Socket>(self.handle)
+            .connect(self.interface.context(), (destination, port), source)
+            .unwrap();
+    }
+
+    fn socket(&mut self) -> &mut tcp::Socket<'static> {
+        self.sockets.get_mut::<tcp::Socket>(self.handle)
+    }
+
+    fn exchange(&mut self, router: &mut Router) {
+        let now = Instant::from_millis(router.started.elapsed().as_millis() as i64);
+        self.interface
+            .poll(now, &mut self.ethernet, &mut self.sockets);
+        for frame in self.ethernet.output.drain(..) {
+            router.receive(frame);
+        }
+        router.poll();
+        self.ethernet.input.extend(router.transmit());
+    }
+}
+
+fn attach(router: &mut Router, key: Flow, upstream: Upstream) -> SocketHandle {
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; BUFFER]),
+        tcp::SocketBuffer::new(vec![0; BUFFER]),
+    );
+    socket
+        .listen((key.destination, key.destination_port))
+        .unwrap();
+    let handle = router.sockets.add(socket);
+    router.tcp.insert(
+        key,
+        Tcp {
+            handle,
+            upstream,
+            write_closed: false,
+            last: Clock::now(),
+        },
+    );
+    handle
+}
+
+fn dhcp_request() -> Vec<u8> {
+    let mut request = vec![0; 244];
+    request[0..4].copy_from_slice(&[1, 1, 6, 0]);
+    request[4..8].copy_from_slice(&0x12345678u32.to_be_bytes());
+    request[28..34].copy_from_slice(&PEER.0);
+    request[236..240].copy_from_slice(&[99, 130, 83, 99]);
+    request[240..].copy_from_slice(&[53, 1, 1, 255]);
+    request
+}
+
 fn frame_udp(
     source: Ipv4Addr,
     source_port: u16,
@@ -22,45 +109,47 @@ fn frame_udp(
 }
 
 #[test]
-fn tcp_syn_to_port_zero_is_rejected_without_allocating_a_flow() {
-    let destination = Ipv4Addr::new(203, 0, 113, 1);
-    let mut frame = vec![0; 14 + 20 + 20];
-    let mut ethernet = EthernetFrame::new_unchecked(&mut frame);
-    ethernet.set_src_addr(PEER);
-    ethernet.set_dst_addr(MAC);
-    ethernet.set_ethertype(EthernetProtocol::Ipv4);
-    let mut ip = Ipv4Packet::new_unchecked(ethernet.payload_mut());
-    ip.set_version(4);
-    ip.set_header_len(20);
-    ip.set_total_len(40);
-    ip.set_hop_limit(64);
-    ip.set_next_header(IpProtocol::Tcp);
-    ip.set_src_addr(CLIENT);
-    ip.set_dst_addr(destination);
-    let mut tcp = TcpPacket::new_unchecked(ip.payload_mut());
-    tcp.set_src_port(50000);
-    tcp.set_dst_port(0);
-    tcp.set_header_len(20);
-    tcp.set_syn(true);
-    tcp.fill_checksum(&CLIENT.into(), &destination.into());
-    ip.fill_checksum();
+fn invalid_tcp_syns_do_not_allocate_flows() {
+    for (source_port, destination_port, version, fin) in [
+        (50000, 0, 4, false),
+        (0, 53, 4, false),
+        (50000, 53, 4, true),
+        (50000, 53, 6, false),
+    ] {
+        let mut frame = vec![0; 14 + 20 + 20];
+        let mut ethernet = EthernetFrame::new_unchecked(&mut frame);
+        ethernet.set_src_addr(PEER);
+        ethernet.set_dst_addr(MAC);
+        ethernet.set_ethertype(EthernetProtocol::Ipv4);
+        let mut ip = Ipv4Packet::new_unchecked(ethernet.payload_mut());
+        ip.set_version(version);
+        ip.set_header_len(20);
+        ip.set_total_len(40);
+        ip.set_hop_limit(64);
+        ip.set_next_header(IpProtocol::Tcp);
+        ip.set_src_addr(CLIENT);
+        ip.set_dst_addr(GATEWAY);
+        let mut tcp = TcpPacket::new_unchecked(ip.payload_mut());
+        tcp.set_src_port(source_port);
+        tcp.set_dst_port(destination_port);
+        tcp.set_header_len(20);
+        tcp.set_syn(true);
+        tcp.set_fin(fin);
+        tcp.fill_checksum(&CLIENT.into(), &GATEWAY.into());
+        ip.fill_checksum();
 
-    let mut router = Router::new();
-    router.receive(frame);
-    router.poll();
-    router.transmit();
-    assert!(router.tcp.is_empty());
-    assert_eq!(router.sockets.iter().count(), 0);
+        let mut router = Router::new();
+        router.receive(frame);
+        router.poll();
+        router.transmit();
+        assert!(router.tcp.is_empty());
+        assert_eq!(router.sockets.iter().count(), 0);
+    }
 }
 
 #[test]
 fn dhcp_assigns_address_and_does_not_answer_clients_arp_probe() {
-    let mut request = vec![0; 244];
-    request[0..4].copy_from_slice(&[1, 1, 6, 0]);
-    request[4..8].copy_from_slice(&0x12345678u32.to_be_bytes());
-    request[28..34].copy_from_slice(&PEER.0);
-    request[236..240].copy_from_slice(&[99, 130, 83, 99]);
-    request[240..].copy_from_slice(&[53, 1, 1, 255]);
+    let request = dhcp_request();
     let mut router = Router::new();
     router.receive(frame_udp(
         Ipv4Addr::UNSPECIFIED,
@@ -115,8 +204,7 @@ fn udp_dns_is_local_and_other_datagrams_are_not_forwarded() {
         destination: Ipv4Addr::new(1, 1, 1, 1),
         destination_port: 53,
     };
-    let query =
-        b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x01x\x07invalid\x00\x00\x01\x00\x01";
+    let query = DNS_QUERY;
     router.receive(frame_udp(
         CLIENT,
         key.source_port,
@@ -136,7 +224,7 @@ fn udp_dns_is_local_and_other_datagrams_are_not_forwarded() {
     assert!(udp.verify_checksum(&key.destination.into(), &CLIENT.into()));
     assert_eq!(&udp.payload()[udp.payload().len() - 4..], &[198, 18, 0, 1]);
     assert_eq!(
-        router.dns.borrow().host(Ipv4Addr::new(198, 18, 0, 1)),
+        router.dns.host(Ipv4Addr::new(198, 18, 0, 1)),
         Some("x.invalid")
     );
     for port in [443, 123, 5353] {
@@ -178,24 +266,9 @@ fn udp_dns_is_local_and_other_datagrams_are_not_forwarded() {
 fn tcp_dns_to_the_gateway_or_a_hard_coded_server_stays_local() {
     for destination in [GATEWAY, Ipv4Addr::new(8, 8, 8, 8)] {
         let mut router = Router::new();
-        let mut ethernet = Ethernet::default();
-        let mut interface = Interface::new(Config::new(PEER.into()), &mut ethernet, Instant::ZERO);
-        interface.update_ip_addrs(|a| a.push(IpCidr::new(CLIENT.into(), 24)).unwrap());
-        interface
-            .routes_mut()
-            .add_default_ipv4_route(GATEWAY)
-            .unwrap();
-        let mut sockets = SocketSet::new(vec![]);
-        let mut socket = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; BUFFER]),
-            tcp::SocketBuffer::new(vec![0; BUFFER]),
-        );
-        socket
-            .connect(interface.context(), (destination, 53), 50000)
-            .unwrap();
-        let client = sockets.add(socket);
-        let query =
-            b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x01x\x07invalid\x00\x00\x01\x00\x01";
+        let mut client = Client::new();
+        client.connect(destination, 53, 50000);
+        let query = DNS_QUERY;
         let mut request = (query.len() as u16).to_be_bytes().to_vec();
         request.extend(query);
         let started = Clock::now();
@@ -206,16 +279,13 @@ fn tcp_dns_to_the_gateway_or_a_hard_coded_server_stays_local() {
                 started.elapsed() < Duration::from_secs(3),
                 "local TCP DNS timed out"
             );
-            let now = Instant::from_millis(started.elapsed().as_millis() as i64);
-            interface.poll(now, &mut ethernet, &mut sockets);
-            for frame in ethernet.output.drain(..) {
-                router.receive(frame);
-            }
-            router.poll();
-            ethernet.input.extend(router.transmit());
-            let socket = sockets.get_mut::<tcp::Socket>(client);
+            client.exchange(&mut router);
+            let socket = client.socket();
             if socket.can_send() && sent < request.len() {
                 sent += socket.send_slice(&request[sent..]).unwrap();
+                if sent == request.len() {
+                    socket.close();
+                }
             }
             if socket.can_recv() {
                 socket
@@ -238,27 +308,17 @@ fn tcp_dns_to_the_gateway_or_a_hard_coded_server_stays_local() {
             router
                 .tcp
                 .values()
-                .all(|f| f.connecting.is_none() && matches!(f.stream, Some(Stream::Dns(_))))
+                .all(|flow| matches!(flow.upstream, Upstream::Dns(_)))
         );
         assert_eq!(router.bytes(), (0, 0));
     }
 }
+
 #[test]
 fn tcp_reclaims_timed_out_reset_and_failed_connections_before_reusing_handles() {
     let mut router = Router::new();
     let destination = Ipv4Addr::new(203, 0, 113, 1);
-    let mut ethernet = Ethernet::default();
-    let mut interface = Interface::new(Config::new(PEER.into()), &mut ethernet, Instant::ZERO);
-    interface.update_ip_addrs(|a| a.push(IpCidr::new(CLIENT.into(), 24)).unwrap());
-    interface
-        .routes_mut()
-        .add_default_ipv4_route(GATEWAY)
-        .unwrap();
-    let mut sockets = SocketSet::new(vec![]);
-    let client = sockets.add(tcp::Socket::new(
-        tcp::SocketBuffer::new(vec![0; BUFFER]),
-        tcp::SocketBuffer::new(vec![0; BUFFER]),
-    ));
+    let mut client = Client::new();
     let mut previous_handle = None;
     for index in 0..MAX_FLOWS * 3 {
         let key = Flow {
@@ -267,40 +327,17 @@ fn tcp_reclaims_timed_out_reset_and_failed_connections_before_reusing_handles() 
             destination,
             destination_port: 443,
         };
-        let mut incoming = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; BUFFER]),
-            tcp::SocketBuffer::new(vec![0; BUFFER]),
-        );
-        incoming.listen((destination, 443)).unwrap();
-        let handle = router.sockets.add(incoming);
+        let (_pending, rx) = mpsc::sync_channel(1);
+        let handle = attach(&mut router, key, Upstream::Connecting(rx));
         if let Some(previous) = previous_handle {
             assert_eq!(handle, previous, "closed socket storage must be reusable");
         }
         previous_handle = Some(handle);
-        router.tcp.insert(
-            key,
-            Tcp {
-                handle,
-                connecting: None,
-                stream: None,
-                write_closed: false,
-                last: Clock::now(),
-            },
-        );
-        sockets
-            .get_mut::<tcp::Socket>(client)
-            .connect(interface.context(), (destination, 443), key.source_port)
-            .unwrap();
+        client.connect(destination, 443, key.source_port);
         for _ in 0..32 {
-            let now = Instant::from_millis(router.started.elapsed().as_millis() as i64);
-            interface.poll(now, &mut ethernet, &mut sockets);
-            for frame in ethernet.output.drain(..) {
-                router.receive(frame);
-            }
-            router.poll();
-            ethernet.input.extend(router.transmit());
+            client.exchange(&mut router);
             if router.sockets.get::<tcp::Socket>(handle).state() == tcp::State::Established
-                && sockets.get::<tcp::Socket>(client).state() == tcp::State::Established
+                && client.socket().state() == tcp::State::Established
             {
                 break;
             }
@@ -311,8 +348,7 @@ fn tcp_reclaims_timed_out_reset_and_failed_connections_before_reusing_handles() 
         );
         match index % 3 {
             0 => {
-                // The timeout closes the socket inside Interface::poll,
-                // after the proxy has already inspected the open flow.
+                // Interface::poll can close a socket after the proxy inspects it.
                 router
                     .sockets
                     .get_mut::<tcp::Socket>(handle)
@@ -320,18 +356,20 @@ fn tcp_reclaims_timed_out_reset_and_failed_connections_before_reusing_handles() 
                 router.started -= Duration::from_secs(1);
             }
             1 => {
-                sockets.get_mut::<tcp::Socket>(client).abort();
+                client.socket().abort();
                 let now = Instant::from_millis(router.started.elapsed().as_millis() as i64);
-                interface.poll(now, &mut ethernet, &mut sockets);
-                for frame in ethernet.output.drain(..) {
+                client
+                    .interface
+                    .poll(now, &mut client.ethernet, &mut client.sockets);
+                for frame in client.ethernet.output.drain(..) {
                     router.receive(frame);
                 }
             }
             _ => {
                 let (tx, rx) = mpsc::sync_channel(1);
-                tx.send(Err(std::io::ErrorKind::ConnectionRefused.into()))
+                tx.send(Err(io::ErrorKind::ConnectionRefused.into()))
                     .unwrap();
-                router.tcp.get_mut(&key).unwrap().connecting = Some(rx);
+                router.tcp.get_mut(&key).unwrap().upstream = Upstream::Connecting(rx);
             }
         }
         router.poll();
@@ -354,19 +392,20 @@ fn tcp_reclaims_timed_out_reset_and_failed_connections_before_reusing_handles() 
                 "the final TCP reset must reach the peer"
             );
         }
-        // The old cleanup removed the socket but left its flow behind
-        // when Interface::poll was responsible for closing it.
         router.poll();
         assert!(router.tcp.is_empty());
         assert_eq!(router.sockets.iter().count(), 0);
-        ethernet.input.extend(frames);
+        client.ethernet.input.extend(frames);
         let now = Instant::from_millis(router.started.elapsed().as_millis() as i64);
-        interface.poll(now, &mut ethernet, &mut sockets);
-        assert!(!sockets.get::<tcp::Socket>(client).is_open());
+        client
+            .interface
+            .poll(now, &mut client.ethernet, &mut client.sockets);
+        assert!(!client.socket().is_open());
     }
 }
+
 #[test]
-fn tcp_preserves_large_payload_and_half_close_with_a_real_upstream_socket() {
+fn tcp_preserves_buffered_payload_across_connect_and_half_close_with_a_real_upstream_socket() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let connection = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     connection.set_nonblocking(true).unwrap();
@@ -397,40 +436,11 @@ fn tcp_preserves_large_payload_and_half_close_with_a_real_upstream_socket() {
         destination,
         destination_port: 443,
     };
-    let mut incoming = tcp::Socket::new(
-        tcp::SocketBuffer::new(vec![0; BUFFER]),
-        tcp::SocketBuffer::new(vec![0; BUFFER]),
-    );
-    incoming.listen((destination, 443)).unwrap();
-    let handle = router.sockets.add(incoming);
-    router.tcp.insert(
-        key,
-        Tcp {
-            handle,
-            connecting: None,
-            stream: Some(Stream::Network(crate::proxy::socket::Stream::from_tcp(
-                connection,
-            ))),
-            write_closed: false,
-            last: Clock::now(),
-        },
-    );
-    let mut ethernet = Ethernet::default();
-    let mut interface = Interface::new(Config::new(PEER.into()), &mut ethernet, Instant::ZERO);
-    interface.update_ip_addrs(|a| a.push(IpCidr::new(CLIENT.into(), 24)).unwrap());
-    interface
-        .routes_mut()
-        .add_default_ipv4_route(GATEWAY)
-        .unwrap();
-    let mut sockets = SocketSet::new(vec![]);
-    let mut client = tcp::Socket::new(
-        tcp::SocketBuffer::new(vec![0; BUFFER]),
-        tcp::SocketBuffer::new(vec![0; BUFFER]),
-    );
-    client
-        .connect(interface.context(), (destination, 443), 45678)
-        .unwrap();
-    let client = sockets.add(client);
+    let (completed, pending) = mpsc::sync_channel(1);
+    let handle = attach(&mut router, key, Upstream::Connecting(pending));
+    let mut connection = Some(upstream::Stream::from_tcp(connection));
+    let mut client = Client::new();
+    client.connect(destination, 443, key.source_port);
     let mut sent = 0;
     let mut received = vec![];
     let mut closed = false;
@@ -441,14 +451,12 @@ fn tcp_preserves_large_payload_and_half_close_with_a_real_upstream_socket() {
             "TCP proxy timeout: sent {sent}, received {}",
             received.len()
         );
-        let now = Instant::from_millis(started.elapsed().as_millis() as i64);
-        interface.poll(now, &mut ethernet, &mut sockets);
-        for frame in ethernet.output.drain(..) {
-            router.receive(frame);
+        client.exchange(&mut router);
+        if connection.is_some() && router.sockets.get::<tcp::Socket>(handle).can_recv() {
+            assert!(matches!(router.tcp[&key].upstream, Upstream::Connecting(_)));
+            completed.send(Ok(connection.take().unwrap())).unwrap();
         }
-        router.poll();
-        ethernet.input.extend(router.transmit());
-        let socket = sockets.get_mut::<tcp::Socket>(client);
+        let socket = client.socket();
         if socket.can_send() && sent < payload.len() {
             sent += socket.send_slice(&payload[sent..]).unwrap();
         }
@@ -467,6 +475,10 @@ fn tcp_preserves_large_payload_and_half_close_with_a_real_upstream_socket() {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(
+        connection.is_none(),
+        "the connection must have completed after buffering client bytes"
+    );
+    assert!(
         received == payload,
         "client payload mismatch: {} bytes",
         received.len()
@@ -474,6 +486,35 @@ fn tcp_preserves_large_payload_and_half_close_with_a_real_upstream_socket() {
     assert_eq!(router.bytes(), (payload.len() as u64, payload.len() as u64));
     server.join().unwrap();
 }
+
+#[test]
+fn dhcp_and_dns_floods_cannot_grow_the_ethernet_queue_without_bound() {
+    let mut router = Router::new();
+    let request = dhcp_request();
+    for _ in 0..MAX_QUEUE * 3 {
+        router.receive(frame_udp(
+            Ipv4Addr::UNSPECIFIED,
+            68,
+            Ipv4Addr::BROADCAST,
+            67,
+            &request,
+        ));
+    }
+    assert_eq!(router.ethernet.output.len(), MAX_QUEUE);
+    let query = DNS_QUERY;
+    router.receive(frame_udp(CLIENT, 50000, GATEWAY, 53, query));
+    assert_eq!(router.ethernet.output.len(), MAX_QUEUE);
+    assert_eq!(router.dns.host(Ipv4Addr::new(198, 18, 0, 1)), None);
+    assert_eq!(router.transmit().len(), MAX_QUEUE);
+    router.receive(frame_udp(CLIENT, 50000, GATEWAY, 53, query));
+    let replies = router.transmit();
+    assert_eq!(replies.len(), 1);
+    let ethernet = EthernetFrame::new_checked(&replies[0]).unwrap();
+    let ip = Ipv4Packet::new_checked(ethernet.payload()).unwrap();
+    let udp = UdpPacket::new_checked(ip.payload()).unwrap();
+    assert_eq!(&udp.payload()[udp.payload().len() - 4..], &[198, 18, 0, 1]);
+}
+
 #[test]
 #[ignore = "synthetic USB internet throughput benchmark; no physical USB or external network"]
 fn benchmark_usb_internet_batching() {
@@ -498,40 +539,13 @@ fn benchmark_usb_internet_batching() {
             destination,
             destination_port: 443,
         };
-        let mut incoming = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; BUFFER]),
-            tcp::SocketBuffer::new(vec![0; BUFFER]),
-        );
-        incoming.listen((destination, 443)).unwrap();
-        let handle = router.sockets.add(incoming);
-        router.tcp.insert(
+        attach(
+            &mut router,
             key,
-            Tcp {
-                handle,
-                connecting: None,
-                stream: Some(Stream::Network(crate::proxy::socket::Stream::from_tcp(
-                    connection,
-                ))),
-                write_closed: false,
-                last: Clock::now(),
-            },
+            Upstream::Network(upstream::Stream::from_tcp(connection)),
         );
-        let mut ethernet = Ethernet::default();
-        let mut interface = Interface::new(Config::new(PEER.into()), &mut ethernet, Instant::ZERO);
-        interface.update_ip_addrs(|a| a.push(IpCidr::new(CLIENT.into(), 24)).unwrap());
-        interface
-            .routes_mut()
-            .add_default_ipv4_route(GATEWAY)
-            .unwrap();
-        let mut sockets = SocketSet::new(vec![]);
-        let mut socket = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; BUFFER]),
-            tcp::SocketBuffer::new(vec![0; BUFFER]),
-        );
-        socket
-            .connect(interface.context(), (destination, 443), 45678)
-            .unwrap();
-        let client = sockets.add(socket);
+        let mut client = Client::new();
+        client.connect(destination, 443, key.source_port);
         let params = super::super::ncm::Parameters {
             input_size: 32768,
             output_size: 32764,
@@ -556,9 +570,11 @@ fn benchmark_usb_internet_batching() {
                 std::thread::sleep(Duration::from_millis(2));
             }
             let now = Instant::from_millis(started.elapsed().as_millis() as i64);
-            interface.poll(now, &mut ethernet, &mut sockets);
-            active = !ethernet.output.is_empty();
-            for frame in ethernet.output.drain(..) {
+            client
+                .interface
+                .poll(now, &mut client.ethernet, &mut client.sockets);
+            active = !client.ethernet.output.is_empty();
+            for frame in client.ethernet.output.drain(..) {
                 router.receive(frame);
             }
             router.poll();
@@ -575,13 +591,14 @@ fn benchmark_usb_internet_batching() {
             while offset < frames.len() {
                 let (ntb, count) = params.encode(&frames[offset..], transfers as u16).unwrap();
                 std::thread::sleep(Duration::from_micros(250));
-                ethernet
+                client
+                    .ethernet
                     .input
                     .extend(super::super::ncm::decode(&ntb).unwrap());
                 offset += count;
                 transfers += 1;
             }
-            let socket = sockets.get_mut::<tcp::Socket>(client);
+            let socket = client.socket();
             if socket.can_recv() {
                 socket
                     .recv(|bytes| {

@@ -1,7 +1,7 @@
 //! Asynchronous restored requests, isolated archives and worker lifetime.
 use super::{ContextState, RESTORED_PORT, options::ASYNC_DATA_TYPES};
 use crate::{asr, mux::Session, wire};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use plist::Value;
 use std::{
     collections::HashMap,
@@ -10,38 +10,38 @@ use std::{
     time::Duration,
 };
 
-/// Asynchronous requests always use their own device-supplied service port.
-/// Keeping the control connection in one thread prevents interleaved plist frames.
+const MAX_WORKERS: usize = 16;
+type Completion = (u16, Result<()>);
+
+/// Asynchronous requests own their service ports and ZIP readers. Completion
+/// returns both the result and the port, so reaping and error reporting agree.
 pub struct AsyncRequests {
     session: Session,
     workers: HashMap<u16, JoinHandle<()>>,
-    errors: mpsc::Receiver<String>,
-    sender: mpsc::Sender<String>,
+    completed: mpsc::Receiver<Completion>,
+    sender: mpsc::Sender<Completion>,
 }
+
 impl AsyncRequests {
     pub fn new(session: &Session) -> Self {
-        let (sender, errors) = mpsc::channel();
+        let (sender, completed) = mpsc::channel();
         Self {
             session: session.clone(),
             workers: HashMap::new(),
-            errors,
+            completed,
             sender,
         }
     }
+
     pub fn spawn(&mut self, state: &ContextState, request: Value) -> Result<()> {
         let kind = wire::string(&request, &["DataType"])?;
         ensure!(
             ASYNC_DATA_TYPES.contains(&kind),
             "unsupported async data type {kind}"
         );
-        for (_, worker) in self.workers.extract_if(|_, worker| worker.is_finished()) {
-            worker
-                .join()
-                .map_err(|_| anyhow::anyhow!("async worker panicked"))?;
-        }
         self.check()?;
         ensure!(
-            self.workers.len() < 16,
+            self.workers.len() < MAX_WORKERS,
             "too many active asynchronous data requests"
         );
         let port = asr::data_port(&request, 0)?;
@@ -67,45 +67,60 @@ impl AsyncRequests {
         let worker = thread::Builder::new()
             .name(format!("zalivka-{kind}"))
             .spawn(move || {
-                let result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-                        let mut stream = session.connect_retry(port, Duration::from_secs(60))?;
-                        if let Some(state) = &mut state {
-                            state.serve_on(&session, &mut stream, &request)
-                        } else {
-                            let response = assets.response(&request)?;
-                            wire::send_binary(&mut stream, &response)
-                        }
-                    }))
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("async worker panicked")));
-                if let Err(error) = result {
-                    let _ = sender.send(format!(
-                        "asynchronous {kind} on DataPort {port} failed: {error:#}"
-                    ));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut stream = session.connect_retry(port, Duration::from_secs(60))?;
+                    if let Some(state) = &mut state {
+                        state.serve_on(&session, &mut stream, &request)
+                    } else {
+                        wire::send_binary(&mut stream, &assets.response(&request)?)
+                    }
+                }))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("async worker panicked")))
+                .with_context(|| format!("asynchronous {kind} on DataPort {port} failed"));
+                let failed = result.is_err();
+                // Publish the original error before waking a blocked control read
+                // through cancellation. check() must see the cause, not just cancel.
+                let _ = sender.send((port, result));
+                if failed {
                     session.cancel();
                 }
             })?;
         self.workers.insert(port, worker);
         Ok(())
     }
-    pub fn check(&self) -> Result<()> {
-        if let Ok(error) = self.errors.try_recv() {
-            bail!("{error}");
+
+    pub fn check(&mut self) -> Result<()> {
+        while let Ok((port, result)) = self.completed.try_recv() {
+            self.complete(port, result)?;
         }
         Ok(())
     }
+
     pub fn finish(&mut self) -> Result<()> {
-        for (_, worker) in self.workers.drain() {
-            worker
-                .join()
-                .map_err(|_| anyhow::anyhow!("async worker panicked"))?;
+        while !self.workers.is_empty() {
+            let (port, result) = self.completed.recv().context("waiting for async workers")?;
+            self.complete(port, result)?;
         }
-        self.check()
+        Ok(())
+    }
+
+    fn complete(&mut self, port: u16, result: Result<()>) -> Result<()> {
+        let worker = self
+            .workers
+            .remove(&port)
+            .context("unknown async worker completion")?;
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("async worker panicked"))?;
+        result
     }
 }
+
 impl Drop for AsyncRequests {
     fn drop(&mut self) {
         self.session.cancel();
+        // Removing one completed worker at a time leaves every other handle here
+        // for cancellation and joining, including an early error from finish().
         for (_, worker) in self.workers.drain() {
             let _ = worker.join();
         }

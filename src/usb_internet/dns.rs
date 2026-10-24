@@ -1,13 +1,13 @@
 //! Session-local DNS names: resolution happens when Windows opens the stream.
 use std::{
-    cell::RefCell,
     collections::{HashMap, VecDeque},
-    io::{self, Read, Write},
+    io::{self, Read},
     net::Ipv4Addr,
-    rc::Rc,
 };
 const MAX_NAMES: usize = 4096;
 const MAX_MESSAGE: usize = 4096;
+const MAX_OUTPUT: usize = 65536;
+const ADDRESS_BASE: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 0);
 #[derive(Default)]
 pub(super) struct Resolver {
     names: Vec<String>,
@@ -18,7 +18,7 @@ impl Resolver {
         if !synthetic(ip) {
             return None;
         }
-        let value = u32::from(ip) - u32::from(Ipv4Addr::new(198, 18, 0, 0));
+        let value = u32::from(ip) - u32::from(ADDRESS_BASE);
         self.names
             .get(value.checked_sub(1)? as usize)
             .map(String::as_str)
@@ -72,9 +72,7 @@ impl Resolver {
                 reply[3] |= 2;
                 return Some(reply);
             }
-            let ip = Ipv4Addr::from(
-                u32::from(Ipv4Addr::new(198, 18, 0, 0)) + self.names.len() as u32 + 1,
-            );
+            let ip = Ipv4Addr::from(u32::from(ADDRESS_BASE) + self.names.len() as u32 + 1);
             self.names.push(key.clone());
             self.addresses.insert(key, ip);
             ip
@@ -132,45 +130,19 @@ fn question(bytes: &[u8]) -> Option<(String, usize)> {
     None
 }
 
+/// Per-connection DNS framing. The router owns and lends the shared name map.
+#[derive(Default)]
 pub(super) struct Tcp {
-    resolver: Rc<RefCell<Resolver>>,
     input: Vec<u8>,
     output: VecDeque<u8>,
     closed: bool,
 }
 impl Tcp {
-    pub fn new(resolver: Rc<RefCell<Resolver>>) -> Self {
-        Self {
-            resolver,
-            input: vec![],
-            output: VecDeque::new(),
-            closed: false,
-        }
-    }
     pub fn shutdown_write(&mut self) {
         self.closed = true;
     }
-}
-impl Read for Tcp {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if out.is_empty() {
-            return Ok(0);
-        }
-        if self.output.is_empty() && !self.closed {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
-        self.output.read(out)
-    }
-}
-impl Write for Tcp {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.closed {
-            return Err(io::ErrorKind::BrokenPipe.into());
-        }
-        let n = bytes
-            .len()
-            .min((MAX_MESSAGE + 2).saturating_sub(self.input.len()));
-        self.input.extend_from_slice(&bytes[..n]);
+
+    pub fn poll(&mut self, resolver: &mut Resolver) -> io::Result<()> {
         while self.input.len() >= 2 {
             let size = u16::from_be_bytes([self.input[0], self.input[1]]) as usize;
             if !(12..=MAX_MESSAGE).contains(&size) {
@@ -179,19 +151,52 @@ impl Write for Tcp {
             if self.input.len() < size + 2 {
                 break;
             }
-            if let Some(reply) = self.resolver.borrow_mut().reply(&self.input[2..size + 2]) {
-                if self.output.len() + reply.len() + 2 > 65536 {
-                    return Err(io::ErrorKind::OutOfMemory.into());
-                }
+            // Leave complete queries buffered until their replies can be queued.
+            // A slow reader must exert backpressure, not lose its DNS connection.
+            if self.output.len() + MAX_MESSAGE + 2 > MAX_OUTPUT {
+                return Ok(());
+            }
+            if let Some(reply) = resolver.reply(&self.input[2..size + 2]) {
                 self.output.extend((reply.len() as u16).to_be_bytes());
                 self.output.extend(reply);
             }
             self.input.drain(..size + 2);
         }
+        if self.closed && !self.input.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "DNS connection closed within a query",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn write(&mut self, bytes: &[u8], resolver: &mut Resolver) -> io::Result<usize> {
+        if self.closed {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        self.poll(resolver)?;
+        let n = bytes.len().min(MAX_MESSAGE + 2 - self.input.len());
+        if n == 0 {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        self.input.extend_from_slice(&bytes[..n]);
+        self.poll(resolver)?;
         Ok(n)
     }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+}
+impl Read for Tcp {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if self.output.is_empty() && (!self.closed || !self.input.is_empty()) {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        self.output.read(out)
     }
 }
 

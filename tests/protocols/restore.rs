@@ -1337,9 +1337,60 @@ fn async_requests_reject_invalid_ports_and_propagate_worker_failure_to_the_contr
             ]),
         )
         .unwrap();
-    let error = requests.finish().unwrap_err().to_string();
-    assert!(error.contains("PersonalizedBootObjectV3") && error.contains("23456"));
+    let error = requests.finish().unwrap_err();
+    assert!(
+        error.to_string().contains("PersonalizedBootObjectV3")
+            && error.to_string().contains("23456")
+    );
+    assert!(
+        error
+            .chain()
+            .skip(1)
+            .any(|cause| cause.to_string().contains("MissingFirmware"))
+    );
     assert!(main.write_all(b"session was cancelled").is_err());
+}
+
+#[test]
+fn async_completion_releases_ports_and_leaves_the_control_channel_available() {
+    let file = fixture(None, false);
+    let state = restore_state(file.path());
+    let (usb, output) = mock_mux(vec![
+        version_packet(),
+        tcp(62078, 1, 0, 1, 0x12, &[]),
+        tcp(23456, 2, 0, 1, 0x12, &[]),
+        tcp(23456, 3, 0, 1, 0x12, &[]),
+    ]);
+    let session = Session::new(usb).unwrap();
+    let mut main = session.connect(62078).unwrap();
+    let mut requests = restore::AsyncRequests::new(&session);
+    for _ in 0..2 {
+        requests
+            .spawn(
+                &state,
+                wire::dict([
+                    ("DataType", "RootTicket".into()),
+                    ("DataPort", 23456u64.into()),
+                ]),
+            )
+            .unwrap();
+        requests.finish().unwrap();
+        requests.check().unwrap();
+        main.write_all(b"control is still connected").unwrap();
+    }
+    requests.finish().unwrap();
+    let mut replies = mux_output(&output, 23456);
+    for _ in 0..2 {
+        let reply = wire::receive(&mut replies).unwrap();
+        assert_eq!(
+            wire::get(&reply, &["RootTicketData"])
+                .unwrap()
+                .as_data()
+                .unwrap(),
+            tss::ticket(&state.ticket).unwrap()
+        );
+    }
+    assert_eq!(replies.position(), replies.get_ref().len() as u64);
 }
 
 #[test]

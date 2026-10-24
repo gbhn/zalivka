@@ -1,63 +1,27 @@
-//! A small, temporary IPv4 gateway. TCP/IP framing is delegated to smoltcp.
+//! IPv4 gateway: per-flow TCP forwarding and a session-owned DNS resolver.
+mod ethernet;
 use super::dns;
+use crate::proxy::socket as upstream;
+#[cfg(test)]
+use ethernet::udp_reply;
+use ethernet::{CLIENT, Ethernet, GATEWAY, MAC, MAX_QUEUE, dhcp_reply};
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
-    phy::{self, DeviceCapabilities, Medium},
+    phy::ChecksumCapabilities,
     socket::tcp,
     time::Instant,
     wire::*,
 };
 use std::{
-    cell::RefCell,
-    collections::{HashMap, VecDeque},
-    io::{Read, Write},
+    collections::HashMap,
+    io::{self, Read, Write},
     net::Ipv4Addr,
-    rc::Rc,
     sync::mpsc::{self, Receiver},
     time::{Duration, Instant as Clock},
 };
-const GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 168, 249, 1);
-const CLIENT: Ipv4Addr = Ipv4Addr::new(192, 168, 249, 2);
-const MAC: EthernetAddress = EthernetAddress([2, 0x5a, 0x41, 0x4c, 0x49, 1]);
 const MAX_FLOWS: usize = 64;
 const BUFFER: usize = 65536;
-#[derive(Default)]
-struct Ethernet {
-    input: VecDeque<Vec<u8>>,
-    output: VecDeque<Vec<u8>>,
-}
-struct Rx(Vec<u8>);
-struct Tx<'a>(&'a mut VecDeque<Vec<u8>>);
-impl phy::RxToken for Rx {
-    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
-        f(&self.0)
-    }
-}
-impl phy::TxToken for Tx<'_> {
-    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let mut bytes = vec![0; len];
-        let r = f(&mut bytes);
-        self.0.push_back(bytes);
-        r
-    }
-}
-impl phy::Device for Ethernet {
-    type RxToken<'a> = Rx;
-    type TxToken<'a> = Tx<'a>;
-    fn receive(&mut self, _: Instant) -> Option<(Rx, Tx<'_>)> {
-        let bytes = self.input.pop_front()?;
-        Some((Rx(bytes), Tx(&mut self.output)))
-    }
-    fn transmit(&mut self, _: Instant) -> Option<Tx<'_>> {
-        (self.output.len() < 256).then_some(Tx(&mut self.output))
-    }
-    fn capabilities(&self) -> DeviceCapabilities {
-        let mut c = DeviceCapabilities::default();
-        c.medium = Medium::Ethernet;
-        c.max_transmission_unit = 1514;
-        c
-    }
-}
+const FLOW_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct Flow {
     source: Ipv4Addr,
@@ -66,66 +30,150 @@ struct Flow {
     destination_port: u16,
 }
 
-enum Stream {
-    Network(crate::proxy::socket::Stream),
+enum Upstream {
+    Connecting(Receiver<io::Result<upstream::Stream>>),
+    Network(upstream::Stream),
     Dns(dns::Tcp),
 }
-impl Stream {
-    fn poll(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::Network(s) => s.poll(),
-            Self::Dns(_) => Ok(()),
+impl Upstream {
+    fn poll(&mut self, resolver: &mut dns::Resolver) -> io::Result<bool> {
+        if let Self::Connecting(result) = self {
+            match result.try_recv() {
+                Ok(result) => *self = Self::Network(result?),
+                Err(mpsc::TryRecvError::Empty) => return Ok(false),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(io::Error::other("upstream connection worker stopped"));
+                }
+            }
+        }
+        let polled = match self {
+            Self::Network(stream) => stream.poll(),
+            Self::Dns(stream) => stream.poll(resolver),
+            Self::Connecting(_) => return Ok(false),
+        };
+        match polled {
+            Err(error) if idle(&error) => Ok(false),
+            result => result.map(|()| true),
         }
     }
-    fn shutdown_write(&mut self) -> std::io::Result<()> {
+
+    fn shutdown_write(&mut self) -> io::Result<()> {
         match self {
-            Self::Network(s) => s.shutdown_write(),
-            Self::Dns(s) => {
-                s.shutdown_write();
+            Self::Connecting(_) => Err(io::ErrorKind::WouldBlock.into()),
+            Self::Network(stream) => stream.shutdown_write(),
+            Self::Dns(stream) => {
+                stream.shutdown_write();
                 Ok(())
             }
         }
     }
-}
-impl Read for Stream {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         match self {
-            Self::Network(s) => s.read(out),
-            Self::Dns(s) => s.read(out),
+            Self::Connecting(_) => Err(io::ErrorKind::WouldBlock.into()),
+            Self::Network(stream) => stream.read(out),
+            Self::Dns(stream) => stream.read(out),
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8], resolver: &mut dns::Resolver) -> io::Result<usize> {
+        match self {
+            Self::Connecting(_) => Err(io::ErrorKind::WouldBlock.into()),
+            Self::Network(stream) => stream.write(bytes),
+            Self::Dns(stream) => stream.write(bytes, resolver),
         }
     }
 }
-impl Write for Stream {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Network(s) => s.write(bytes),
-            Self::Dns(s) => s.write(bytes),
-        }
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::Network(s) => s.flush(),
-            Self::Dns(s) => s.flush(),
-        }
-    }
-}
+
 struct Tcp {
     handle: SocketHandle,
-    connecting: Option<Receiver<std::io::Result<crate::proxy::socket::Stream>>>,
-    stream: Option<Stream>,
+    upstream: Upstream,
     write_closed: bool,
     last: Clock,
 }
+
+impl Tcp {
+    fn poll(
+        &mut self,
+        socket: &mut tcp::Socket,
+        resolver: &mut dns::Resolver,
+        traffic: &mut (u64, u64),
+    ) -> io::Result<()> {
+        if !self.upstream.poll(resolver)? {
+            return Ok(());
+        }
+        let external = matches!(self.upstream, Upstream::Network(_));
+        if socket.can_recv() {
+            let n = socket
+                .recv(|bytes| match self.upstream.write(bytes, resolver) {
+                    Ok(0) => (0, Err(io::ErrorKind::WriteZero.into())),
+                    Ok(n) => (n, Ok(n)),
+                    Err(error) if idle(&error) => (0, Ok(0)),
+                    Err(error) => (0, Err(error)),
+                })
+                .map_err(io::Error::other)??;
+            if n != 0 {
+                self.last = Clock::now();
+                if external {
+                    traffic.0 += n as u64;
+                }
+            }
+        }
+        if matches!(
+            socket.state(),
+            tcp::State::CloseWait
+                | tcp::State::Closing
+                | tcp::State::LastAck
+                | tcp::State::TimeWait
+        ) && !socket.can_recv()
+            && !self.write_closed
+        {
+            match self.upstream.shutdown_write() {
+                // TLS may still be flushing close_notify. Its next poll completes it.
+                Ok(()) => self.write_closed = true,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.write_closed = true,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if socket.can_send() {
+            let read = socket
+                .send(|bytes| match self.upstream.read(bytes) {
+                    Ok(n) => (n, Ok(Some(n))),
+                    Err(error) if idle(&error) => (0, Ok(None)),
+                    Err(error) => (0, Err(error)),
+                })
+                .map_err(io::Error::other)??;
+            match read {
+                Some(0) => socket.close(),
+                Some(n) => {
+                    self.last = Clock::now();
+                    if external {
+                        traffic.1 += n as u64;
+                    }
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+fn idle(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
+}
+
 pub(super) struct Router {
     ethernet: Ethernet,
     interface: Interface,
     sockets: SocketSet<'static>,
     tcp: HashMap<Flow, Tcp>,
-    // DNS streams run in this router's thread; connection workers receive only hostnames.
-    dns: Rc<RefCell<dns::Resolver>>,
+    dns: dns::Resolver,
     started: Clock,
-    sent: u64,
-    received: u64,
+    traffic: (u64, u64),
 }
 impl Router {
     pub fn new() -> Self {
@@ -150,73 +198,98 @@ impl Router {
             interface,
             sockets,
             tcp: HashMap::new(),
-            dns: Rc::default(),
+            dns: dns::Resolver::default(),
             started: Clock::now(),
-            sent: 0,
-            received: 0,
+            traffic: (0, 0),
         }
     }
     pub fn bytes(&self) -> (u64, u64) {
-        (self.sent, self.received)
+        self.traffic
     }
     pub fn receive(&mut self, frame: Vec<u8>) {
-        if self.ethernet.input.len() >= 256 {
+        if self.ethernet.input.len() >= MAX_QUEUE {
             return;
         }
-        if let Ok(ethernet) = EthernetFrame::new_checked(&frame) {
-            // AnyIP is needed for transparent TCP, but answering probes for
-            // the client's offered address would make DHCP report a conflict.
-            if ethernet.ethertype() == EthernetProtocol::Arp
-                && let Ok(packet) = ArpPacket::new_checked(ethernet.payload())
-                && let Ok(ArpRepr::EthernetIpv4 {
-                    target_protocol_addr,
-                    ..
-                }) = ArpRepr::parse(&packet)
-                && target_protocol_addr != GATEWAY
-            {
-                return;
-            }
-            if ethernet.ethertype() == EthernetProtocol::Ipv4
-                && let Ok(ip) = Ipv4Packet::new_checked(ethernet.payload())
-                && ip.verify_checksum()
-            {
-                if ip.more_frags() || ip.frag_offset() != 0 {
+        let Ok(ethernet) = EthernetFrame::new_checked(&frame) else {
+            return;
+        };
+        match ethernet.ethertype() {
+            EthernetProtocol::Arp => {
+                // AnyIP must answer only for the gateway, never the client's DHCP address.
+                let Ok(packet) = ArpPacket::new_checked(ethernet.payload()) else {
                     return;
-                }
-                if ip.next_header() == IpProtocol::Tcp
-                    && let Ok(packet) = TcpPacket::new_checked(ip.payload())
-                    && packet.syn()
-                    && !packet.ack()
-                    && packet.verify_checksum(&ip.src_addr().into(), &ip.dst_addr().into())
-                {
-                    let key = Flow {
-                        source: ip.src_addr(),
-                        source_port: packet.src_port(),
-                        destination: ip.dst_addr(),
-                        destination_port: packet.dst_port(),
-                    };
-                    self.connect_tcp(key);
-                }
-                if ip.next_header() == IpProtocol::Udp
-                    && let Ok(packet) = UdpPacket::new_checked(ip.payload())
-                    && packet.verify_checksum(&ip.src_addr().into(), &ip.dst_addr().into())
-                {
-                    let key = Flow {
-                        source: ip.src_addr(),
-                        source_port: packet.src_port(),
-                        destination: ip.dst_addr(),
-                        destination_port: packet.dst_port(),
-                    };
-                    self.receive_udp(key, ethernet.src_addr(), packet.payload());
+                };
+                if !matches!(
+                    ArpRepr::parse(&packet),
+                    Ok(ArpRepr::EthernetIpv4 {
+                        target_protocol_addr: GATEWAY,
+                        ..
+                    })
+                ) {
                     return;
                 }
             }
+            EthernetProtocol::Ipv4 => {
+                let Ok(ip) = Ipv4Packet::new_checked(ethernet.payload()) else {
+                    return;
+                };
+                let checksums = ChecksumCapabilities::default();
+                let Ok(header) = Ipv4Repr::parse(&ip, &checksums) else {
+                    return;
+                };
+                let flow = |source_port, destination_port| Flow {
+                    source: header.src_addr,
+                    source_port,
+                    destination: header.dst_addr,
+                    destination_port,
+                };
+                match header.next_header {
+                    IpProtocol::Tcp => {
+                        let Ok(packet) = TcpPacket::new_checked(ip.payload()) else {
+                            return;
+                        };
+                        if packet.syn() && !packet.ack() {
+                            // Validate the whole SYN before allocating a flow or
+                            // starting a host connection. Other TCP packets go
+                            // straight to the stack's normal validation path.
+                            let Ok(syn) = TcpRepr::parse(
+                                &packet,
+                                &header.src_addr.into(),
+                                &header.dst_addr.into(),
+                                &checksums,
+                            ) else {
+                                return;
+                            };
+                            self.connect_tcp(flow(syn.src_port, syn.dst_port));
+                        }
+                    }
+                    IpProtocol::Udp => {
+                        let Ok(packet) = UdpPacket::new_checked(ip.payload()) else {
+                            return;
+                        };
+                        let Ok(udp) = UdpRepr::parse(
+                            &packet,
+                            &header.src_addr.into(),
+                            &header.dst_addr.into(),
+                            &checksums,
+                        ) else {
+                            return;
+                        };
+                        self.receive_udp(
+                            flow(udp.src_port, udp.dst_port),
+                            ethernet.src_addr(),
+                            packet.payload(),
+                        );
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            _ => return,
         }
         self.ethernet.input.push_back(frame);
         // Process promptly so SYNs enter their individual TCP sockets.
-        let now = Instant::from_millis(self.started.elapsed().as_millis() as i64);
-        self.interface
-            .poll(now, &mut self.ethernet, &mut self.sockets);
+        self.poll_stack();
     }
 
     fn connect_tcp(&mut self, key: Flow) {
@@ -231,17 +304,19 @@ impl Router {
             tcp::SocketBuffer::new(vec![0; BUFFER]),
             tcp::SocketBuffer::new(vec![0; BUFFER]),
         );
-        socket.set_timeout(Some(smoltcp::time::Duration::from_secs(120)));
+        socket.set_timeout(Some(smoltcp::time::Duration::from_secs(
+            FLOW_TIMEOUT.as_secs(),
+        )));
         if socket
             .listen((key.destination, key.destination_port))
             .is_err()
         {
             return;
         }
-        let (connecting, stream) = if key.destination_port == 53 {
-            (None, Some(Stream::Dns(dns::Tcp::new(self.dns.clone()))))
+        let upstream = if key.destination_port == 53 {
+            Upstream::Dns(dns::Tcp::default())
         } else {
-            let host = self.dns.borrow().host(key.destination).map(str::to_owned);
+            let host = self.dns.host(key.destination).map(str::to_owned);
             if dns::synthetic(key.destination) && host.is_none() {
                 return;
             }
@@ -250,7 +325,7 @@ impl Router {
             if let Err(error) = std::thread::Builder::new()
                 .name("usb-internet-connect".into())
                 .spawn(move || {
-                    let result = crate::proxy::socket::connect(&host, key.destination_port)
+                    let result = upstream::connect(&host, key.destination_port)
                         .map_err(|e| std::io::Error::other(format!("{e:#}")));
                     let _ = tx.send(result);
                 })
@@ -258,14 +333,13 @@ impl Router {
                 eprintln!("USB internet: could not start connection worker: {error}");
                 return;
             }
-            (Some(rx), None)
+            Upstream::Connecting(rx)
         };
         self.tcp.insert(
             key,
             Tcp {
                 handle: self.sockets.add(socket),
-                connecting,
-                stream,
+                upstream,
                 write_closed: false,
                 last: Clock::now(),
             },
@@ -273,9 +347,12 @@ impl Router {
     }
 
     fn receive_udp(&mut self, key: Flow, mac: EthernetAddress, bytes: &[u8]) {
+        if self.ethernet.output.len() >= MAX_QUEUE {
+            return;
+        }
         if key.destination_port == 67 && key.source_port == 68 {
             if let Some(reply) = dhcp_reply(bytes) {
-                self.ethernet.output.extend(udp_reply(
+                self.ethernet.reply_udp(
                     Flow {
                         source: Ipv4Addr::BROADCAST,
                         source_port: 68,
@@ -284,7 +361,7 @@ impl Router {
                     },
                     EthernetAddress::BROADCAST,
                     &reply,
-                ));
+                );
                 eprintln!("USB internet: Mac requested an IPv4 address; offered {CLIENT}");
             }
             return;
@@ -292,126 +369,48 @@ impl Router {
         // Intercept even a hard-coded external DNS address. Other UDP (including
         // QUIC and multicast discovery) cannot bypass the TCP proxy policy.
         if key.destination_port == 53
-            && self.ethernet.output.len() < 192
-            && let Some(reply) = self.dns.borrow_mut().reply(bytes)
+            && let Some(reply) = self.dns.reply(bytes)
         {
-            self.ethernet.output.extend(udp_reply(key, mac, &reply));
+            self.ethernet.reply_udp(key, mac, &reply);
         }
     }
 
     pub fn poll(&mut self) {
-        let sockets = &mut self.sockets;
-        let sent = &mut self.sent;
-        let received = &mut self.received;
         for (key, flow) in &mut self.tcp {
-            let socket = sockets.get_mut::<tcp::Socket>(flow.handle);
-            if let Some(rx) = &flow.connecting {
-                match rx.try_recv() {
-                    Ok(Ok(s)) => {
-                        eprintln!(
-                            "USB internet: TCP connected {}:{}",
-                            key.destination, key.destination_port
-                        );
-                        flow.stream = Some(Stream::Network(s));
-                        flow.connecting = None;
-                    }
-                    Ok(Err(error)) => {
-                        eprintln!(
-                            "USB internet: connection to {}:{} failed: {error}",
-                            key.destination, key.destination_port
-                        );
-                        socket.abort();
-                        flow.connecting = None;
-                    }
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        socket.abort();
-                        flow.connecting = None;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {}
-                }
+            let socket = self.sockets.get_mut::<tcp::Socket>(flow.handle);
+            let connecting = matches!(flow.upstream, Upstream::Connecting(_));
+            if let Err(error) = flow.poll(socket, &mut self.dns, &mut self.traffic) {
+                eprintln!(
+                    "USB internet: connection to {}:{} failed: {error}",
+                    key.destination, key.destination_port
+                );
+                socket.abort();
+            } else if connecting && matches!(flow.upstream, Upstream::Network(_)) {
+                eprintln!(
+                    "USB internet: TCP connected {}:{}",
+                    key.destination, key.destination_port
+                );
             }
-            if let Some(stream) = &mut flow.stream {
-                let external = matches!(stream, Stream::Network(_));
-                if stream.poll().is_err() {
-                    socket.abort();
-                }
-                if socket.can_recv() {
-                    let mut failed = false;
-                    let _ = socket.recv(|bytes| match stream.write(bytes) {
-                        Ok(n) => {
-                            if external {
-                                *sent += n as u64;
-                            }
-                            flow.last = Clock::now();
-                            (n, ())
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (0, ()),
-                        Err(_) => {
-                            failed = true;
-                            (0, ())
-                        }
-                    });
-                    if failed {
-                        socket.abort();
-                    }
-                }
-                if matches!(
-                    socket.state(),
-                    tcp::State::CloseWait
-                        | tcp::State::Closing
-                        | tcp::State::LastAck
-                        | tcp::State::TimeWait
-                ) && !socket.can_recv()
-                    && !flow.write_closed
-                {
-                    let _ = stream.shutdown_write();
-                    flow.write_closed = true;
-                }
-                if socket.can_send() {
-                    let mut close = false;
-                    let mut abort = false;
-                    let _ = socket.send(|bytes| match stream.read(bytes) {
-                        Ok(0) => {
-                            close = true;
-                            (0, ())
-                        }
-                        Ok(n) => {
-                            if external {
-                                *received += n as u64;
-                            }
-                            flow.last = Clock::now();
-                            (n, ())
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (0, ()),
-                        Err(_) => {
-                            abort = true;
-                            (0, ())
-                        }
-                    });
-                    if close {
-                        socket.close();
-                    }
-                    if abort {
-                        socket.abort();
-                    }
-                }
-            }
-            if flow.last.elapsed() > Duration::from_secs(120) {
+            if flow.last.elapsed() > FLOW_TIMEOUT {
                 socket.abort();
             }
         }
-        // Keep flows and sockets together until after network polling, which
-        // can itself close sockets and must first emit any pending RST.
+        // Poll before retiring flows: closed sockets must emit their pending RST first.
+        self.poll_stack();
+    }
+
+    fn poll_stack(&mut self) {
         let now = Instant::from_millis(self.started.elapsed().as_millis() as i64);
         self.interface
             .poll(now, &mut self.ethernet, &mut self.sockets);
     }
+
     pub fn transmit(&mut self) -> Vec<Vec<u8>> {
         // poll() emits at most one segment per socket. Drain already-ready
         // segments so an active stream fills NCM blocks without another USB
         // read or idle wait. The Ethernet queue bounds the amount of work.
         let now = Instant::from_millis(self.started.elapsed().as_millis() as i64);
-        while self.ethernet.output.len() < 256 {
+        while self.ethernet.output.len() < MAX_QUEUE {
             let before = self.ethernet.output.len();
             self.interface
                 .poll_egress(now, &mut self.ethernet, &mut self.sockets);
@@ -443,83 +442,6 @@ fn permitted(addr: Ipv4Addr) -> bool {
         && addr.octets()[0] != 0
         && !addr.is_link_local()
 }
-fn dhcp_reply(bytes: &[u8]) -> Option<Vec<u8>> {
-    let packet = DhcpPacket::new_checked(bytes).ok()?;
-    let mut repr = DhcpRepr::parse(&packet).ok()?;
-    if repr.server_identifier.is_some_and(|a| a != GATEWAY) {
-        return None;
-    }
-    eprintln!("USB internet DHCP: {:?}", repr.message_type);
-    repr.message_type = match repr.message_type {
-        DhcpMessageType::Discover => DhcpMessageType::Offer,
-        DhcpMessageType::Request => {
-            if repr.requested_ip.is_some_and(|a| a != CLIENT) {
-                return None;
-            }
-            DhcpMessageType::Ack
-        }
-        _ => return None,
-    };
-    repr.your_ip = CLIENT;
-    repr.server_ip = GATEWAY;
-    repr.router = Some(GATEWAY);
-    repr.subnet_mask = Some(Ipv4Addr::new(255, 255, 255, 0));
-    repr.server_identifier = Some(GATEWAY);
-    repr.lease_duration = Some(120);
-    repr.renew_duration = None;
-    repr.rebind_duration = None;
-    repr.requested_ip = None;
-    repr.client_identifier = None;
-    repr.parameter_request_list = None;
-    repr.max_size = None;
-    repr.additional_options = &[];
-    // The Mac asks this local resolver; Windows owns all upstream resolution.
-    let mut dns = repr.dns_servers.take().unwrap_or_default();
-    dns.clear();
-    let _ = dns.push(GATEWAY);
-    repr.dns_servers = Some(dns);
-    let mut out = vec![0; repr.buffer_len()];
-    repr.emit(&mut DhcpPacket::new_unchecked(&mut out)).ok()?;
-    Some(out)
-}
-
-fn udp_reply(key: Flow, mac: EthernetAddress, payload: &[u8]) -> Vec<Vec<u8>> {
-    let mut datagram = vec![0; 8 + payload.len()];
-    let mut udp = UdpPacket::new_unchecked(&mut datagram);
-    udp.set_src_port(key.destination_port);
-    udp.set_dst_port(key.source_port);
-    udp.set_len((8 + payload.len()) as u16);
-    udp.payload_mut().copy_from_slice(payload);
-    udp.fill_checksum(&key.destination.into(), &key.source.into());
-    let mut result = vec![];
-    let ident = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as u16;
-    for (index, chunk) in datagram.chunks(1480).enumerate() {
-        let mut bytes = vec![0; 14 + 20 + chunk.len()];
-        let mut ether = EthernetFrame::new_unchecked(&mut bytes);
-        ether.set_dst_addr(mac);
-        ether.set_src_addr(MAC);
-        ether.set_ethertype(EthernetProtocol::Ipv4);
-        let mut ip = Ipv4Packet::new_unchecked(ether.payload_mut());
-        ip.set_version(4);
-        ip.set_header_len(20);
-        ip.set_total_len((20 + chunk.len()) as u16);
-        ip.set_ident(ident);
-        ip.set_more_frags((index + 1) * 1480 < datagram.len());
-        ip.set_frag_offset((index * 1480) as u16);
-        ip.set_hop_limit(64);
-        ip.set_next_header(IpProtocol::Udp);
-        ip.set_src_addr(key.destination);
-        ip.set_dst_addr(key.source);
-        ip.payload_mut().copy_from_slice(chunk);
-        ip.fill_checksum();
-        result.push(bytes);
-    }
-    result
-}
-
 #[cfg(test)]
 #[path = "../../tests/unit/usb_internet/router.rs"]
 mod tests;
