@@ -3,6 +3,7 @@ mod packet;
 mod stream;
 use crate::usb::MuxUsb;
 use anyhow::{Context, Result, ensure};
+use bytes::{Bytes, BytesMut};
 use packet::encode_header;
 pub use packet::{Packet, decode_packet, encode_packet};
 use std::{
@@ -113,7 +114,7 @@ struct Link {
     version: u32,
     tx: u16,
     rx: u16,
-    buffer: Vec<u8>,
+    buffer: BytesMut,
     output: Vec<u8>,
     output_batch: Vec<Vec<u8>>,
     usb_write_time: Duration,
@@ -135,7 +136,7 @@ impl Session {
             version: 0,
             tx: 0,
             rx: 0xffff,
-            buffer: vec![],
+            buffer: BytesMut::new(),
             output: Vec::with_capacity(MTU),
             output_batch: Vec::new(),
             usb_write_time: Duration::ZERO,
@@ -384,7 +385,7 @@ impl Link {
             .seq = seq;
         Ok(())
     }
-    fn receive(&mut self) -> Result<Option<Vec<u8>>> {
+    fn receive(&mut self) -> Result<Option<Bytes>> {
         loop {
             if self.buffer.len() >= 8 {
                 let length = u32::from_be_bytes(self.buffer[4..8].try_into()?) as usize;
@@ -393,7 +394,7 @@ impl Link {
                     "invalid USB mux packet length {length}"
                 );
                 if self.buffer.len() >= length {
-                    return Ok(Some(self.buffer.drain(..length).collect()));
+                    return Ok(Some(self.buffer.split_to(length).freeze()));
                 }
             }
             let incoming = match self.usb.read_packet() {
@@ -410,7 +411,7 @@ impl Link {
                 self.buffer.len() + incoming.len() <= 131072,
                 "USB mux assembly buffer overflow"
             );
-            self.buffer.extend(incoming);
+            self.buffer.extend_from_slice(&incoming);
         }
     }
     fn pump(&mut self) -> Result<bool> {

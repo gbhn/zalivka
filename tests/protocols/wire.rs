@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn unframed_xml_uses_element_boundaries_and_preserves_following_messages_and_binary_data() {
+    for xml in [
+        &b"<plist><!-- </plist> --><dict><key>Command</key><string>Payload</string></dict></plist>"[..],
+        b"<plist><dict><key>Command</key><string>Pay<![CDATA[</plist>]]>load</string></dict></plist>",
+        b"<plist><?marker </plist>?><dict><key>Command</key><string>Payload</string></dict></plist>",
+        b"<plist><dict><key>Command</key><string>Payload</string></dict></plist >",
+        b"<plist><string>&lt;/plist&gt;</string></plist>",
+    ] {
+        let expected = Value::from_reader_xml(xml).unwrap();
+        let next = wire::dict([("next", true.into())]);
+        let tail = b"\0\xffraw\r\n</plist>";
+        let bytes = [xml, &wire::xml(&next).unwrap(), tail].concat();
+        for fragment in [1, 3, 4096] {
+            let mut input = std::io::BufReader::with_capacity(128, Duplex::new(bytes.clone(), fragment));
+            assert_eq!(wire::receive_xml(&mut input).unwrap(), expected);
+            assert_eq!(wire::receive_xml(&mut input).unwrap(), next);
+            let mut remaining = Vec::new();
+            input.read_to_end(&mut remaining).unwrap();
+            assert_eq!(remaining, tail);
+        }
+    }
+}
+
+#[test]
+fn unframed_xml_rejects_every_truncated_prefix_and_malformed_document() {
+    let xml = b"<plist><dict><key>Command</key><string>Payload</string></dict></plist>";
+    for length in 0..xml.len() {
+        assert!(
+            wire::receive_xml(&mut Cursor::new(&xml[..length])).is_err(),
+            "prefix {length}"
+        );
+    }
+    for malformed in [
+        &b"<other><plist><dict/></plist></other>"[..],
+        b"<plist><dict></array></plist>",
+        b"<plist><dict><!-- </plist>",
+        b"<plist><string><![CDATA[</plist>",
+        b"<plist/>",
+    ] {
+        assert!(
+            wire::receive_xml(&mut Cursor::new(malformed)).is_err(),
+            "{malformed:?}"
+        );
+    }
+}
+
+#[test]
+fn unframed_xml_reads_buffered_blocks_instead_of_one_byte_at_a_time() {
+    struct Input {
+        bytes: Cursor<Vec<u8>>,
+        reads: usize,
+    }
+    impl Read for Input {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            self.bytes.read(out)
+        }
+    }
+    let value = wire::dict([("data", Value::Data(vec![42; 32768]))]);
+    let input = Input {
+        bytes: Cursor::new(wire::xml(&value).unwrap()),
+        reads: 0,
+    };
+    let mut input = std::io::BufReader::new(input);
+    assert_eq!(wire::receive_xml(&mut input).unwrap(), value);
+    assert!(input.get_ref().reads < 16);
+}
+
+#[test]
 fn framed_plists_handle_fragmented_reads() {
     let value = wire::dict([("MsgType", "StatusMsg".into()), ("Status", 0u64.into())]);
     let mut bytes = Vec::new();

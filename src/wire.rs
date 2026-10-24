@@ -1,7 +1,8 @@
 //! Property-list framing used by restored (big-endian length, then XML/binary plist).
 use anyhow::{Context, Result, bail, ensure};
 use plist::{Dictionary, Value};
-use std::io::{Read, Write};
+use quick_xml::{Reader, Writer, events::Event};
+use std::io::{BufRead, Read, Write};
 
 pub const MAX_PLIST: usize = 64 * 1024 * 1024;
 
@@ -178,19 +179,44 @@ pub(crate) fn receive_body(r: &mut impl Read, len: u32) -> Result<Value> {
     Value::from_reader(std::io::Cursor::new(buf)).context("decoding plist")
 }
 
-/// ASR uses unframed XML. Read through the end tag without swallowing raw payload.
-pub fn receive_xml(r: &mut impl Read) -> Result<Value> {
-    let mut buf = Vec::new();
-    let mut byte = [0];
+/// ASR uses unframed XML. Keep the caller's buffer across messages so read-ahead
+/// remains available for the next plist or raw payload.
+pub fn receive_xml(r: &mut impl BufRead) -> Result<Value> {
+    let mut reader = Reader::from_reader(r.take(MAX_PLIST as u64));
+    let mut writer = Writer::new(Vec::new());
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
     loop {
-        ensure!(buf.len() < MAX_PLIST, "unframed XML too large");
-        r.read_exact(&mut byte)?;
-        buf.push(byte[0]);
-        if buf.ends_with(b"</plist>") {
-            break;
+        let event = reader
+            .read_event_into(&mut buffer)
+            .context("reading ASR XML")?;
+        match &event {
+            Event::Start(tag) => {
+                ensure!(
+                    depth != 0 || tag.name().as_ref() == "plist",
+                    "ASR XML root is not plist"
+                );
+                depth += 1;
+            }
+            Event::End(_) => {
+                depth = depth
+                    .checked_sub(1)
+                    .context("unexpected ASR XML closing tag")?;
+            }
+            Event::Empty(tag) if depth == 0 => {
+                ensure!(tag.name().as_ref() == "plist", "ASR XML root is not plist");
+            }
+            Event::Eof => bail!("truncated ASR XML or message exceeds {MAX_PLIST} bytes"),
+            _ => {}
         }
+        let finished = depth == 0 && matches!(event, Event::End(_) | Event::Empty(_));
+        writer.write_event(event)?;
+        if finished {
+            return Value::from_reader_xml(writer.into_inner().as_slice())
+                .context("decoding ASR plist");
+        }
+        buffer.clear();
     }
-    Value::from_reader(std::io::Cursor::new(buf)).context("decoding ASR plist")
 }
 
 pub fn dictionary(v: &Value) -> Result<&Dictionary> {

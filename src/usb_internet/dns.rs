@@ -1,4 +1,5 @@
 //! Session-local DNS names: resolution happens when Windows opens the stream.
+use bytes::{Buf, BytesMut};
 use domain::{
     base::{
         Message, MessageBuilder, Ttl,
@@ -112,7 +113,7 @@ pub(super) fn synthetic(ip: Ipv4Addr) -> bool {
 /// Per-connection DNS framing. The router owns and lends the shared name map.
 #[derive(Default)]
 pub(super) struct Tcp {
-    input: Vec<u8>,
+    input: BytesMut,
     output: VecDeque<u8>,
     closed: bool,
 }
@@ -139,7 +140,7 @@ impl Tcp {
                 self.output.extend((reply.len() as u16).to_be_bytes());
                 self.output.extend(reply);
             }
-            self.input.drain(..size + 2);
+            self.input.advance(size + 2);
         }
         if self.closed && !self.input.is_empty() {
             return Err(io::Error::new(

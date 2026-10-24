@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use sha1::{Digest, Sha1};
 use std::{
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufReader, Read, Seek, SeekFrom, Write},
     time::Instant,
 };
 
@@ -36,20 +36,21 @@ pub fn transfer(
     image: &mut (impl Read + Seek),
     length: u64,
 ) -> Result<()> {
-    let initiate = wire::receive_xml(stream)?;
+    let mut stream = BufReader::new(stream);
+    let initiate = wire::receive_xml(&mut stream)?;
     ensure!(
         wire::string(&initiate, &["Command"])? == "Initiate",
         "ASR did not send Initiate"
     );
     let mut checksum = checksum_mode(&initiate, false)?;
-    info(stream, length, checksum)?;
+    info(stream.get_mut(), length, checksum)?;
     let mut requests = 0u64;
     loop {
-        let message = wire::receive_xml(stream)?;
+        let message = wire::receive_xml(&mut stream)?;
         match wire::string(&message, &["Command"])? {
             "Initiate" => {
                 checksum = checksum_mode(&message, checksum)?;
-                info(stream, length, checksum)?;
+                info(stream.get_mut(), length, checksum)?;
             }
             "OOBData" => {
                 requests += 1;
@@ -62,7 +63,7 @@ pub fn transfer(
                     "ASR OOB read is outside image"
                 );
                 image.seek(SeekFrom::Start(offset))?;
-                let copied = std::io::copy(&mut image.take(count), stream)?;
+                let copied = std::io::copy(&mut image.take(count), stream.get_mut())?;
                 ensure!(copied == count, "truncated ASR validation data");
             }
             "Payload" => break,
@@ -102,7 +103,7 @@ pub fn transfer(
             payload += n as u64;
         }
         let started = Instant::now();
-        let written = stream.write_all(&buf[..sent]);
+        let written = stream.get_mut().write_all(&buf[..sent]);
         profile.write += started.elapsed();
         written?;
         total += payload;
@@ -110,7 +111,7 @@ pub fn transfer(
         progress.advance(payload);
     }
     let started = Instant::now();
-    let flushed = stream.flush();
+    let flushed = stream.get_mut().flush();
     profile.write += started.elapsed();
     flushed?;
     progress.finish();

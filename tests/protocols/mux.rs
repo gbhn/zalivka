@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn mux_coalesced_frames_survive_fragmentation_sequence_wrap_and_final_close() {
+    let first = vec![0xa5; 4097];
+    let last = b"final bytes";
+    let initial = u32::MAX - 4;
+    let next = initial.wrapping_add(1);
+    let end = next.wrapping_add(first.len() as u32);
+    let incoming = [
+        version_packet(),
+        tcp(62078, 1, initial, 1, 0x12, &[]),
+        tcp(62078, 1, next, 1, 0x10, &first),
+        tcp(62078, 1, end, 1, 0x11, last),
+    ]
+    .concat();
+    for fragment in [1, 7, 8, 15, 16, 20, 36, 37, 65536] {
+        let (usb, output) = mock_mux(incoming.chunks(fragment).map(<[u8]>::to_vec).collect());
+        let session = Session::new(usb).unwrap();
+        let mut stream = session.connect(62078).unwrap();
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).unwrap();
+        assert_eq!(
+            received,
+            [first.as_slice(), last].concat(),
+            "fragment {fragment}"
+        );
+        let sent = output.lock().unwrap();
+        let reply = mux::decode_packet(sent.last().unwrap(), 2).unwrap();
+        assert_eq!(
+            u32::from_be_bytes(reply.payload[8..12].try_into().unwrap()),
+            end.wrapping_add(last.len() as u32 + 1),
+        );
+    }
+}
+
+#[test]
 fn mux_accepts_the_recorded_device_magic_and_preserves_outgoing_host_magic() {
     // Captured on the physical Mac after negotiating mux v2. The TCP payload
     // is synthetic; the 16-byte device header is independent of our encoder.

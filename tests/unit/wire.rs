@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn unframed_xml_size_limit_also_bounds_an_unterminated_comment() {
+    let prefix = b"<plist><!--";
+    let input = prefix
+        .as_slice()
+        .chain(std::io::repeat(b'x').take(MAX_PLIST as u64));
+    let mut input = std::io::BufReader::new(input);
+    assert!(receive_xml(&mut input).is_err());
+    let mut remaining = Vec::new();
+    input.read_to_end(&mut remaining).unwrap();
+    assert_eq!(remaining, vec![b'x'; prefix.len()]);
+}
+
+#[test]
 fn data_request_names_are_consistent_across_envelopes_and_direct_messages() {
     for envelope in [
         None,
