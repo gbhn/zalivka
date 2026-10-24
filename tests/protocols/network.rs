@@ -1,4 +1,5 @@
 use super::*;
+use zalivka::ipsw::Behavior;
 
 #[test]
 fn https_and_fdr_targets_are_validated() {
@@ -158,7 +159,14 @@ fn automatic_download_reuses_a_verified_compatible_cached_ipsw() {
         device::encode_hex(&release.sha1)
     ));
     std::fs::copy(file.path(), &expected).unwrap();
-    let path = catalog::ensure_cached(&release, &device_info(), directory.path(), None).unwrap();
+    let path = catalog::ensure_cached(
+        &release,
+        &device_info(),
+        directory.path(),
+        None,
+        Behavior::Erase,
+    )
+    .unwrap();
     assert_eq!(path, expected);
     assert_eq!(
         std::fs::read(&path).unwrap(),
@@ -166,15 +174,86 @@ fn automatic_download_reuses_a_verified_compatible_cached_ipsw() {
     );
     let mut wrong_device = device_info();
     wrong_device.board_id += 1;
-    assert!(catalog::ensure_cached(&release, &wrong_device, directory.path(), None).is_err());
+    assert!(
+        catalog::ensure_cached(
+            &release,
+            &wrong_device,
+            directory.path(),
+            None,
+            Behavior::Erase
+        )
+        .is_err()
+    );
     let mut wrong_version = release.clone();
     wrong_version.version = "99.0".into();
     assert!(
-        catalog::ensure_cached(&wrong_version, &device_info(), directory.path(), None).is_err()
+        catalog::ensure_cached(
+            &wrong_version,
+            &device_info(),
+            directory.path(),
+            None,
+            Behavior::Erase
+        )
+        .is_err()
     );
     let mut wrong_model = release;
     wrong_model.product_type = "Mac99,1".into();
-    assert!(catalog::ensure_cached(&wrong_model, &device_info(), directory.path(), None).is_err());
+    assert!(
+        catalog::ensure_cached(
+            &wrong_model,
+            &device_info(),
+            directory.path(),
+            None,
+            Behavior::Erase
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn cached_revive_selects_update_and_preserves_the_explicit_identity() {
+    let mut upgrade = identity();
+    upgrade
+        .value
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("ApBoardID".into(), "0x0b".into());
+    let info = upgrade.value.as_dictionary_mut().unwrap()["Info"]
+        .as_dictionary_mut()
+        .unwrap();
+    info.insert("RestoreBehavior".into(), "Update".into());
+    info.insert("Variant".into(), "Customer Upgrade Install (IPSW)".into());
+    let file = fixture(Some(upgrade), false);
+    let release = fixture_release(file.path());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(format!(
+        "{}-{}.ipsw",
+        release.build,
+        device::encode_hex(&release.sha1)
+    ));
+    std::fs::copy(file.path(), &path).unwrap();
+    let mut device = device_info();
+    device.board_id = 0x0b;
+    for index in [None, Some(1)] {
+        assert_eq!(
+            catalog::ensure_cached(&release, &device, directory.path(), index, Behavior::Update)
+                .unwrap(),
+            path
+        );
+    }
+    assert!(
+        catalog::ensure_cached(
+            &release,
+            &device,
+            directory.path(),
+            Some(0),
+            Behavior::Update
+        )
+        .is_err()
+    );
+    assert!(
+        catalog::ensure_cached(&release, &device, directory.path(), None, Behavior::Erase).is_err()
+    );
 }
 
 #[test]
@@ -188,10 +267,28 @@ fn automatic_download_refuses_corrupt_cache_and_unsafe_build_names() {
         device::encode_hex(&release.sha1)
     ));
     std::fs::write(&path, b"corrupt").unwrap();
-    assert!(catalog::ensure_cached(&release, &device_info(), directory.path(), None).is_err());
+    assert!(
+        catalog::ensure_cached(
+            &release,
+            &device_info(),
+            directory.path(),
+            None,
+            Behavior::Erase
+        )
+        .is_err()
+    );
     assert_eq!(std::fs::read(&path).unwrap(), b"corrupt");
     release.build = "../escape".into();
-    assert!(catalog::ensure_cached(&release, &device_info(), directory.path(), None).is_err());
+    assert!(
+        catalog::ensure_cached(
+            &release,
+            &device_info(),
+            directory.path(),
+            None,
+            Behavior::Erase
+        )
+        .is_err()
+    );
 }
 
 #[test]

@@ -165,7 +165,7 @@ pub fn validate_proxy_target(host: &str, port: u16) -> Result<()> {
     );
     let host = host.to_ascii_lowercase();
     ensure!(
-        host == "apple.com" || host.ends_with(".apple.com") || host.ends_with(".cdn-apple.com"),
+        crate::net::is_apple_host(&host),
         "FDR requested a non-Apple endpoint"
     );
     ensure!(

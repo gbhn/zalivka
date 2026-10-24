@@ -1,4 +1,7 @@
-use crate::{ipsw::Identity, wire};
+use crate::{
+    ipsw::{Behavior, Identity},
+    wire,
+};
 use anyhow::Result;
 use plist::{Dictionary, Value};
 
@@ -104,7 +107,7 @@ pub(super) fn async_data_types() -> Dictionary {
 }
 
 pub fn options(id: &Identity) -> Result<Value> {
-    let update = id.summary()?.restore_behavior == "Update";
+    let update = id.behavior()? == Behavior::Update;
     // The booleans mark optionality, not an on/off switch. Legacy required
     // message names must also be present.
     let mut d = Dictionary::from_iter([
@@ -206,9 +209,13 @@ pub fn options(id: &Identity) -> Result<Value> {
 }
 
 pub fn boot_arguments(id: &Identity) -> Result<&'static str> {
-    Ok(if id.summary()?.restore_behavior == "Update" {
+    Ok(behavior_boot_arguments(id.behavior()?))
+}
+
+pub(super) fn behavior_boot_arguments(behavior: Behavior) -> &'static str {
+    if behavior == Behavior::Update {
         "setenvnp boot-args rd=md0 -progress -restore"
     } else {
         "setenvnp boot-args rd=md0 nand-enable-reformat=1 -progress -restore"
-    })
+    }
 }

@@ -427,9 +427,9 @@ impl App {
                 );
             }
             ui.add_space(14.0);
-            if job.action.writes_device() {
+            if job.action.writes_device() && !job.restore_completed {
                 caption(ui, "Оставьте питание и USB подключёнными");
-            } else if job.action == Action::PrepareWindows {
+            } else if !job.can_stop() {
                 ui.label("Дождитесь завершения установки и проверки службы Windows.");
             } else if ui
                 .add_enabled(!job.cancelled, egui::Button::new("Остановить"))
@@ -700,7 +700,7 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested())
             && let Some(job) = &mut self.job
         {
-            if job.action.writes_device() || job.action == Action::PrepareWindows {
+            if !job.can_stop() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.error(
                     "Операция ещё выполняется",

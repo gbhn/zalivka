@@ -93,16 +93,10 @@ pub fn request(device: &DeviceInfo, id: &Identity) -> Result<Value> {
         {
             continue;
         }
-        let mut entry = wire::dictionary(value)?.clone();
-        entry.remove("Info");
-        if let Some(rules) = info.get("RestoreRequestRules") {
-            apply_rules(&mut entry, rules, &d)?;
-        } else {
+        let mut entry = component_request(value, &d)?;
+        if !info.contains_key("RestoreRequestRules") {
             entry.insert("EPRO".into(), true.into());
             entry.insert("ESEC".into(), true.into());
-        }
-        if trusted && !entry.contains_key("Digest") {
-            entry.insert("Digest".into(), Value::Data(vec![]));
         }
         d.insert(name.clone(), Value::Dictionary(entry));
     }
@@ -143,7 +137,7 @@ pub fn apply_rules(entry: &mut Dictionary, rules: &Value, parameters: &Dictionar
 }
 
 /// RecoveryOS and auxiliary firmware share the manifest component schema.
-pub(crate) fn component_request(value: &Value, parameters: &Dictionary) -> Result<Value> {
+pub(crate) fn component_request(value: &Value, parameters: &Dictionary) -> Result<Dictionary> {
     let mut entry = wire::dictionary(value)?.clone();
     if let Ok(rules) = wire::get(value, &["Info", "RestoreRequestRules"]) {
         apply_rules(&mut entry, rules, parameters)?;
@@ -152,7 +146,7 @@ pub(crate) fn component_request(value: &Value, parameters: &Dictionary) -> Resul
     if wire::boolean(value, &["Trusted"]) && !entry.contains_key("Digest") {
         entry.insert("Digest".into(), Value::Data(vec![]));
     }
-    Ok(Value::Dictionary(entry))
+    Ok(entry)
 }
 
 pub fn send(request: &Value) -> Result<Value> {
@@ -242,7 +236,10 @@ pub fn recovery_request(device: &DeviceInfo, id: &Identity) -> Result<Value> {
         if wire::get(value, &["Info"]).is_err() {
             continue;
         }
-        d.insert(name.clone(), component_request(value, &d)?);
+        d.insert(
+            name.clone(),
+            Value::Dictionary(component_request(value, &d)?),
+        );
     }
     // This is a rule parameter, not a field of the RecoveryOS root request.
     d.remove("Ap,LocalBoot");

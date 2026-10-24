@@ -1,6 +1,6 @@
 //! Apple's IPSW catalogs contain the model lookup and latest restore URL/hash.
 use crate::{
-    device::{DeviceInfo, Mode, decode_hex, encode_hex},
+    device::{DeviceInfo, Mode, decode_hex, encode_hex, is_mac_product},
     ipsw::{Behavior, Ipsw},
     net, wire,
 };
@@ -58,9 +58,7 @@ pub fn resolve(catalog: &Value, device: &DeviceInfo) -> Result<Release> {
             )
         })?;
     ensure!(
-        product_type.starts_with("Mac")
-            || product_type.starts_with("iMac")
-            || product_type.starts_with("iBridge"),
+        is_mac_product(product_type),
         "Apple catalog selected a non-Mac product"
     );
     let versions = wire::dictionary(wire::get(
@@ -124,7 +122,12 @@ pub fn cache_directory() -> Result<PathBuf> {
     Ok(crate::storage::app_directory()?.join("firmware"))
 }
 
-pub fn obtain(device: &DeviceInfo, directory: &Path, identity: Option<usize>) -> Result<PathBuf> {
+pub fn obtain(
+    device: &DeviceInfo,
+    directory: &Path,
+    identity: Option<usize>,
+    behavior: Behavior,
+) -> Result<PathBuf> {
     eprintln!(
         "Looking up firmware in Apple's catalog for CPID {:04x}, BDID {:02x}",
         device.chip_id, device.board_id
@@ -134,7 +137,7 @@ pub fn obtain(device: &DeviceInfo, directory: &Path, identity: Option<usize>) ->
         "Selected {}: version {}, build {}",
         release.product_type, release.version, release.build
     );
-    ensure_cached(&release, device, directory, identity)
+    ensure_cached(&release, device, directory, identity, behavior)
 }
 
 pub fn ensure_cached(
@@ -142,6 +145,7 @@ pub fn ensure_cached(
     device: &DeviceInfo,
     directory: &Path,
     identity: Option<usize>,
+    behavior: Behavior,
 ) -> Result<PathBuf> {
     net::validate_apple_url(&release.url)?;
     ensure!(
@@ -169,7 +173,7 @@ pub fn ensure_cached(
         net::download_verified(&release.url, &path, &release.sha1)?;
     }
     let ipsw = Ipsw::open(&path)?;
-    ipsw.select_behavior(device, identity, Behavior::Erase)?;
+    ipsw.select_behavior(device, identity, behavior)?;
     ensure!(
         wire::get(&ipsw.manifest, &["SupportedProductTypes"])?
             .as_array()

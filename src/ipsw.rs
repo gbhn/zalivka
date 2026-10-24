@@ -1,6 +1,6 @@
 mod identity;
 mod verify;
-use crate::{firmware, img4, wire};
+use crate::{img4, wire};
 use anyhow::{Context, Result, ensure};
 pub use identity::{Behavior, Identity, IdentitySummary};
 use plist::Value;
@@ -79,9 +79,7 @@ impl Ipsw {
         ensure!(
             products
                 .iter()
-                .any(|v| v.as_string().is_some_and(|s| s.starts_with("Mac")
-                    || s.starts_with("iMac")
-                    || s.starts_with("iBridge"))),
+                .any(|v| v.as_string().is_some_and(crate::device::is_mac_product)),
             "this archive does not advertise any Mac or T2 product"
         );
         Ok(Self {
@@ -91,8 +89,8 @@ impl Ipsw {
         })
     }
 
-    pub fn contains(&mut self, path: &str) -> bool {
-        self.archive.by_name(path).is_ok()
+    pub fn contains(&self, path: &str) -> bool {
+        self.archive.index_for_name(path).is_some()
     }
 
     pub fn read(&mut self, path: &str) -> Result<Vec<u8>> {
@@ -109,40 +107,27 @@ impl Ipsw {
     }
 
     pub fn component(&mut self, id: &Identity, name: &str) -> Result<Vec<u8>> {
-        let mut data = self.read(id.path(name)?)?;
+        let data = self.read(id.path(name)?)?;
         if let Ok(digest) = wire::get(&id.value, &["Manifest", name, "Digest"]) {
             let expected = digest.as_data().context("invalid component digest")?;
             if !expected.is_empty() {
-                let mut verified = verify_digest(&data, expected);
-                if verified.is_err()
-                    && name == "Baobab,TCON"
-                    && firmware::tcon_metadata_matches(&data, expected)?
-                {
+                let inputs = verify::DigestInput::variants(
+                    &data,
+                    data.len() as u64,
+                    img4::restore_tag(name),
+                )?;
+                let verified = verify::verify_component_digest(
+                    &inputs,
+                    expected,
+                    |input| input.matches(&data, expected),
+                    (name == "Baobab,TCON").then_some(data.as_slice()),
+                )
+                .with_context(|| format!("component {name} digest mismatch"))?;
+                if !verified {
                     eprintln!(
                         "TCON bundle metadata matches the manifest; payload digest was not checked on the host"
                     );
-                    verified = Ok(());
                 }
-                if verified.is_err() {
-                    for range in firmware::payload_ranges(&data, data.len() as u64)? {
-                        if verify_digest(&data[range.start as usize..range.end as usize], expected)
-                            .is_ok()
-                        {
-                            verified = Ok(());
-                            break;
-                        }
-                    }
-                }
-                if verified.is_err()
-                    && let (Some(tag), Some(offset)) =
-                        (img4::restore_tag(name), img4::type_offset(&data))
-                {
-                    let original: [u8; 4] = data[offset..offset + 4].try_into().unwrap();
-                    data[offset..offset + 4].copy_from_slice(&tag);
-                    verified = verify_digest(&data, expected);
-                    data[offset..offset + 4].copy_from_slice(&original);
-                }
-                verified.with_context(|| format!("component {name} digest mismatch"))?;
             }
         }
         Ok(data)

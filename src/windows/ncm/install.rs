@@ -114,7 +114,7 @@ fn windows_inf(name: &str) -> Result<Vec<u16>> {
     );
     Ok(wide(windows_directory()?.join("INF").join(name)))
 }
-pub(super) fn install(instance: &str, restore: bool) -> Result<()> {
+pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Result<()> {
     let set = Set(unsafe { SetupDiCreateDeviceInfoList(ptr::null(), ptr::null_mut()) });
     ensure!(
         set.0 != INVALID_HANDLE_VALUE as isize,
@@ -194,6 +194,9 @@ pub(super) fn install(instance: &str, restore: bool) -> Result<()> {
     } else {
         Some("winusb.inf")
     };
+    // The caller owns rollback, including a partially changed current interface.
+    // Failures before this point have neither changed bindings nor registry values.
+    *changed = true;
     if restore {
         set_guids(&key, backup.guids.as_ref())?;
     } else {
@@ -327,9 +330,6 @@ pub(super) fn install(instance: &str, restore: bool) -> Result<()> {
         );
         Ok(())
     })();
-    if result.is_err() && !restore {
-        let _ = install(instance, true);
-    }
     result.with_context(|| {
         format!(
             "NCM interface {instance}; original settings saved in {}",

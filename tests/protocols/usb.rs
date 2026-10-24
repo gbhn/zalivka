@@ -52,6 +52,22 @@ fn parse_dfu_serial_and_nonces() {
 }
 
 #[test]
+fn optional_usb_fields_default_only_when_absent() {
+    let serial = "CPID:8103 BDID:0A ECID:12";
+    let device = DeviceInfo::parse(serial, Mode::Dfu).unwrap();
+    assert_eq!(device.security_domain, 1);
+    assert_eq!(device.iboot_flags, 0);
+    let device = DeviceInfo::parse(&format!("{serial} SDOM:2 IBFL:10"), Mode::Dfu).unwrap();
+    assert_eq!(device.security_domain, 2);
+    assert_eq!(device.iboot_flags, 0x10);
+    for name in ["SDOM", "IBFL"] {
+        for value in ["broken", "", "100000000", "10000000000000000"] {
+            assert!(DeviceInfo::parse(&format!("{serial} {name}:{value}"), Mode::Dfu).is_err());
+        }
+    }
+}
+
+#[test]
 fn hex_ecid_is_consistent() {
     assert_eq!(device::parse_ecid("10").unwrap(), 16);
     assert_eq!(device::parse_ecid("0x10").unwrap(), 16);

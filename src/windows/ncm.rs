@@ -236,22 +236,38 @@ fn children(info: &nusb::DeviceInfo) -> Result<Vec<(u8, String)>> {
 fn prepare_interfaces(
     interfaces: &[(String, bool)],
     restore: bool,
-    mut install: impl FnMut(&str, bool) -> Result<()>,
+    mut install: impl FnMut(&str, bool, &mut bool) -> Result<()>,
+    mut check_ready: impl FnMut(&str) -> Result<()>,
 ) -> Result<()> {
     let mut changed: Vec<&str> = vec![];
-    for (id, ready) in interfaces {
-        if !restore && *ready {
-            continue;
+    let result: Result<()> = (|| {
+        for (id, ready) in interfaces {
+            if !restore && *ready {
+                continue;
+            }
+            let mut modified = false;
+            let result = install(id, restore, &mut modified);
+            if modified {
+                changed.push(id.as_str());
+            }
+            result?;
         }
-        if let Err(error) = install(id, restore) {
-            if !restore {
-                for previous in changed.into_iter().rev() {
-                    let _ = install(previous, true);
+        if !restore {
+            for (id, _) in interfaces {
+                check_ready(id).context("USB network driver installation was not confirmed")?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(mut error) = result {
+        if !restore {
+            for id in changed.into_iter().rev() {
+                if let Err(rollback) = install(id, true, &mut false) {
+                    error = error.context(format!("NCM rollback failed for {id}: {rollback:#}"));
                 }
             }
-            return Err(error);
         }
-        changed.push(id);
+        return Err(error);
     }
     Ok(())
 }
@@ -274,13 +290,7 @@ pub(crate) fn prepare(serial: &str, restore: bool) -> Result<()> {
             (id, installed)
         })
         .collect();
-    prepare_interfaces(&interfaces, restore, install)?;
-    if !restore {
-        for (id, _) in &interfaces {
-            ready(id).context("USB network driver installation was not confirmed")?;
-        }
-    }
-    Ok(())
+    prepare_interfaces(&interfaces, restore, install, ready)
 }
 
 #[cfg(test)]

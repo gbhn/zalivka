@@ -39,6 +39,12 @@ fn full_ipsw_verification_checks_all_streams_and_manifest_digests() {
     bytes[offset] ^= 0xff;
     std::fs::write(file.path(), bytes).unwrap();
     assert!(Ipsw::open(file.path()).unwrap().verify_all().is_err());
+
+    let mut truncated_ftab = vec![0; 48];
+    truncated_ftab[36..40].copy_from_slice(b"ftab");
+    truncated_ftab[40..44].copy_from_slice(&1u32.to_le_bytes());
+    let file = fixture_files(None, false, &[("unreferenced.ftab", &truncated_ftab)]);
+    assert!(Ipsw::open(file.path()).unwrap().verify_all().is_err());
 }
 
 #[test]
@@ -114,6 +120,59 @@ fn restore_digest_hashes_the_retagged_im4p_and_preserves_the_original_file() {
 }
 
 #[test]
+fn shared_files_keep_each_components_digest_algorithm_and_restore_tag() {
+    let raw = im4p(b"krnl");
+    let mut restored = raw.clone();
+    let offset = img4::type_offset(&raw).unwrap();
+    restored[offset..offset + 4].copy_from_slice(b"rkrn");
+    for kernel_digest in [
+        sha2::Sha256::digest(&restored).to_vec(),
+        Sha384::digest(&restored).to_vec(),
+    ] {
+        let mut id = identity();
+        for (name, digest) in [
+            ("RestoreKernelCache", kernel_digest),
+            // This digest describes rkrn, although this component requires rdtr.
+            ("RestoreDeviceTree", Sha384::digest(&restored).to_vec()),
+        ] {
+            manifest_mut(&mut id).insert(
+                name.into(),
+                wire::dict([
+                    ("Digest", Value::Data(digest)),
+                    ("Info", wire::dict([("Path", "Firmware/shared".into())])),
+                ]),
+            );
+        }
+        let file = fixture_files(Some(id.clone()), false, &[("Firmware/shared", &raw)]);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        assert_eq!(ipsw.component(&id, "RestoreKernelCache").unwrap(), raw);
+        assert!(ipsw.component(&id, "RestoreDeviceTree").is_err());
+        assert!(ipsw.verify_all().is_err());
+
+        let mut tree = raw.clone();
+        tree[offset..offset + 4].copy_from_slice(b"rdtr");
+        manifest_mut(&mut id)["RestoreDeviceTree"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("Digest".into(), Value::Data(Sha384::digest(&tree).to_vec()));
+        let file = fixture_files(Some(id.clone()), false, &[("Firmware/shared", &raw)]);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        assert_eq!(ipsw.component(&id, "RestoreDeviceTree").unwrap(), raw);
+        ipsw.verify_all().unwrap();
+    }
+}
+
+#[test]
+fn empty_components_have_the_same_digest_in_memory_and_streaming() {
+    let mut id = identity();
+    manifest_mut(&mut id).insert("Empty".into(), component_entry("empty", b""));
+    let file = fixture_files(Some(id.clone()), false, &[("empty", b"")]);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    assert!(ipsw.component(&id, "Empty").unwrap().is_empty());
+    assert_eq!(ipsw.verify_all().unwrap().manifest_digests, 7);
+}
+
+#[test]
 fn tcon_bundle_metadata_is_matched_without_claiming_payload_digest_verification() {
     let digest = sha2::Sha256::digest(b"vendor logical firmware digest").to_vec();
     let bundle = wire::xml(&wire::dict([(
@@ -142,6 +201,14 @@ fn tcon_bundle_metadata_is_matched_without_claiming_payload_digest_verification(
     assert_eq!(report.tcon_payload_digests_not_checked, ["tcon.bin"]);
     assert_eq!(report.manifest_digests, 6);
     assert!(!zalivka::firmware::tcon_metadata_matches(&bundle, &[0; 32]).unwrap());
+
+    // A different component sharing this path cannot inherit the TCON exception.
+    let entry = manifest_mut(&mut id)["Baobab,TCON"].clone();
+    manifest_mut(&mut id).insert("Other".into(), entry);
+    let file = fixture_files(Some(id.clone()), false, &[("tcon.bin", &bundle)]);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    assert!(ipsw.component(&id, "Other").is_err());
+    assert!(ipsw.verify_all().is_err());
 }
 
 #[test]
@@ -308,7 +375,14 @@ fn identity_selection_returns_an_owned_value_and_checks_later_entries() {
     let mut selected = ipsw
         .select_behavior(&device_info(), None, Behavior::Erase)
         .unwrap();
-    assert_eq!(selected.value, ipsw.identities()[0].value);
+    assert_eq!(selected.value, ipsw.identity(0).unwrap().value);
+    assert!(ipsw.identity(1).is_err());
+    let summaries = ipsw
+        .identity_summaries()
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].chip_id, selected.summary().unwrap().chip_id);
     selected
         .value
         .as_dictionary_mut()

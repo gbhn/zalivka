@@ -1,6 +1,12 @@
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
+pub(crate) fn is_mac_product(product: &str) -> bool {
+    ["Mac", "iMac", "iBridge"]
+        .iter()
+        .any(|prefix| product.starts_with(prefix))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
@@ -33,19 +39,24 @@ pub struct DeviceInfo {
 
 impl DeviceInfo {
     pub fn parse(serial: &str, mode: Mode) -> Result<Self> {
-        let hex_field = |name: &str| -> Result<u64> {
-            let raw = field(serial, name).with_context(|| format!("USB serial has no {name}"))?;
-            u64::from_str_radix(raw.trim_start_matches("0x"), 16)
-                .with_context(|| format!("invalid {name}: {raw}"))
+        let hex_field = |name: &str| -> Result<Option<u64>> {
+            field(serial, name)
+                .map(|raw| {
+                    u64::from_str_radix(raw.trim_start_matches("0x"), 16)
+                        .with_context(|| format!("invalid {name}: {raw}"))
+                })
+                .transpose()
         };
-        let ecid = hex_field("ECID")?;
+        let required =
+            |name: &str| hex_field(name)?.with_context(|| format!("USB serial has no {name}"));
+        let ecid = required("ECID")?;
         ensure!(ecid != 0, "device returned zero ECID");
         Ok(Self {
             ecid,
-            chip_id: u32::try_from(hex_field("CPID")?)?,
-            board_id: u32::try_from(hex_field("BDID")?)?,
-            security_domain: u32::try_from(hex_field("SDOM").unwrap_or(1))?,
-            iboot_flags: u32::try_from(hex_field("IBFL").unwrap_or(0))?,
+            chip_id: u32::try_from(required("CPID")?)?,
+            board_id: u32::try_from(required("BDID")?)?,
+            security_domain: u32::try_from(hex_field("SDOM")?.unwrap_or(1))?,
+            iboot_flags: u32::try_from(hex_field("IBFL")?.unwrap_or(0))?,
             mode,
             serial: serial.into(),
             ap_nonce: vec![],

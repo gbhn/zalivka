@@ -7,7 +7,7 @@ use zalivka::{
     device::{Mode, parse_ecid},
     drivers,
     ipsw::{Behavior, Ipsw},
-    net, restore, tss, usb, usb_internet, wire,
+    net, progress, restore, tss, usb, usb_internet, wire,
 };
 
 #[derive(Parser)]
@@ -192,16 +192,16 @@ impl RestoreArgs {
         let ipsw = if let Some(path) = self.ipsw {
             path
         } else {
-            let (action, catalog_identity) = match behavior {
-                Behavior::Erase => ("restoring", self.identity),
-                Behavior::Update => ("reviving", None),
+            let action = match behavior {
+                Behavior::Erase => "restoring",
+                Behavior::Update => "reviving",
             };
             let device = usb::RecoveryUsb::open(self.ecid)?.info;
             ensure!(device.mode == Mode::Dfu, "enter DFU before {action}");
             let directory = self
                 .firmware_dir
                 .map_or_else(catalog::cache_directory, Ok)?;
-            catalog::obtain(&device, &directory, catalog_identity)?
+            catalog::obtain(&device, &directory, self.identity, behavior)?
         };
         restore::run(
             &ipsw,
@@ -211,6 +211,7 @@ impl RestoreArgs {
             behavior,
             assets,
         )?;
+        progress::Event::RestoreCompleted.emit();
         if let Some(target) = internet_target {
             eprintln!("Restore completed; waiting for the Mac's USB network");
             if let Err(error) = usb_internet::share(
@@ -218,6 +219,10 @@ impl RestoreArgs {
                 Some(&target),
                 Some(std::time::Duration::from_secs(900)),
             ) {
+                progress::Event::InternetUnavailable {
+                    error: format!("{error:#}"),
+                }
+                .emit();
                 eprintln!("USB internet unavailable: {error:#}");
             }
         }
@@ -302,6 +307,7 @@ pub(super) fn run() -> Result<()> {
                 let reboot = drivers::prepare_windows()?;
                 println!("Подготовка Windows завершена. Перезагрузка требуется: {reboot}");
                 if reboot {
+                    progress::Event::RebootRequired.emit();
                     println!("Перезагрузите Windows перед восстановлением Mac.");
                 }
             }
@@ -368,11 +374,7 @@ pub(super) fn run() -> Result<()> {
             json: as_json,
         } => {
             let ipsw = Ipsw::open(&ipsw)?;
-            let identities = ipsw
-                .identities()
-                .iter()
-                .map(|i| i.summary())
-                .collect::<Result<Vec<_>>>()?;
+            let identities = ipsw.identity_summaries().collect::<Result<Vec<_>>>()?;
             let version = wire::get(&ipsw.manifest, &["ProductVersion"])
                 .cloned()
                 .unwrap_or("?".into());
@@ -414,10 +416,7 @@ pub(super) fn run() -> Result<()> {
             };
             let mut ipsw = Ipsw::open(&ipsw)?;
             let identity = if let Some(index) = identity {
-                ipsw.identities()
-                    .into_iter()
-                    .find(|i| i.index == index)
-                    .context("identity index does not exist")?
+                ipsw.identity(index)?
             } else {
                 let device = usb::detect()?
                     .into_iter()
@@ -426,11 +425,7 @@ pub(super) fn run() -> Result<()> {
                 ipsw.select_behavior(&device, None, behavior)?
             };
             let summary = identity.summary()?;
-            ensure!(
-                summary.restore_behavior == behavior.name()
-                    && summary.variant.contains(behavior.variant()),
-                "selected identity does not match requested behavior"
-            );
+            identity.validate_behavior(behavior)?;
             ipsw.preflight(&identity)?;
             print_json(&json!({
                     "ecid": ecid.map(|n| format!("{n:016x}")), "hardware_checked": ecid.is_some(),
@@ -468,7 +463,7 @@ pub(super) fn run() -> Result<()> {
         Command::Fetch { ecid, firmware_dir } => {
             let device = usb::RecoveryUsb::open(ecid)?.info;
             let directory = firmware_dir.map_or_else(catalog::cache_directory, Ok)?;
-            let path = catalog::obtain(&device, &directory, None)?;
+            let path = catalog::obtain(&device, &directory, None, Behavior::Erase)?;
             println!("Verified firmware saved to {}", path.display());
         }
         Command::Restore { args, erase } => {

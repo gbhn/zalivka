@@ -120,7 +120,7 @@ fn attestation_reply(message: &Value) -> Result<Value> {
     Ok(wire::dict([("RestoreShouldAttest", false.into())]))
 }
 
-fn log_progress(message: &Value, mut output: impl Write) -> Result<()> {
+fn log_progress(message: &Value, mut output: impl Write) -> Result<crate::progress::Event> {
     let operation = wire::get(message, &["Operation"])
         .and_then(wire::number)
         .context("invalid ProgressMsg.Operation")?;
@@ -137,10 +137,16 @@ fn log_progress(message: &Value, mut output: impl Write) -> Result<()> {
     } else {
         writeln!(output, "Operation {operation}: {progress}%")?;
     }
-    Ok(())
+    Ok(crate::progress::Event::OperationProgress {
+        operation,
+        progress,
+    })
 }
 
-fn log_checkpoint(message: &Value, mut output: impl Write) -> Result<()> {
+fn log_checkpoint(
+    message: &Value,
+    mut output: impl Write,
+) -> Result<Option<crate::progress::Event>> {
     let id = wire::number(wire::get(message, &["CHECKPOINT_ID"])?)?;
     let name = wire::string(message, &["CHECKPOINT_NAME"]).unwrap_or("unknown");
     let result = wire::get(message, &["CHECKPOINT_RESULT"])?
@@ -164,7 +170,8 @@ fn log_checkpoint(message: &Value, mut output: impl Write) -> Result<()> {
             writeln!(output, "Checkpoint {label}: id=0x{id:x}, {text}")?;
         }
     }
-    Ok(())
+    Ok((!wire::boolean(message, &["CHECKPOINT_COMPLETE"]))
+        .then(|| crate::progress::Event::Checkpoint { name: name.into() }))
 }
 
 pub struct ContextState {
@@ -205,10 +212,7 @@ pub fn run(
     usb.check_reset_access()?;
     let mut ipsw = Ipsw::open(path)?;
     let identity = ipsw.select_behavior(&usb.info, identity_index, behavior)?;
-    ensure!(
-        identity.summary()?.restore_behavior == behavior.name(),
-        "restore behavior differs from the selected identity"
-    );
+    identity.validate_behavior(behavior)?;
     ipsw.preflight(&identity)?;
     let recovery = ipsw.recovery_identity(&usb.info, &identity)?;
     if let Some(id) = &recovery {
@@ -216,7 +220,7 @@ pub fn run(
     }
     eprintln!(
         "Personalizing {} for ECID {ecid:016x}",
-        identity.summary()?.device_class
+        wire::string(&identity.value, &["Info", "DeviceClass"])?
     );
     let ticket = tss::send(&tss::request(&usb.info, &identity)?)
         .context("personalizing restore firmware")?;
@@ -290,7 +294,7 @@ pub fn run(
                 }
                 match wire::string(&message, &["MsgType"])? {
                     "DataRequestMsg" => state.serve(&session, &mut main, &message)?,
-                    "AsyncDataRequestMsg" => requests.spawn(&state, message.clone())?,
+                    "AsyncDataRequestMsg" => requests.spawn(&state, message)?,
                     "StatusMsg" => {
                         final_received = true;
                         fdr.stop();
@@ -311,8 +315,12 @@ pub fn run(
                         );
                         return Ok(());
                     }
-                    "ProgressMsg" => log_progress(&message, std::io::stderr().lock())?,
-                    "CheckpointMsg" => log_checkpoint(&message, std::io::stderr().lock())?,
+                    "ProgressMsg" => log_progress(&message, std::io::stderr().lock())?.emit(),
+                    "CheckpointMsg" => {
+                        if let Some(event) = log_checkpoint(&message, std::io::stderr().lock())? {
+                            event.emit();
+                        }
+                    }
                     "AsyncWait" => {}
                     "RestoreProtocol" => ensure!(
                         wire::string(&message, &["Arguments", "RestoreProtocol"])? == "MuxSocket",

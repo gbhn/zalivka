@@ -1,5 +1,41 @@
 use super::*;
 use std::ffi::OsString;
+
+fn job(action: Action) -> Job {
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--help")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    Job {
+        id: 7,
+        action,
+        started: Instant::now(),
+        child,
+        log: tempfile::tempfile().unwrap(),
+        success: None,
+        readers: 2,
+        cancelled: false,
+        restore_completed: false,
+        internet_error: None,
+        preparing_internet: false,
+    }
+}
+
+fn worker_line(event: progress::Event) -> String {
+    let mut line = Vec::new();
+    event.write_to(&mut line).unwrap();
+    String::from_utf8(line).unwrap().trim_end().to_owned()
+}
+
+fn send_worker(app: &mut App, event: progress::Event) {
+    app.tx
+        .send(Event::worker_output(7, worker_line(event), true))
+        .unwrap();
+    app.poll(&egui::Context::default());
+}
 fn device(ecid: u64, mode: Mode) -> DeviceInfo {
     DeviceInfo {
         ecid,
@@ -187,6 +223,9 @@ fn stale_worker_events_do_not_enter_a_new_journal() {
     let mut app = App::new();
     let ctx = egui::Context::default();
     app.tx.send(Event::Line(999, "stale error".into())).unwrap();
+    app.tx
+        .send(Event::Worker(999, progress::Event::RestoreCompleted))
+        .unwrap();
     app.tx.send(Event::ReaderDone(999)).unwrap();
     app.poll(&ctx);
     assert!(app.logs.is_empty());
@@ -195,25 +234,13 @@ fn stale_worker_events_do_not_enter_a_new_journal() {
 
 #[test]
 fn exited_worker_keeps_final_lines_until_both_readers_finish() {
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .arg("--help")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    assert!(child.wait().unwrap().success());
     let log = tempfile::NamedTempFile::new().unwrap();
     let mut app = App::new();
     let ctx = egui::Context::default();
     app.job = Some(Job {
         id: 7,
-        action: Action::Restore,
-        started: Instant::now(),
-        child,
         log: log.reopen().unwrap(),
-        success: None,
-        readers: 2,
-        cancelled: false,
+        ..job(Action::Restore)
     });
     app.poll(&ctx);
     assert_eq!(app.job.as_ref().unwrap().success, Some(true));
@@ -225,9 +252,12 @@ fn exited_worker_keeps_final_lines_until_both_readers_finish() {
     assert!(app.notice.is_none());
 
     app.tx
-        .send(Event::Line(
+        .send(Event::worker_output(
             7,
-            "USB internet unavailable: disconnected".into(),
+            worker_line(progress::Event::InternetUnavailable {
+                error: "disconnected".into(),
+            }),
+            true,
         ))
         .unwrap();
     app.tx.send(Event::ReaderDone(7)).unwrap();
@@ -245,46 +275,49 @@ fn exited_worker_keeps_final_lines_until_both_readers_finish() {
 
 #[test]
 fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
-    let mut app = App::new();
-    app.windows_reboot_required = true;
-    app.logs
-        .push_back("USB internet unavailable: no network".into());
+    let mut job = job(Action::Restore);
+    job.internet_error = Some("no network".into());
+    job.cancelled = true;
     for success in [false, true] {
-        let notice = app.completion_notice(Action::Restore, true, success, 65);
+        let notice = job.completion_notice(success, true);
         assert_eq!(notice.title, "Операция остановлена");
         assert_eq!(notice.tone, Tone::Neutral);
     }
-    app.logs
-        .push_back("Restore completed; waiting for the Mac's USB network".into());
-    let notice = app.completion_notice(Action::Restore, true, false, 65);
+    job.restore_completed = true;
+    let notice = job.completion_notice(false, true);
     assert_eq!(
         notice.title,
         "Восстановление завершено · раздача остановлена"
     );
     assert_eq!(notice.tone, Tone::Neutral);
+    job.action = Action::Revive;
     assert_eq!(
-        app.completion_notice(Action::Revive, true, false, 65).title,
+        job.completion_notice(false, true).title,
         "Операция остановлена"
     );
+    job.cancelled = false;
     for action in [Action::Restore, Action::PrepareWindows] {
-        let notice = app.completion_notice(action, false, false, 65);
+        job.action = action;
+        let notice = job.completion_notice(false, true);
         assert_eq!(notice.tone, Tone::Error);
         assert!(notice.title.ends_with(": ошибка"));
     }
-    let notice = app.completion_notice(Action::PrepareWindows, false, true, 65);
+    let notice = job.completion_notice(true, true);
     assert_eq!(notice.title, "Перезагрузите Windows");
     assert_eq!(notice.tone, Tone::Neutral);
-    let notice = app.completion_notice(Action::Restore, false, true, 65);
+    job.action = Action::Restore;
+    let notice = job.completion_notice(true, true);
     assert_eq!(notice.detail, "no network");
     assert_eq!(notice.tone, Tone::Neutral);
-    app.logs.clear();
+    job.internet_error = None;
     for action in [
         Action::Restore,
         Action::Revive,
         Action::Download,
         Action::UsbInternet,
     ] {
-        let notice = app.completion_notice(action, false, true, 65);
+        job.action = action;
+        let notice = job.completion_notice(true, true);
         assert_eq!(notice.title, action.completed_title());
         assert_eq!(notice.tone, Tone::Success);
         assert_eq!(
@@ -292,6 +325,117 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
             action.writes_device()
         );
     }
+}
+
+#[test]
+fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore() {
+    let mut app = App::new();
+    app.job = Some(job(Action::Restore));
+    assert!(!app.job.as_ref().unwrap().can_stop());
+    app.log("Restore completed; waiting for the Mac's USB network".into());
+    app.log("Перезагрузите Windows перед восстановлением Mac.".into());
+    app.tx
+        .send(Event::worker_output(
+            7,
+            worker_line(progress::Event::RestoreCompleted),
+            false,
+        ))
+        .unwrap();
+    app.poll(&egui::Context::default());
+    assert!(!app.job.as_ref().unwrap().can_stop());
+    assert!(!app.windows_reboot_required);
+
+    send_worker(
+        &mut app,
+        progress::Event::OperationProgress {
+            operation: 28,
+            progress: 50,
+        },
+    );
+    assert_eq!(app.fraction, Some(0.5));
+    send_worker(
+        &mut app,
+        progress::Event::OperationProgress {
+            operation: 28,
+            progress: -1,
+        },
+    );
+    assert_eq!(app.fraction, None);
+    send_worker(
+        &mut app,
+        progress::Event::Checkpoint {
+            name: "update_firmware".into(),
+        },
+    );
+    assert_eq!(app.phase, "Обновление прошивки");
+    send_worker(&mut app, progress::Event::RestoreCompleted);
+    send_worker(&mut app, progress::Event::InternetWaiting);
+    assert!(app.job.as_ref().unwrap().can_stop());
+    send_worker(&mut app, progress::Event::InternetPreparing);
+    assert!(!app.job.as_ref().unwrap().can_stop());
+    send_worker(&mut app, progress::Event::InternetReady);
+    assert!(app.job.as_ref().unwrap().can_stop());
+    assert_eq!(app.phase, "Интернет по USB · оставьте Zalivka открытой");
+    send_worker(
+        &mut app,
+        progress::Event::InternetUnavailable {
+            error: "no network".into(),
+        },
+    );
+    for index in 0..4001 {
+        app.log(format!("message {index}"));
+    }
+    assert_eq!(app.logs.len(), 4000);
+    let job = app.job.as_mut().unwrap();
+    assert_eq!(job.completion_notice(true, false).detail, "no network");
+    job.cancelled = true;
+    assert_eq!(
+        job.completion_notice(false, false).title,
+        "Восстановление завершено · раздача остановлена"
+    );
+    job.action = Action::PrepareWindows;
+    job.cancelled = false;
+    assert!(!job.can_stop());
+    send_worker(&mut app, progress::Event::RebootRequired);
+    assert!(app.windows_reboot_required);
+}
+
+#[test]
+fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
+    let mut app = App::new();
+    app.job = Some(job(Action::Restore));
+    let update = progress::Update {
+        stage: "ASR".into(),
+        completed: 100,
+        total: Some(100),
+        bytes_per_second: 10.0,
+        elapsed_seconds: 10.0,
+        finished: true,
+    };
+    send_worker(&mut app, progress::Event::Transfer(update.clone()));
+    assert_eq!(app.transfer.as_ref().unwrap().update.fraction(), Some(1.0));
+    send_worker(
+        &mut app,
+        progress::Event::OperationProgress {
+            operation: 28,
+            progress: 50,
+        },
+    );
+    assert!(app.transfer.is_none());
+    assert_eq!(app.fraction, Some(0.5));
+    send_worker(&mut app, progress::Event::RestoreCompleted);
+    send_worker(&mut app, progress::Event::InternetWaiting);
+    send_worker(&mut app, progress::Event::InternetReady);
+    let line = worker_line(progress::Event::Transfer(update));
+    app.tx
+        .send(Event::worker_output(7, line.clone(), false))
+        .unwrap();
+    app.poll(&egui::Context::default());
+    assert!(app.transfer.is_none());
+    assert!(app.fraction.is_none());
+    assert!(app.job.as_ref().unwrap().can_stop());
+    assert_eq!(app.phase, "Интернет по USB · оставьте Zalivka открытой");
+    assert_eq!(app.logs.back(), Some(&line));
 }
 
 #[test]
@@ -396,11 +540,6 @@ fn stalled_transfer_hides_speed_and_eta() {
     assert_eq!(t.remaining(now + Duration::from_secs(3)), None);
     t.update.finished = true;
     assert_eq!(t.remaining(now), None);
-    assert_eq!(progress_value("Operation 13: 100%"), Some(1.0));
-    assert_eq!(
-        progress_value("Operation 28: progress unavailable (-1)"),
-        None
-    );
 }
 
 #[test]

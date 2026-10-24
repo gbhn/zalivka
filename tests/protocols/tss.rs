@@ -36,6 +36,51 @@ fn tss_requests_bind_hardware_nonce_and_component_digests() {
 }
 
 #[test]
+fn shared_component_preparation_keeps_default_flags_specific_to_restore_requests() {
+    for rules in [
+        None,
+        Some(Value::Array(vec![])),
+        Some(Value::Array(vec![wire::dict([
+            ("Conditions", wire::dict([] as [(&str, Value); 0])),
+            ("Actions", wire::dict([("ESEC", false.into())])),
+        ])])),
+    ] {
+        let mut id = identity();
+        let mut info = wire::dict([("Path", "Firmware/extra".into())]);
+        if let Some(rules) = &rules {
+            info.as_dictionary_mut()
+                .unwrap()
+                .insert("RestoreRequestRules".into(), rules.clone());
+        }
+        manifest_mut(&mut id).insert(
+            "Extra".into(),
+            wire::dict([("Trusted", true.into()), ("Info", info)]),
+        );
+        let restore = tss::request(&device_info(), &id).unwrap();
+        let recovery = tss::recovery_request(&device_info(), &id).unwrap();
+        for request in [&restore, &recovery] {
+            assert!(wire::get(request, &["Extra", "Info"]).is_err());
+            assert_eq!(
+                wire::get(request, &["Extra", "Digest"]).unwrap().as_data(),
+                Some(&[][..])
+            );
+        }
+        if rules.is_none() {
+            assert!(wire::boolean(&restore, &["Extra", "EPRO"]));
+            assert!(wire::boolean(&restore, &["Extra", "ESEC"]));
+            assert!(wire::get(&recovery, &["Extra", "EPRO"]).is_err());
+            assert!(wire::get(&recovery, &["Extra", "ESEC"]).is_err());
+        } else {
+            assert_eq!(
+                wire::get(&restore, &["Extra"]).unwrap(),
+                wire::get(&recovery, &["Extra"]).unwrap()
+            );
+            assert!(wire::get(&restore, &["Extra", "EPRO"]).is_err());
+        }
+    }
+}
+
+#[test]
 fn local_policy_omits_firmware_metadata_without_changing_firmware_requests() {
     let mut id = identity();
     let metadata = [

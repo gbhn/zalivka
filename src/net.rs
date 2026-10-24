@@ -60,6 +60,10 @@ pub fn validate_apple_url(url: &str) -> Result<()> {
     apple_url(url).map(|_| ())
 }
 
+pub(crate) fn is_apple_host(host: &str) -> bool {
+    host == "apple.com" || host.ends_with(".apple.com") || host.ends_with(".cdn-apple.com")
+}
+
 /// Return the validated URI so callers can use it without parsing again.
 pub(crate) fn apple_url(url: &str) -> Result<Uri> {
     let uri: Uri = url.parse().context("invalid URL")?;
@@ -69,7 +73,7 @@ pub(crate) fn apple_url(url: &str) -> Result<Uri> {
     );
     let host = uri.host().context("URL has no host")?.to_ascii_lowercase();
     ensure!(
-        host == "apple.com" || host.ends_with(".apple.com") || host.ends_with(".cdn-apple.com"),
+        is_apple_host(&host),
         "URL host is not an Apple distribution host: {host}"
     );
     ensure!(

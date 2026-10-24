@@ -7,8 +7,11 @@ fn samples_measure_new_bytes_and_keep_resumed_offsets_out_of_the_rate() {
     let update = progress.update(progress.started + Duration::from_secs(2), false);
     assert_eq!(update.bytes_per_second, 100.0);
     assert_eq!(update.fraction(), Some(0.6));
-    let line = format!("{PREFIX}{}", serde_json::to_string(&update).unwrap());
-    let parsed = Update::parse(&line).unwrap();
+    let mut line = Vec::new();
+    Event::Transfer(update).write_to(&mut line).unwrap();
+    let Event::Transfer(parsed) = Event::parse(std::str::from_utf8(&line).unwrap()).unwrap() else {
+        panic!("expected a transfer event");
+    };
     assert_eq!(parsed.completed, 600);
     assert!(!parsed.finished);
     progress.sampled_at += Duration::from_secs(2);
@@ -25,7 +28,8 @@ fn malformed_progress_cannot_supply_a_fake_percentage() {
         r#"{"stage":"x","completed":20,"total":10,"bytes_per_second":1,"elapsed_seconds":1,"finished":false}"#,
         r#"{"stage":"x","completed":0,"total":10,"bytes_per_second":-1,"elapsed_seconds":1,"finished":false}"#,
     ] {
-        assert!(Update::parse(&format!("{PREFIX}{json}")).is_none());
+        let json = json.replacen('{', r#"{"event":"transfer","#, 1);
+        assert!(Event::parse(&format!("{EVENT_PREFIX}{json}")).is_none());
     }
-    assert!(Update::parse("Operation 13: 100%").is_none());
+    assert!(Event::parse("Operation 13: 100%").is_none());
 }

@@ -143,11 +143,7 @@ pub fn status() -> Result<Vec<Status>> {
     for info in nusb::list_devices().wait()?.filter(mac) {
         let device = info.open().wait()?;
         let selected = pair(device.active_configuration()?)?;
-        let access = (|| -> Result<()> {
-            let _control = device.claim_interface(selected.control).wait()?;
-            let _data = device.claim_interface(selected.data).wait()?;
-            Ok(())
-        })();
+        let access = link::claim_pair(&device, selected).map(drop);
         result.push(Status {
             serial: info
                 .serial_number()
@@ -174,6 +170,7 @@ pub fn share(
         cfg!(windows),
         "USB internet sharing currently supports Windows hosts"
     );
+    crate::progress::Event::InternetWaiting.emit();
     eprintln!("USB internet: waiting for the Mac USB network (up to 90 seconds)");
     eprintln!(
         "USB internet: if macOS has booted but its USB network is missing, reconnect the cable to the same USB port"
@@ -193,14 +190,15 @@ pub fn share(
     {
         let device = info.open().wait()?;
         let selected = pair(device.active_configuration()?)?;
-        let accessible = device.claim_interface(selected.control).wait().is_ok()
-            && device.claim_interface(selected.data).wait().is_ok();
+        let accessible = link::claim_pair(&device, selected).is_ok();
         if !accessible {
+            crate::progress::Event::InternetPreparing.emit();
             eprintln!("USB internet: preparing the Mac's network driver; confirm Windows UAC");
             prepare(
                 info.serial_number().map(|s| s.trim_end_matches('\0')),
                 false,
             )?;
+            crate::progress::Event::InternetWaiting.emit();
         }
     }
     let info = find(
@@ -210,6 +208,7 @@ pub fn share(
     .context("Mac disconnected during network preparation; reconnect the USB cable")?;
     let mut link = Link::open(&info)?;
     let mut router = router::Router::new();
+    crate::progress::Event::InternetReady.emit();
     eprintln!(
         "USB internet ready: USB network started; waiting for Mac traffic; keep Zalivka open"
     );

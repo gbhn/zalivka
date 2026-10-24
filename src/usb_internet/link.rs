@@ -68,6 +68,22 @@ pub(crate) fn pair(config: nusb::descriptors::ConfigurationDescriptor<'_>) -> Re
     }
     anyhow::bail!("Mac does not expose a usable CDC-NCM interface")
 }
+
+pub(super) fn claim_pair(
+    device: &nusb::Device,
+    selected: NcmInterface,
+) -> Result<(nusb::Interface, nusb::Interface)> {
+    let control = device
+        .claim_interface(selected.control)
+        .wait()
+        .context("NCM control is inaccessible; run usb-internet prepare on this connected Mac")?;
+    let data = device
+        .claim_interface(selected.data)
+        .wait()
+        .context("NCM data is inaccessible; run usb-internet prepare on this connected Mac")?;
+    Ok((control, data))
+}
+
 pub(super) struct Link {
     _device: nusb::Device,
     control: nusb::Interface,
@@ -85,13 +101,7 @@ impl Link {
     pub(super) fn open(info: &nusb::DeviceInfo) -> Result<Self> {
         let device = info.open().wait()?;
         let selected = pair(device.active_configuration()?)?;
-        let control = device.claim_interface(selected.control).wait().context(
-            "NCM control is inaccessible; run usb-internet prepare on this connected Mac",
-        )?;
-        let data = device
-            .claim_interface(selected.data)
-            .wait()
-            .context("NCM data is inaccessible; run usb-internet prepare on this connected Mac")?;
+        let (control, data) = claim_pair(&device, selected)?;
         let bytes = control
             .control_in(
                 ControlIn {

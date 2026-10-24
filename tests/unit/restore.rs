@@ -1,4 +1,4 @@
-use super::boot::{IBootStep, diagnostic_boot_command, iboot_stage, reconnect_after_ibss};
+use super::boot::{IBootStep, iboot_stage, reconnect_after_ibss};
 use super::file_data::{FILE_DATA_BATCH, FileDataWriter, send_file_data};
 use super::*;
 use crate::dfu;
@@ -16,7 +16,7 @@ fn j313_identity() -> Identity {
 }
 
 fn stage_transcript(id: &Identity, stage1: bool) -> Vec<String> {
-    iboot_stage(id, stage1)
+    iboot_stage(id, stage1, false)
         .unwrap()
         .into_iter()
         .map(|step| match step {
@@ -121,6 +121,20 @@ fn update_boot_args_are_repeated_without_enabling_reformat() {
 }
 
 #[test]
+fn restore_options_reject_unknown_or_malformed_behaviors() {
+    let mut id = j313_identity();
+    for value in ["".into(), "Unknown".into(), true.into()] {
+        id.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("RestoreBehavior".into(), value);
+        assert!(id.behavior().is_err());
+        assert!(options(&id).is_err());
+        assert!(boot_arguments(&id).is_err());
+    }
+}
+
+#[test]
 fn bootstrap_respects_stage_flags_and_defers_logo_until_present_dcp() {
     let mut id = j313_identity();
     let manifest = id.value.as_dictionary_mut().unwrap()["Manifest"]
@@ -178,11 +192,11 @@ fn diagnostic_stages_never_persist_settings_or_enable_reformatting() {
             .unwrap()
             .insert("RestoreBehavior".into(), behavior.into());
         for first in [true, false] {
-            let commands: Vec<_> = iboot_stage(&id, first)
+            let commands: Vec<_> = iboot_stage(&id, first, true)
                 .unwrap()
                 .into_iter()
                 .filter_map(|step| match step {
-                    IBootStep::Command(command) => diagnostic_boot_command(command),
+                    IBootStep::Command(command) => Some(command),
                     IBootStep::Component(_) => None,
                 })
                 .collect();
@@ -237,13 +251,20 @@ fn signed_progress_survives_xml_and_binary_plist_framing() {
             }
             let received = wire::receive(&mut std::io::Cursor::new(framed)).unwrap();
             let mut output = Vec::new();
-            log_progress(&received, &mut output).unwrap();
+            let event = log_progress(&received, &mut output).unwrap();
             let expected = if progress == -1 {
                 "Operation 28: progress unavailable (-1)\n".to_owned()
             } else {
                 format!("Operation 28: {progress}%\n")
             };
             assert_eq!(String::from_utf8(output).unwrap(), expected);
+            assert_eq!(
+                event,
+                crate::progress::Event::OperationProgress {
+                    operation: 28,
+                    progress
+                }
+            );
             assert!(validate_final_status(&received).is_err());
         }
     }

@@ -65,6 +65,7 @@ enum Event {
         host: std::result::Result<Option<drivers::HostStatus>, String>,
     },
     Line(u64, String),
+    Worker(u64, progress::Event),
     ReaderDone(u64),
     Picked(Picker, Option<PathBuf>),
     Saved(std::result::Result<PathBuf, String>),
@@ -78,6 +79,17 @@ struct Job {
     success: Option<bool>,
     readers: u8,
     cancelled: bool,
+    restore_completed: bool,
+    internet_error: Option<String>,
+    preparing_internet: bool,
+}
+
+impl Job {
+    fn can_stop(&self) -> bool {
+        (!self.action.writes_device() || self.restore_completed)
+            && self.action != Action::PrepareWindows
+            && !self.preparing_internet
+    }
 }
 struct Transfer {
     update: progress::Update,
@@ -221,69 +233,14 @@ impl App {
             .collect::<Vec<_>>()
             .join("\n")
     }
-    fn log(&mut self, mut line: String) {
-        if line.starts_with("USB internet: waiting") {
-            self.phase = "Ожидание USB-сети Mac".into();
-        } else if line.starts_with("USB internet: preparing") {
-            self.phase = "Подтвердите запрос прав администратора Windows".into();
-        } else if line.starts_with("USB internet ready:") {
-            self.phase = "Интернет по USB · оставьте Zalivka открытой".into();
-            self.transfer = None;
-            self.fraction = None;
-        }
-        if self
-            .job
-            .as_ref()
-            .is_some_and(|j| j.action == Action::PrepareWindows)
-            && line == "Перезагрузите Windows перед восстановлением Mac."
-        {
-            self.windows_reboot_required = true;
-        }
+    fn log(&mut self, line: String) {
         self.last_activity = Instant::now();
         if let Some(job) = &mut self.job {
             let _ = writeln!(job.log, "{line}");
         }
-        if let Some(update) = progress::Update::parse(&line) {
-            let keep = update.completed == 0
-                || update.finished
-                || self
-                    .transfer
-                    .as_ref()
-                    .is_none_or(|t| t.update.stage != update.stage)
-                || self.last_stats.elapsed() >= Duration::from_secs(10);
-            if keep {
-                line = format!(
-                    "{}: {}{} · {:.1} МиБ/с",
-                    update.stage,
-                    human_bytes(update.completed),
-                    update
-                        .total
-                        .map(|n| format!(" / {}", human_bytes(n)))
-                        .unwrap_or_default(),
-                    update.bytes_per_second / 1048576.0
-                );
-                self.last_stats = Instant::now();
-            }
-            self.transfer = Some(Transfer {
-                update,
-                received: Instant::now(),
-            });
-            if !keep {
-                return;
-            }
-        } else if line.starts_with("Checkpoint started:") {
-            let checkpoint = line
-                .split_once(", name=")
-                .map(|(_, s)| s.split(',').next().unwrap_or(s))
-                .unwrap_or("");
-            self.phase = friendly_phase(checkpoint).into();
-            self.fraction = None;
-            if self.transfer.as_ref().is_some_and(|t| t.update.finished) {
-                self.transfer = None;
-            }
-        } else if line.starts_with("Operation ") {
-            self.fraction = progress_value(&line);
-        }
+        self.journal_line(line);
+    }
+    fn journal_line(&mut self, line: String) {
         self.logs.push_back(line);
         while self.logs.len() > 4000 {
             self.logs.pop_front();

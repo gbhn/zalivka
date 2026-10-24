@@ -59,6 +59,24 @@ impl Identity {
     pub fn is_macos(&self) -> bool {
         self.info("MacOSVariant").is_ok()
     }
+    pub fn behavior(&self) -> Result<Behavior> {
+        match self.info("RestoreBehavior")?.as_string() {
+            Some("Erase") => Ok(Behavior::Erase),
+            Some("Update") => Ok(Behavior::Update),
+            value => bail!("invalid restore behavior {value:?}"),
+        }
+    }
+    pub fn validate_behavior(&self, behavior: Behavior) -> Result<()> {
+        ensure!(
+            self.behavior()? == behavior
+                && self
+                    .info("Variant")?
+                    .as_string()
+                    .is_some_and(|variant| variant.contains(behavior.variant())),
+            "selected identity does not match requested behavior"
+        );
+        Ok(())
+    }
     pub fn summary(&self) -> Result<IdentitySummary> {
         IdentitySummary::from_value(self.index, &self.value)
     }
@@ -104,6 +122,22 @@ impl Ipsw {
                 value: value.clone(),
             })
             .collect()
+    }
+
+    pub fn identity_summaries(&self) -> impl Iterator<Item = Result<IdentitySummary>> {
+        self.identity_values()
+            .map(|(index, value)| IdentitySummary::from_value(index, value))
+    }
+
+    pub fn identity(&self, index: usize) -> Result<Identity> {
+        let (_, value) = self
+            .identity_values()
+            .nth(index)
+            .context("identity index does not exist")?;
+        Ok(Identity {
+            index,
+            value: value.clone(),
+        })
     }
 
     pub fn select_behavior(

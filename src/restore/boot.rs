@@ -1,5 +1,8 @@
 //! iBoot preparation and explicitly requested diagnostic boots.
-use super::{ContextState, boot_arguments, confirm_restore_service, query_value, wait_restored};
+use super::{
+    ContextState, confirm_restore_service, options::behavior_boot_arguments, query_value,
+    wait_restored,
+};
 use crate::{
     device::Mode,
     dfu, img4,
@@ -23,7 +26,7 @@ pub(super) enum IBootStep {
 
 /// MobileDevice's stage preparation: ANS, parameters, iBootData, DCP, remainder.
 /// These are full restore stages, not the separate ApBootstrapOnly operation.
-pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>> {
+pub(super) fn iboot_stage(id: &Identity, stage1: bool, diagnostic: bool) -> Result<Vec<IBootStep>> {
     let mut firmware: Vec<_> = id
         .manifest()?
         .iter()
@@ -51,11 +54,18 @@ pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>>
         steps.push(IBootStep::Component(firmware.remove(index)));
         steps.push(IBootStep::Command("firmware"));
     }
-    steps.extend([
-        IBootStep::Command("setenv auto-boot false"),
-        IBootStep::Command("saveenv"),
-        IBootStep::Command(boot_arguments(id)?),
-    ]);
+    // Diagnostic boots never generate persistent settings or reformat arguments.
+    let behavior = if diagnostic {
+        steps.push(IBootStep::Command("setenvnp auto-boot false"));
+        Behavior::Update
+    } else {
+        steps.extend([
+            IBootStep::Command("setenv auto-boot false"),
+            IBootStep::Command("saveenv"),
+        ]);
+        id.behavior()?
+    };
+    steps.push(IBootStep::Command(behavior_boot_arguments(behavior)));
     for priority in ["iBootData", "RestoreDCP"] {
         if let Some(index) = firmware.iter().position(|name| name == priority) {
             steps.push(IBootStep::Component(firmware.remove(index)));
@@ -70,19 +80,6 @@ pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>>
         steps.push(IBootStep::Command("firmware"));
     }
     Ok(steps)
-}
-
-// A RAM diagnostic boot must not persist the restore preparation or permit
-// NAND reformatting. All firmware/component uploads use the existing path.
-pub(super) fn diagnostic_boot_command(command: &str) -> Option<&str> {
-    match command {
-        "saveenv" => None,
-        "setenv auto-boot false" => Some("setenvnp auto-boot false"),
-        command if command.starts_with("setenvnp boot-args ") => {
-            Some("setenvnp boot-args rd=md0 -progress -restore")
-        }
-        command => Some(command),
-    }
 }
 
 /// Query iBoot's environment, optionally loading only a signed iBSS into RAM.
@@ -315,20 +312,12 @@ impl ContextState {
         diagnostic: bool,
     ) -> Result<()> {
         eprintln!("Preparing iBoot stage {}", if stage1 { 1 } else { 2 });
-        for step in iboot_stage(&self.identity, stage1)? {
+        for step in iboot_stage(&self.identity, stage1, diagnostic)? {
             match step {
                 IBootStep::Component(name) => {
                     self.send_component(usb, &name, None)?;
                 }
                 IBootStep::Command(command) => {
-                    let command = if diagnostic {
-                        let Some(command) = diagnostic_boot_command(command) else {
-                            continue;
-                        };
-                        command
-                    } else {
-                        command
-                    };
                     eprintln!("iBoot: {command}");
                     dfu::command(usb, command, false)?;
                 }

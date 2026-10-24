@@ -443,7 +443,10 @@ fn components(
         if !key.starts_with(prefix) {
             continue;
         }
-        request.insert(key.clone(), tss::component_request(value, parameters)?);
+        request.insert(
+            key.clone(),
+            Value::Dictionary(tss::component_request(value, parameters)?),
+        );
     }
     Ok(())
 }

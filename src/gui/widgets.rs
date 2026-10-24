@@ -106,19 +106,6 @@ pub(super) fn elapsed_text(seconds: u64) -> String {
         seconds % 60
     )
 }
-pub(super) fn progress_value(line: &str) -> Option<f32> {
-    if !line.starts_with("Operation ") || !line.contains('%') {
-        return None;
-    }
-    let n = line
-        .split('%')
-        .next()?
-        .split_whitespace()
-        .last()?
-        .parse::<f32>()
-        .ok()?;
-    n.is_finite().then_some((n / 100.0).clamp(0.0, 1.0))
-}
 pub(super) fn friendly_phase(name: &str) -> &'static str {
     if name.starts_with("cleanup") || name.contains("bootable") || name.contains("autoboot") {
         "Завершение"

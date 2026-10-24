@@ -1,4 +1,4 @@
-use super::{Action, Event, Job, Setup};
+use super::{Action, Event, Job, Setup, progress};
 use anyhow::{Context, Result};
 use eframe::egui;
 use std::{
@@ -36,6 +36,7 @@ impl Job {
         let mut command = Command::new(std::env::current_exe()?);
         command
             .args(args)
+            .env(progress::WORKER_EVENTS_ENV, "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -47,9 +48,9 @@ impl Job {
         let mut child = command.spawn().context("starting worker")?;
         let stdout = child.stdout.take().context("worker has no stdout")?;
         let stderr = child.stderr.take().context("worker has no stderr")?;
-        for pipe in [
-            Box::new(stdout) as Box<dyn std::io::Read + Send>,
-            Box::new(stderr),
+        for (pipe, state_events) in [
+            (Box::new(stdout) as Box<dyn std::io::Read + Send>, true),
+            (Box::new(stderr), false),
         ] {
             let tx = tx.clone();
             let ctx = ctx.clone();
@@ -64,7 +65,10 @@ impl Job {
                                 break;
                             }
                         };
-                        if tx.send(Event::Line(id, line)).is_err() {
+                        if tx
+                            .send(Event::worker_output(id, line, state_events))
+                            .is_err()
+                        {
                             break;
                         }
                         ctx.request_repaint();
@@ -88,9 +92,22 @@ impl Job {
                 success: None,
                 readers: 2,
                 cancelled: false,
+                restore_completed: false,
+                internet_error: None,
+                preparing_internet: false,
             },
             path,
         ))
+    }
+}
+
+impl Event {
+    pub(super) fn worker_output(id: u64, line: String, state_events: bool) -> Self {
+        if state_events && let Some(event) = progress::Event::parse(&line) {
+            Self::Worker(id, event)
+        } else {
+            Self::Line(id, line)
+        }
     }
 }
 
