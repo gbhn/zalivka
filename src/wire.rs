@@ -57,29 +57,42 @@ pub fn xml(v: &Value) -> Result<Vec<u8>> {
 }
 
 pub fn send(w: &mut impl Write, v: &Value) -> Result<()> {
-    let mut bytes = vec![0; 4];
-    v.to_writer_xml(&mut bytes)?;
-    send_frame(w, bytes)
+    let mut bytes = Vec::new();
+    append_frame(&mut bytes, |out| v.to_writer_xml(out), u32::to_be_bytes)?;
+    send_frame(w, &bytes)
 }
 
 pub fn send_binary(w: &mut impl Write, v: &Value) -> Result<()> {
     let mut bytes = Vec::new();
     append_binary(&mut bytes, v)?;
-    w.write_all(&bytes)?;
-    w.flush()?;
-    Ok(())
+    send_frame(w, &bytes)
+}
+
+/// FDR uses the same binary plist body with a little-endian frame length.
+pub(crate) fn send_binary_le(w: &mut impl Write, v: &Value) -> Result<()> {
+    let mut bytes = Vec::new();
+    append_frame(&mut bytes, |out| v.to_writer_binary(out), u32::to_le_bytes)?;
+    send_frame(w, &bytes)
 }
 
 /// Append a complete frame directly to an existing batch. Offsets inside a
 /// binary plist stay relative to its own writer, not the enclosing batch.
 pub(crate) fn append_binary(bytes: &mut Vec<u8>, v: &Value) -> Result<()> {
+    append_frame(bytes, |out| v.to_writer_binary(out), u32::to_be_bytes)
+}
+
+fn append_frame(
+    bytes: &mut Vec<u8>,
+    encode: impl FnOnce(&mut Vec<u8>) -> std::result::Result<(), plist::Error>,
+    length_prefix: fn(u32) -> [u8; 4],
+) -> Result<()> {
     let start = bytes.len();
     bytes.extend_from_slice(&[0; 4]);
     let result = (|| {
-        v.to_writer_binary(&mut *bytes)?;
+        encode(bytes)?;
         let length = bytes.len() - start - 4;
         ensure!(length <= MAX_PLIST, "outgoing plist too large");
-        bytes[start..start + 4].copy_from_slice(&(length as u32).to_be_bytes());
+        bytes[start..start + 4].copy_from_slice(&length_prefix(length as u32));
         Ok(())
     })();
     if result.is_err() {
@@ -88,12 +101,9 @@ pub(crate) fn append_binary(bytes: &mut Vec<u8>, v: &Value) -> Result<()> {
     result
 }
 
-fn send_frame(w: &mut impl Write, mut bytes: Vec<u8>) -> Result<()> {
-    let length = bytes.len() - 4;
-    ensure!(length <= MAX_PLIST, "outgoing plist too large");
-    bytes[..4].copy_from_slice(&(length as u32).to_be_bytes());
+fn send_frame(w: &mut impl Write, bytes: &[u8]) -> Result<()> {
     // A separate four-byte write becomes a separate USB transfer on MuxStream.
-    w.write_all(&bytes)?;
+    w.write_all(bytes)?;
     w.flush()?;
     Ok(())
 }

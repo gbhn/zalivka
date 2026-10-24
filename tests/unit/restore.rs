@@ -1,15 +1,25 @@
 use super::boot::{IBootStep, iboot_stage, reconnect_after_ibss};
+use super::connection::confirm_restore_service;
 use super::file_data::{
     FILE_DATA_BATCH, FileDataWriter, ImagePrefix, key_exchange, send_file_data,
 };
+use super::session::{
+    acknowledge_final_status, attestation_reply, log_checkpoint, log_progress,
+    wait_for_restore_close,
+};
 use super::*;
 use crate::dfu;
+use crate::mux::Session;
 use crate::mux::{self, PacketTransport};
 use crate::test_mux::{self, version_packet};
 use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::{
+    io::{Read, Write},
+    time::{Duration, Instant},
+};
 
 fn j313_identity() -> Identity {
     Identity {

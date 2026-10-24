@@ -1,15 +1,18 @@
 use super::*;
 
+fn frame(value: &Value) -> Vec<u8> {
+    let mut body = vec![];
+    value.to_writer_binary(&mut body).unwrap();
+    let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
+    bytes.extend(body);
+    bytes
+}
+
 #[test]
 fn stopped_fdr_does_not_cancel_the_main_channels_final_response() {
     let (input, incoming) = mpsc::channel();
     let (output, _outgoing) = mpsc::channel();
-    let mut response = Vec::new();
-    wire::dict([("ConnPort", 45678u64.into())])
-        .to_writer_binary(&mut response)
-        .unwrap();
-    let mut framed = (response.len() as u32).to_le_bytes().to_vec();
-    framed.extend(response);
+    let framed = frame(&wire::dict([("ConnPort", 45678u64.into())]));
     input.send(version_packet()).unwrap();
     input.send(tcp(62078, 1, 0, 1, 0x12, &[])).unwrap();
     input.send(tcp(1082, 2, 0, 1, 0x12, &[])).unwrap();
@@ -35,13 +38,6 @@ fn stopped_fdr_does_not_cancel_the_main_channels_final_response() {
 
 #[test]
 fn fdr_proxy_answers_short_socks_greeting_before_waiting_for_connect() {
-    fn frame(value: &Value) -> Vec<u8> {
-        let mut body = vec![];
-        value.to_writer_binary(&mut body).unwrap();
-        let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
-        bytes.extend(body);
-        bytes
-    }
     let (input, incoming) = mpsc::channel();
     let (output, outgoing) = mpsc::channel();
     let port = 45678u16;
@@ -104,13 +100,6 @@ fn fdr_proxy_answers_short_socks_greeting_before_waiting_for_connect() {
 
 #[test]
 fn fdr_child_closure_and_errors_preserve_main_channel_and_device_failure_status() {
-    fn frame(value: &Value) -> Vec<u8> {
-        let mut body = vec![];
-        value.to_writer_binary(&mut body).unwrap();
-        let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
-        bytes.extend(body);
-        bytes
-    }
     // Cover EOF before a command, truncated command/header, bad handshake,
     // and a refused child connection. None may cancel restored's channel.
     for case in 0..5 {
@@ -204,13 +193,6 @@ fn fdr_child_closure_and_errors_preserve_main_channel_and_device_failure_status(
 
 #[test]
 fn fdr_command_boundary_eof_is_local_but_truncated_control_remains_fatal() {
-    fn frame(value: &Value) -> Vec<u8> {
-        let mut body = vec![];
-        value.to_writer_binary(&mut body).unwrap();
-        let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
-        bytes.extend(body);
-        bytes
-    }
     for tail in [&[][..], &[1][..], &[1, 0][..]] {
         let (input, incoming) = mpsc::channel();
         let (output, outgoing) = mpsc::channel();
@@ -256,13 +238,6 @@ fn fdr_command_boundary_eof_is_local_but_truncated_control_remains_fatal() {
 
 #[test]
 fn fdr_sync_waits_for_hello_before_connecting_the_next_child() {
-    fn frame(value: &Value) -> Vec<u8> {
-        let mut body = vec![];
-        value.to_writer_binary(&mut body).unwrap();
-        let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
-        bytes.extend(body);
-        bytes
-    }
     let (input, incoming) = mpsc::channel();
     let (output, outgoing) = mpsc::channel();
     let port = 45678u16;
@@ -339,13 +314,6 @@ fn fdr_sync_waits_for_hello_before_connecting_the_next_child() {
 
 #[test]
 fn fdr_v2_and_v1_fallback_open_sync_channels_and_answer_ping() {
-    fn frame(value: &Value) -> Vec<u8> {
-        let mut body = vec![];
-        value.to_writer_binary(&mut body).unwrap();
-        let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
-        bytes.extend(body);
-        bytes
-    }
     for version in [2, 1] {
         let (input, incoming) = mpsc::channel();
         let (output, outgoing) = mpsc::channel();

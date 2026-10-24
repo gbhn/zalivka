@@ -16,7 +16,7 @@ pub(super) fn control_handshake(session: &Session, version: u8) -> Result<(MuxSt
     control.set_read_timeout(Duration::from_secs(20));
     let port = if version == 2 {
         control.write_all(b"BeginCtrl\0")?;
-        send(
+        wire::send_binary_le(
             &mut control,
             &wire::dict([
                 ("Command", "BeginCtrl".into()),
@@ -91,14 +91,6 @@ pub(super) fn connection_handshake(connection: &mut MuxStream, version: u8) -> R
     }
     Ok(())
 }
-fn send(out: &mut impl Write, value: &Value) -> Result<()> {
-    let mut bytes = Vec::new();
-    value.to_writer_binary(&mut bytes)?;
-    ensure!(bytes.len() <= wire::MAX_PLIST, "FDR plist too large");
-    out.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    out.write_all(&bytes)?;
-    Ok(())
-}
 fn receive(input: &mut impl Read) -> Result<Value> {
     let mut length = [0; 4];
     input.read_exact(&mut length)?;
@@ -110,7 +102,7 @@ pub(super) fn ping(stream: &mut (impl Read + Write)) -> Result<()> {
         wire::string(&command, &["Command"])? == "Ping",
         "unsupported FDR plist command"
     );
-    send(stream, &wire::dict([("Pong", true.into())]))
+    wire::send_binary_le(stream, &wire::dict([("Pong", true.into())]))
 }
 
 /// The 05 01 command can begin either a SOCKS greeting (05 01 00) or

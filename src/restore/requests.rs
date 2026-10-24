@@ -1,5 +1,5 @@
 //! Asynchronous restored requests, isolated archives and worker lifetime.
-use super::{ContextState, RESTORED_PORT, options::ASYNC_DATA_TYPES};
+use super::{ContextState, RESTORED_PORT, data::serve_asset, data_type::DataType};
 use crate::{asr, mux::Session, wire};
 use anyhow::{Context, Result, ensure};
 use plist::Value;
@@ -35,10 +35,8 @@ impl AsyncRequests {
 
     pub fn spawn(&mut self, state: &ContextState, request: Value) -> Result<()> {
         let kind = wire::string(&request, &["DataType"])?;
-        ensure!(
-            ASYNC_DATA_TYPES.contains(&kind),
-            "unsupported async data type {kind}"
-        );
+        let data_type =
+            DataType::parse(kind).with_context(|| format!("unsupported async data type {kind}"))?;
         self.check()?;
         ensure!(
             self.workers.len() < MAX_WORKERS,
@@ -56,7 +54,7 @@ impl AsyncRequests {
         // HTTP assets do not read the IPSW. Other handlers receive their own
         // archive so ZIP seeks cannot race with another image/component reader.
         let assets = state.assets.clone();
-        let mut state = if matches!(kind, "URLAsset" | "StreamedImageDecryptionKey") {
+        let mut state = if data_type == DataType::Asset {
             None
         } else {
             Some(state.reopen()?)
@@ -70,9 +68,9 @@ impl AsyncRequests {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut stream = session.connect_retry(port, Duration::from_secs(60))?;
                     if let Some(state) = &mut state {
-                        state.serve_on(&session, &mut stream, &request)
+                        state.serve_on(&session, &mut stream, &request, data_type)
                     } else {
-                        wire::send_binary(&mut stream, &assets.response(&request)?)
+                        serve_asset(&assets, &mut stream, &request)
                     }
                 }))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("async worker panicked")))

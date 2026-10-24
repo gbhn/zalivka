@@ -6,39 +6,28 @@ use crate::{
     mux::MuxStream,
     wire,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use plist::{Dictionary, Value};
 use std::io::Write;
 
-impl ContextState {
-    pub(super) fn serve_asr(&mut self, stream: &mut MuxStream, message: &Value) -> Result<()> {
-        let id = if wire::string(message, &["DataType"])? == "RecoveryOSASRImage"
-            || wire::boolean(message, &["Arguments", "IsRecoveryOS"])
-        {
-            &self
-                .recovery
-                .as_ref()
-                .context("device requested a recoveryOS identity absent from this IPSW")?
-                .identity
-        } else {
-            &self.restore.identity
-        };
-        let path = id.path("OS")?;
-        let length = self.ipsw.size(path)?;
-        if let Some(mut image) = self.ipsw.stored_image(path)? {
-            asr::transfer(stream, &mut image, length)
-        } else {
-            eprintln!("Expanding compressed filesystem to a temporary file ({length} bytes)");
-            crate::storage::require(&std::env::temp_dir(), length)?;
-            let mut image = tempfile::tempfile()?;
-            ensure!(
-                self.ipsw.stream(path, &mut image)? == length,
-                "truncated filesystem"
-            );
-            asr::transfer(stream, &mut image, length)
-        }
+pub(super) fn serve_asr(ipsw: &mut Ipsw, id: &Identity, stream: &mut MuxStream) -> Result<()> {
+    let path = id.path("OS")?;
+    let length = ipsw.size(path)?;
+    if let Some(mut image) = ipsw.stored_image(path)? {
+        asr::transfer(stream, &mut image, length)
+    } else {
+        eprintln!("Expanding compressed filesystem to a temporary file ({length} bytes)");
+        crate::storage::require(&std::env::temp_dir(), length)?;
+        let mut image = tempfile::tempfile()?;
+        ensure!(
+            ipsw.stream(path, &mut image)? == length,
+            "truncated filesystem"
+        );
+        asr::transfer(stream, &mut image, length)
     }
+}
 
+impl ContextState {
     pub(super) fn bootability(&mut self, out: &mut impl Write) -> Result<()> {
         let mut count = 0;
         for path in self.ipsw.files()? {

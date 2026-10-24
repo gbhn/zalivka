@@ -1102,6 +1102,32 @@ fn implemented_async_data_handlers_are_advertised() {
 }
 
 #[test]
+fn unsupported_data_requests_fail_before_opening_a_service_or_cancelling_control() {
+    let file = fixture(None, false);
+    let mut state = restore_state(file.path());
+    let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
+    let session = Session::new(usb).unwrap();
+    let mut main = session.connect(62078).unwrap();
+    let writes = output.lock().unwrap().len();
+    for kind in ["UnknownData", "FirmwareUpdaterDataV3", "FileData"] {
+        let error = state
+            .serve(
+                &session,
+                &mut main,
+                &wire::dict([("DataType", kind.into()), ("DataPort", 23456u64.into())]),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("unsupported restored DataType {kind}"))
+        );
+        assert_eq!(output.lock().unwrap().len(), writes);
+    }
+    main.write_all(b"control still works").unwrap();
+}
+
+#[test]
 fn async_asr_keeps_control_and_component_channels_responsive_with_independent_zip_readers() {
     for compression in [
         zip::CompressionMethod::Stored,

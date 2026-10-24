@@ -75,33 +75,34 @@ fn string(pointer: *const u16) -> String {
     }
 }
 
-fn auto_proxy(uri: &Uri, detect: bool, pac: &str) -> Result<Option<Proxy>> {
-    SESSION.with(|cell| {
-        let mut session = cell.borrow_mut();
-        if session.is_none() {
-            let handle = unsafe {
-                WinHttpOpen(
-                    wide("zalivka").as_ptr(),
-                    WINHTTP_ACCESS_TYPE_NO_PROXY,
-                    null(),
-                    null(),
-                    0,
-                )
-            };
-            ensure!(
-                !handle.is_null(),
-                "opening Windows proxy resolver: {}",
-                std::io::Error::last_os_error()
-            );
-            let handle = Session(handle);
-            ensure!(
-                unsafe { WinHttpSetTimeouts(handle.0, 30_000, 30_000, 30_000, 30_000) } != 0,
-                "setting Windows proxy resolver timeouts: {}",
-                std::io::Error::last_os_error()
-            );
-            *session = Some(handle);
-        }
+impl Session {
+    fn open() -> Result<Self> {
+        let handle = unsafe {
+            WinHttpOpen(
+                wide("zalivka").as_ptr(),
+                WINHTTP_ACCESS_TYPE_NO_PROXY,
+                null(),
+                null(),
+                0,
+            )
+        };
+        ensure!(
+            !handle.is_null(),
+            "opening Windows proxy resolver: {}",
+            std::io::Error::last_os_error()
+        );
+        let session = Self(handle);
+        ensure!(
+            unsafe { WinHttpSetTimeouts(session.0, 30_000, 30_000, 30_000, 30_000) } != 0,
+            "setting Windows proxy resolver timeouts: {}",
+            std::io::Error::last_os_error()
+        );
+        Ok(session)
+    }
+
+    fn proxy(&self, uri: &Uri, detect: bool, pac: &str) -> Result<Option<Proxy>> {
         let pac_url = wide(pac);
+        let url = wide(uri.to_string());
         let mut options = WINHTTP_AUTOPROXY_OPTIONS {
             dwFlags: if detect {
                 WINHTTP_AUTOPROXY_AUTO_DETECT
@@ -124,35 +125,35 @@ fn auto_proxy(uri: &Uri, detect: bool, pac: &str) -> Result<Option<Proxy>> {
             },
             ..Default::default()
         };
-        let url = wide(uri.to_string());
-        let mut info = ProxyInfo(WINHTTP_PROXY_INFO::default());
-        let mut ok = unsafe {
-            WinHttpGetProxyForUrl(
-                session.as_ref().unwrap().0,
-                url.as_ptr(),
-                &mut options,
-                &mut info.0,
-            )
+        // Try without credentials first so WinHTTP can cache the script.
+        // Each attempt owns its result, including any allocations on failure.
+        loop {
+            let mut info = ProxyInfo(WINHTTP_PROXY_INFO::default());
+            if unsafe { WinHttpGetProxyForUrl(self.0, url.as_ptr(), &mut options, &mut info.0) }
+                != 0
+            {
+                return info.proxy(uri);
+            }
+            let error = std::io::Error::last_os_error();
+            if options.fAutoLogonIfChallenged == 0
+                && error.raw_os_error() == Some(ERROR_WINHTTP_LOGIN_FAILURE as i32)
+            {
+                options.fAutoLogonIfChallenged = 1;
+            } else {
+                return Err(error).context("resolving Windows PAC/WPAD proxy");
+            }
+        }
+    }
+}
+
+fn auto_proxy(uri: &Uri, detect: bool, pac: &str) -> Result<Option<Proxy>> {
+    SESSION.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        let session = match &mut *cached {
+            Some(session) => session,
+            slot @ None => slot.insert(Session::open()?),
         };
-        let mut error = std::io::Error::last_os_error();
-        // First try without credentials so WinHTTP can cache the script. Only
-        // retry authenticated PAC retrieval when Windows reports a challenge.
-        if ok == 0 && error.raw_os_error() == Some(ERROR_WINHTTP_LOGIN_FAILURE as i32) {
-            options.fAutoLogonIfChallenged = 1;
-            ok = unsafe {
-                WinHttpGetProxyForUrl(
-                    session.as_ref().unwrap().0,
-                    url.as_ptr(),
-                    &mut options,
-                    &mut info.0,
-                )
-            };
-            error = std::io::Error::last_os_error();
-        }
-        if ok == 0 {
-            return Err(error).context("resolving Windows PAC/WPAD proxy");
-        }
-        info.proxy(uri)
+        session.proxy(uri, detect, pac)
     })
 }
 

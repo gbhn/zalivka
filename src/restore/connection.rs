@@ -6,8 +6,25 @@ use crate::{
     usb::MuxUsb,
     wire,
 };
-use anyhow::{Result, ensure};
-use std::time::{Duration, Instant};
+use anyhow::{Context, Result, ensure};
+use plist::Value;
+use std::{
+    io::{Read, Write},
+    time::{Duration, Instant},
+};
+
+/// Query an existing service without booting firmware or starting a restore.
+pub fn query_value(stream: &mut (impl Read + Write), key: &str) -> Result<Value> {
+    wire::send(
+        stream,
+        &wire::dict([
+            ("Request", "QueryValue".into()),
+            ("QueryKey", key.into()),
+            ("Label", "zalivka".into()),
+        ]),
+    )?;
+    wire::receive(stream).with_context(|| format!("reading {key}"))
+}
 
 pub(super) fn confirm_restore_service<T>(
     bootx_error: Option<anyhow::Error>,
@@ -53,7 +70,7 @@ pub(super) fn wait_restored(device: &DeviceInfo) -> Result<(Session, MuxStream, 
                     "not the restored service"
                 );
                 let version = wire::number(wire::get(&query, &["RestoreProtocolVersion"])?)?;
-                let hardware = super::query_value(&mut stream, "HardwareInfo")?;
+                let hardware = query_value(&mut stream, "HardwareInfo")?;
                 let hw = wire::get(&hardware, &["HardwareInfo"])?;
                 ensure!(
                     wire::number(wire::get(hw, &["UniqueChipID"])?)? == device.ecid,

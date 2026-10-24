@@ -44,15 +44,42 @@ fn idle_control_preserves_partial_command_and_can_stop() {
 
 #[test]
 fn fdr_frames_use_binary_plist_and_little_endian_lengths() {
+    struct Output {
+        bytes: Vec<u8>,
+        limit: usize,
+        writes: usize,
+        flushes: usize,
+    }
+    impl Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let n = bytes.len().min(self.limit);
+            self.bytes.extend_from_slice(&bytes[..n]);
+            self.writes += 1;
+            Ok(n)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
     let value = wire::dict([("Command", "HelloConn".into())]);
-    let mut bytes = Vec::new();
-    send(&mut bytes, &value).unwrap();
-    assert_eq!(&bytes[4..12], b"bplist00");
-    assert_eq!(
-        u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize,
-        bytes.len() - 4
-    );
-    assert_eq!(receive(&mut Cursor::new(bytes)).unwrap(), value);
+    for limit in [usize::MAX, 3] {
+        let mut out = Output {
+            bytes: vec![],
+            limit,
+            writes: 0,
+            flushes: 0,
+        };
+        wire::send_binary_le(&mut out, &value).unwrap();
+        assert_eq!(&out.bytes[4..12], b"bplist00");
+        assert_eq!(
+            u32::from_le_bytes(out.bytes[..4].try_into().unwrap()) as usize,
+            out.bytes.len() - 4
+        );
+        assert_eq!(out.writes, out.bytes.len().div_ceil(limit));
+        assert_eq!(out.flushes, 1);
+        assert_eq!(receive(&mut Cursor::new(out.bytes)).unwrap(), value);
+    }
     assert!(receive(&mut Cursor::new(0u32.to_le_bytes())).is_err());
     assert!(receive(&mut Cursor::new(u32::MAX.to_le_bytes())).is_err());
 }

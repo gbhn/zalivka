@@ -1,3 +1,4 @@
+use super::data_type::DataType;
 use crate::{
     ipsw::{Behavior, Identity},
     wire,
@@ -11,7 +12,7 @@ use plist::{Dictionary, Value};
 const MACOS_RECOVERY_PARTITION_MIB: u64 = 58201;
 
 pub fn supported_data_types() -> Value {
-    let mut types = async_data_types();
+    let mut types = DataType::async_types();
     // This is the protocol vocabulary, including field names and legacy types.
     // false marks a required entry; it does not disable the entry.
     for name in [
@@ -64,53 +65,6 @@ pub fn supported_data_types() -> Value {
     Value::Dictionary(types)
 }
 
-pub(super) const ASYNC_DATA_TYPES: &[&str] = &[
-    "BuildIdentityDict",
-    "BuildIdentityDictV2",
-    "ReceiptManifest",
-    "PersonalizedBootObjectV3",
-    "SourceBootObjectV4",
-    "SourceBootObjectV3",
-    "SourceBootObjectV5",
-    "SystemImageData",
-    "RecoveryOSASRImage",
-    "RootTicket",
-    "RecoveryOSRootTicketData",
-    "KernelCache",
-    "DeviceTree",
-    "SystemVolumeData",
-    "SystemVolumeCanonicalMetadata",
-    "SystemImageRootHash",
-    "SystemImageCanonicalMetadata",
-    "NORData",
-    "FDRTrustData",
-    "FUDData",
-    // copy_ibfw_ean skips early firmware (including J313 DCP) if absent.
-    "PersonalizedData",
-    "ImageData",
-    "EANData",
-    "FirmwareUpdaterPreflight",
-    "DeviceRestoreInfoPreflight",
-    "FirmwareUpdaterData",
-    "FirmwareUpdaterDataV2",
-    "BootabilityBundle",
-    "BootabilityBundleV2",
-    "URLAsset",
-    "StreamedImageDecryptionKey",
-    "RecoveryOSLocalPolicy",
-    "RecoveryOSFileAssetImage",
-    "RecoveryOSIBootFWFilesImages",
-    "RecoveryOSImage",
-    "RecoveryOSVersionData",
-];
-
-pub(super) fn async_data_types() -> Dictionary {
-    ASYNC_DATA_TYPES
-        .iter()
-        .map(|&name| (name, Value::Boolean(true)))
-        .collect()
-}
-
 pub fn options(id: &Identity) -> Result<Value> {
     let update = id.behavior()? == Behavior::Update;
     // The booleans mark optionality, not an on/off switch. Legacy required
@@ -144,7 +98,7 @@ pub fn options(id: &Identity) -> Result<Value> {
         ),
         (
             "SupportedAsyncDataTypes",
-            Value::Dictionary(async_data_types()),
+            Value::Dictionary(DataType::async_types()),
         ),
         (
             "SupportedHostProtocols",
