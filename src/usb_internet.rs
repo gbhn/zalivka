@@ -1,8 +1,8 @@
 //! Temporary internet access over the Mac's CDC-NCM USB interface.
 mod dns;
 mod link;
+use crate::usb::ncm_interface;
 use link::Link;
-pub(crate) use link::pair;
 mod ncm;
 mod router;
 use anyhow::{Context, Result, ensure};
@@ -142,7 +142,7 @@ pub fn status() -> Result<Vec<Status>> {
     let mut result = vec![];
     for info in nusb::list_devices().wait()?.filter(mac) {
         let device = info.open().wait()?;
-        let selected = pair(device.active_configuration()?)?;
+        let selected = ncm_interface(device.active_configuration()?)?;
         let access = link::claim_pair(&device, selected).map(drop);
         result.push(Status {
             serial: info
@@ -189,7 +189,7 @@ pub fn share(
     #[cfg(windows)]
     {
         let device = info.open().wait()?;
-        let selected = pair(device.active_configuration()?)?;
+        let selected = ncm_interface(device.active_configuration()?)?;
         let accessible = link::claim_pair(&device, selected).is_ok();
         if !accessible {
             crate::progress::Event::InternetPreparing.emit();

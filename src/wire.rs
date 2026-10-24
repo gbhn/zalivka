@@ -77,8 +77,12 @@ pub(crate) fn send_binary_le(w: &mut impl Write, v: &Value) -> Result<()> {
 
 /// Append a complete frame directly to an existing batch. Offsets inside a
 /// binary plist stay relative to its own writer, not the enclosing batch.
-pub(crate) fn append_binary(bytes: &mut Vec<u8>, v: &Value) -> Result<()> {
-    append_frame(bytes, |out| v.to_writer_binary(out), u32::to_be_bytes)
+pub(crate) fn append_binary(bytes: &mut Vec<u8>, v: &impl serde::Serialize) -> Result<()> {
+    append_frame(
+        bytes,
+        |out| plist::to_writer_binary(out, v),
+        u32::to_be_bytes,
+    )
 }
 
 fn append_frame(

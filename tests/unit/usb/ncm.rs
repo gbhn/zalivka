@@ -22,7 +22,7 @@ fn ncm_selection_keeps_the_union_pair_alternate_and_output_packet_size() {
     for control in [0, 4] {
         let bytes = configuration(control);
         let config = ConfigurationDescriptor::new(&bytes).unwrap();
-        let selected = pair(config).unwrap();
+        let selected = ncm_interface(config).unwrap();
         assert_eq!(
             selected,
             NcmInterface {
@@ -43,14 +43,14 @@ fn ncm_selection_skips_non_bulk_pairs_and_rejects_broken_unions_or_directions() 
     let output = bytes.windows(3).position(|b| b == [7, 5, 0x02]).unwrap();
     bytes[output + 3] = 3; // The first pair has an interrupt endpoint.
     assert_eq!(
-        pair(ConfigurationDescriptor::new(&bytes).unwrap())
+        ncm_interface(ConfigurationDescriptor::new(&bytes).unwrap())
             .unwrap()
             .control,
         2
     );
     let output = bytes.windows(3).position(|b| b == [7, 5, 0x04]).unwrap();
     bytes[output + 3] = 3;
-    assert!(pair(ConfigurationDescriptor::new(&bytes).unwrap()).is_err());
+    assert!(ncm_interface(ConfigurationDescriptor::new(&bytes).unwrap()).is_err());
 
     let mut bytes = configuration(0);
     for offset in 0..bytes.len() - 4 {
@@ -58,15 +58,34 @@ fn ncm_selection_skips_non_bulk_pairs_and_rejects_broken_unions_or_directions() 
             bytes[offset + 4] = 99; // No such data interface.
         }
     }
-    assert!(pair(ConfigurationDescriptor::new(&bytes).unwrap()).is_err());
+    assert!(ncm_interface(ConfigurationDescriptor::new(&bytes).unwrap()).is_err());
 
     let mut bytes = configuration(0);
     let output = bytes.windows(3).position(|b| b == [7, 5, 0x02]).unwrap();
     bytes[output + 2] = 0x82; // Two IN pipes cannot supply an OUT pipe.
     assert!(
-        pair(ConfigurationDescriptor::new(&bytes).unwrap())
+        ncm_interface(ConfigurationDescriptor::new(&bytes).unwrap())
             .unwrap_err()
             .to_string()
             .contains("OUT endpoint missing")
     );
+}
+
+#[test]
+fn ncm_selection_checks_later_alternates_of_the_same_data_interface() {
+    let mut bytes = configuration(0);
+    let alternate = bytes
+        .windows(6)
+        .position(|b| b == [9, 4, 1, 3, 2, 0x0a])
+        .unwrap();
+    let mut later = bytes[alternate..alternate + 23].to_vec();
+    later[3] = 4;
+    bytes[alternate + 12] = 3; // Alt 3 uses interrupt IN; alt 4 remains bulk.
+    bytes.splice(alternate + 23..alternate + 23, later);
+    let size = bytes.len() as u16;
+    bytes[2..4].copy_from_slice(&size.to_le_bytes());
+    let selected = ncm_interface(ConfigurationDescriptor::new(&bytes).unwrap()).unwrap();
+    assert_eq!(selected.control, 0);
+    assert_eq!(selected.data, 1);
+    assert_eq!(selected.alternate, 4);
 }

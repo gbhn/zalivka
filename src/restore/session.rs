@@ -40,7 +40,7 @@ pub fn validate_final_status(message: &Value) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn acknowledge_final_status(main: &mut MuxStream) -> Result<()> {
+pub(super) fn acknowledge_final_status(main: &mut impl Write) -> Result<()> {
     // Socket EOF negotiation is not available on our direct USB-mux transport:
     // it uses RST for teardown, not TCP FIN. Do not promise a socket half-close.
     wire::send(
@@ -48,6 +48,18 @@ pub(super) fn acknowledge_final_status(main: &mut MuxStream) -> Result<()> {
         &wire::dict([("MsgType", "ReceivedFinalStatusMsg".into())]),
     )
     .context("acknowledging final restore status")
+}
+
+pub(super) fn finish_final_status(
+    main: &mut impl Write,
+    message: &Value,
+    finish_requests: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let status = validate_final_status(message).and_then(|()| finish_requests());
+    // Try the ACK even if a request worker failed. Preserve the device or worker
+    // failure when acknowledging also fails or the session is already cancelled.
+    let acknowledged = acknowledge_final_status(main);
+    status.and(acknowledged)
 }
 
 pub(super) fn wait_for_restore_close(
@@ -204,15 +216,7 @@ pub(super) fn run(
                     "StatusMsg" => {
                         final_received = true;
                         fdr.stop();
-                        let status = validate_final_status(&message);
-                        if status.is_ok() {
-                            requests.finish()?;
-                        }
-                        let acknowledged = acknowledge_final_status(&mut main);
-                        // A failed final status must also be acknowledged. Keep
-                        // the device's failure if the acknowledgement disconnects.
-                        status?;
-                        acknowledged?;
+                        finish_final_status(&mut main, &message, || requests.finish())?;
                         eprintln!("Restore service reported success for ECID {ecid:016x}");
                         eprintln!("Waiting for the device to close the restore channel after ACK");
                         wait_for_restore_close(&mut main, &session, Duration::from_secs(60))?;

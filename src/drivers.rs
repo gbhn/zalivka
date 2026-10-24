@@ -109,15 +109,16 @@ pub fn doctor() -> Result<Vec<UsbDiagnostic>> {
         if info.vendor_id() != APPLE_VENDOR {
             continue;
         }
+        let mode = Mode::from_pid(info.product_id());
         let mux: Vec<u8> = info
             .interfaces()
             .filter(|i| (i.class(), i.subclass(), i.protocol()) == crate::usb::MUX_INTERFACE)
             .map(|i| i.interface_number())
             .collect();
-        if Mode::from_pid(info.product_id()).is_none() && mux.is_empty() {
+        if mode.is_none() && mux.is_empty() {
             continue;
         }
-        let interfaces = if mux.is_empty() { vec![0] } else { mux };
+        let mut interfaces = if mux.is_empty() { vec![0] } else { mux };
         let mut dfu_state = None;
         #[cfg(windows)]
         let mut reset_error = None;
@@ -126,36 +127,42 @@ pub fn doctor() -> Result<Vec<UsbDiagnostic>> {
                 .open()
                 .wait()
                 .context("opening USB device and reading descriptors")?;
-            let mut transport = String::new();
-            for &number in &interfaces {
-                let interface = crate::usb::UsbInterface::claim(&device, &info, number)?;
-                transport = interface.transport().into();
-                if Mode::from_pid(info.product_id()) == Some(Mode::Dfu) {
-                    let state = interface
-                        .control_in(
-                            nusb::transfer::ControlIn {
-                                control_type: nusb::transfer::ControlType::Class,
-                                recipient: nusb::transfer::Recipient::Interface,
-                                request: 5,
-                                value: 0,
-                                index: u16::from(number),
-                                length: 1,
-                            },
-                            std::time::Duration::from_secs(10),
-                        )
-                        .context("reading DFU state")?;
-                    ensure!(state.len() == 1, "invalid DFU GETSTATE reply");
-                    dfu_state = Some(state[0]);
-                    #[cfg(windows)]
-                    {
-                        reset_error = interface
-                            .check_reset_access(&info)
-                            .err()
-                            .map(|e| format!("{e:#}"));
-                    }
+            // Use the same descriptors as the actual transport, including a
+            // recovery interface whose number is not zero.
+            let number = match mode {
+                Some(Mode::Dfu) => 0,
+                Some(Mode::Recovery) => {
+                    crate::usb::recovery_interface(device.active_configuration()?)?.0
+                }
+                None => crate::usb::mux_interface(&device)?.number,
+            };
+            interfaces = vec![number];
+            let interface = crate::usb::UsbInterface::claim(&device, &info, number)?;
+            if mode == Some(Mode::Dfu) {
+                let state = interface
+                    .control_in(
+                        nusb::transfer::ControlIn {
+                            control_type: nusb::transfer::ControlType::Class,
+                            recipient: nusb::transfer::Recipient::Interface,
+                            request: 5,
+                            value: 0,
+                            index: u16::from(number),
+                            length: 1,
+                        },
+                        std::time::Duration::from_secs(10),
+                    )
+                    .context("reading DFU state")?;
+                ensure!(state.len() == 1, "invalid DFU GETSTATE reply");
+                dfu_state = Some(state[0]);
+                #[cfg(windows)]
+                {
+                    reset_error = interface
+                        .check_reset_access(&info)
+                        .err()
+                        .map(|e| format!("{e:#}"));
                 }
             }
-            Ok(transport)
+            Ok(interface.transport().into())
         })();
         diagnostics.push(UsbDiagnostic {
             product_id: format!("{:04x}", info.product_id()),

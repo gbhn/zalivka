@@ -1,73 +1,12 @@
-//! Mac NCM descriptors, USB requests and endpoint lifetime.
+//! Mac NCM USB requests, receive queues and endpoint lifetime.
 use super::ncm;
+use crate::usb::{NcmInterface, ncm_interface};
 use anyhow::{Context, Result, ensure};
 use nusb::{
     MaybeFuture,
     transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Out, Recipient},
 };
 use std::time::Duration;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NcmInterface {
-    pub control: u8,
-    pub data: u8,
-    pub alternate: u8,
-    pub input: u8,
-    pub output: u8,
-    pub packet_size: usize,
-}
-
-pub(crate) fn pair(config: nusb::descriptors::ConfigurationDescriptor<'_>) -> Result<NcmInterface> {
-    for control in config
-        .interface_alt_settings()
-        .filter(|i| i.class() == 2 && i.subclass() == 0x0d && i.alternate_setting() == 0)
-    {
-        let raw = control.as_bytes();
-        let mut offset = 0;
-        let mut data_number = None;
-        while offset + 3 <= raw.len() {
-            let len = raw[offset] as usize;
-            ensure!(
-                len >= 2 && offset + len <= raw.len(),
-                "invalid USB descriptor length"
-            );
-            if len >= 5
-                && raw[offset + 1] == 0x24
-                && raw[offset + 2] == 6
-                && raw[offset + 3] == control.interface_number()
-            {
-                data_number = Some(raw[offset + 4]);
-            }
-            offset += len;
-        }
-        let Some(number) = data_number else { continue };
-        if let Some(data) = config.interface_alt_settings().find(|i| {
-            i.interface_number() == number && i.class() == 0x0a && i.endpoints().count() == 2
-        }) && data
-            .endpoints()
-            .all(|e| e.transfer_type() == nusb::descriptors::TransferType::Bulk)
-        {
-            let input = data
-                .endpoints()
-                .find(|e| e.address() & 0x80 != 0)
-                .context("NCM IN endpoint missing")?
-                .address();
-            let output = data
-                .endpoints()
-                .find(|e| e.address() & 0x80 == 0)
-                .context("NCM OUT endpoint missing")?;
-            return Ok(NcmInterface {
-                control: control.interface_number(),
-                data: number,
-                alternate: data.alternate_setting(),
-                input,
-                output: output.address(),
-                packet_size: output.max_packet_size(),
-            });
-        }
-    }
-    anyhow::bail!("Mac does not expose a usable CDC-NCM interface")
-}
 
 pub(super) fn claim_pair(
     device: &nusb::Device,
@@ -100,7 +39,7 @@ const RECEIVE_DEPTH: usize = 8;
 impl Link {
     pub(super) fn open(info: &nusb::DeviceInfo) -> Result<Self> {
         let device = info.open().wait()?;
-        let selected = pair(device.active_configuration()?)?;
+        let selected = ncm_interface(device.active_configuration()?)?;
         let (control, data) = claim_pair(&device, selected)?;
         let bytes = control
             .control_in(
@@ -215,7 +154,3 @@ impl Drop for Link {
             .wait();
     }
 }
-
-#[cfg(test)]
-#[path = "../../tests/unit/usb_internet/link.rs"]
-mod tests;

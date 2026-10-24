@@ -1,10 +1,9 @@
 use super::boot::{IBootStep, iboot_stage, reconnect_after_ibss};
 use super::connection::confirm_restore_service;
-use super::file_data::{
-    FILE_DATA_BATCH, FileDataWriter, ImagePrefix, key_exchange, send_file_data,
-};
+use super::file_data::{FILE_DATA_BATCH, FileDataWriter, send_file_data};
+use super::keys::{ImagePrefix, key_exchange};
 use super::session::{
-    acknowledge_final_status, attestation_reply, log_checkpoint, log_progress,
+    acknowledge_final_status, attestation_reply, finish_final_status, log_checkpoint, log_progress,
     wait_for_restore_close,
 };
 use super::*;
@@ -856,6 +855,72 @@ fn recorded_final_status_does_not_advertise_socket_eof_on_raw_usb_mux() {
         let p = mux::decode_packet(b, 2).unwrap();
         p.protocol != 6 || p.payload[13] & 1 == 0
     }));
+}
+
+#[test]
+fn final_status_attempts_ack_after_worker_failure_and_preserves_the_original_error() {
+    let status = wire::dict([("MsgType", "StatusMsg".into()), ("Status", 0i64.into())]);
+    let mut output = Vec::new();
+    let error = finish_final_status(&mut output, &status, || {
+        Err(anyhow::anyhow!("asynchronous image transfer failed"))
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "asynchronous image transfer failed");
+    assert_eq!(
+        wire::receive(&mut Cursor::new(output)).unwrap(),
+        wire::dict([("MsgType", "ReceivedFinalStatusMsg".into())])
+    );
+
+    for code in [0i64, 6] {
+        let status = wire::dict([("MsgType", "StatusMsg".into()), ("Status", code.into())]);
+        let mut attempted = false;
+        struct BrokenAck<'a>(&'a mut bool);
+        impl Write for BrokenAck<'_> {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                *self.0 = true;
+                Err(std::io::Error::other("acknowledgement failed"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = finish_final_status(&mut BrokenAck(&mut attempted), &status, || {
+            assert_eq!(code, 0, "failed final status must not wait for workers");
+            Err(anyhow::anyhow!("asynchronous image transfer failed"))
+        })
+        .unwrap_err();
+        assert!(attempted);
+        assert!(error.to_string().contains(if code == 0 {
+            "asynchronous image transfer failed"
+        } else {
+            "restored failed"
+        }));
+    }
+}
+
+#[test]
+fn successful_final_status_requires_workers_and_acknowledgement() {
+    let status = wire::dict([("MsgType", "StatusMsg".into()), ("Status", 0i64.into())]);
+    let mut finished = false;
+    let mut output = Vec::new();
+    finish_final_status(&mut output, &status, || {
+        finished = true;
+        Ok(())
+    })
+    .unwrap();
+    assert!(finished);
+    assert_eq!(
+        wire::receive(&mut Cursor::new(output)).unwrap(),
+        wire::dict([("MsgType", "ReceivedFinalStatusMsg".into())])
+    );
+    assert!(
+        finish_final_status(
+            &mut std::io::Cursor::new(&mut [0u8; 0][..]),
+            &status,
+            || Ok(())
+        )
+        .is_err()
+    );
 }
 
 #[test]

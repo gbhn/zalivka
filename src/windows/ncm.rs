@@ -206,7 +206,7 @@ pub(crate) fn status() -> Result<Vec<UsbNetworkInterfaceStatus>> {
 }
 fn children(info: &nusb::DeviceInfo) -> Result<Vec<(u8, String)>> {
     let device = info.open().wait()?;
-    let selected = crate::usb_internet::pair(device.active_configuration()?)?;
+    let selected = crate::usb::ncm_interface(device.active_configuration()?)?;
     let parent = wide(info.instance_id());
     let mut node = 0;
     ensure!(

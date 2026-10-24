@@ -72,3 +72,44 @@ fn multiplex_selection_skips_other_protocols_and_retains_a_fallback() {
     );
     assert!(select_mux_interface(std::iter::empty(), None).is_none());
 }
+
+#[test]
+fn multiplex_skips_non_bulk_and_zero_packet_size_endpoints() {
+    let valid = configuration(5, 2);
+    for (offset, value) in [(21, 3), (28, 3), (22, 0), (29, 0)] {
+        let mut invalid = configuration(1, 2);
+        invalid[offset] = value;
+        let descriptors = [&invalid, &valid];
+        let selected = select_mux_interface(
+            descriptors
+                .iter()
+                .map(|b| ConfigurationDescriptor::new(b).unwrap()),
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(selected.configuration, 5);
+        assert!(
+            select_mux_interface(
+                [ConfigurationDescriptor::new(&invalid).unwrap()].into_iter(),
+                Some(1),
+            )
+            .is_none()
+        );
+    }
+}
+
+#[test]
+fn recovery_selects_its_actual_interface_and_alternate_without_a_zero_fallback() {
+    let mut bytes = configuration(1, 1);
+    bytes[11] = 3;
+    bytes[12] = 2;
+    assert_eq!(
+        recovery_interface(ConfigurationDescriptor::new(&bytes).unwrap()).unwrap(),
+        (3, 2)
+    );
+    for (offset, value) in [(27, 0x02), (28, 3), (29, 0)] {
+        let mut invalid = bytes.clone();
+        invalid[offset] = value;
+        assert!(recovery_interface(ConfigurationDescriptor::new(&invalid).unwrap()).is_err());
+    }
+}

@@ -1,12 +1,10 @@
-//! Bounded plist batches, AEA key exchange and transfer accounting.
-use super::RESTORED_PORT;
+//! Bounded FileData batches, payload accounting and failure handling.
+use super::keys::{ImagePrefix, key_exchange};
 use crate::{
-    asr,
     mux::{MuxStream, Session},
     net, wire,
 };
-use anyhow::{Context, Result, ensure};
-use plist::Value;
+use anyhow::{Result, ensure};
 use std::{
     io::Write,
     time::{Duration, Instant},
@@ -15,73 +13,14 @@ use std::{
 pub(super) const FILE_DATA_BATCH: usize = 256 * 1024;
 const FILE_DATA_CHUNK: usize = 8192;
 
-pub(super) enum ImagePrefix {
-    Collecting(Vec<u8>),
-    Plain,
-    Aea,
-    Public {
-        fcs: Box<crate::aea::PublicFcs>,
-        key: Option<[u8; 32]>,
-    },
+#[derive(serde::Serialize)]
+struct FileData<'a> {
+    #[serde(rename = "FileData", serialize_with = "serialize_bytes")]
+    bytes: &'a [u8],
 }
 
-impl ImagePrefix {
-    /// Return true once the prefix is classified and its buffer can be released.
-    fn observe(&mut self, data: &[u8]) -> Result<bool> {
-        let Self::Collecting(prefix) = self else {
-            return Ok(false);
-        };
-        let remaining = crate::aea::MAX_PREFIX - prefix.len();
-        prefix.extend_from_slice(&data[..data.len().min(remaining)]);
-        if prefix.len() < 4 {
-            return Ok(false);
-        }
-        *self = if !prefix.starts_with(b"AEA1") {
-            Self::Plain
-        } else {
-            match crate::aea::PublicFcs::from_prefix(prefix)? {
-                crate::aea::Prefix::Incomplete => return Ok(false),
-                crate::aea::Prefix::Unsupported => Self::Aea,
-                crate::aea::Prefix::Public(fcs) => Self::Public { fcs, key: None },
-            }
-        };
-        Ok(true)
-    }
-
-    fn is_aea(&self) -> bool {
-        match self {
-            Self::Collecting(prefix) => prefix.starts_with(b"AEA1"),
-            Self::Plain => false,
-            Self::Aea | Self::Public { .. } => true,
-        }
-    }
-
-    fn response(&mut self, request: &Value, assets: &net::AssetClient) -> Result<Value> {
-        if let Self::Public { fcs, key } = self
-            && net::wrapped_key_request(request)?
-        {
-            let archive_key = if let Some(key) = *key {
-                key
-            } else {
-                match fcs.fetch_key() {
-                    Ok(found) => {
-                        *key = Some(found);
-                        found
-                    }
-                    Err(error) => {
-                        return assets.response(request).with_context(|| {
-                            format!("public FCS failed ({error:#}); WKMS fallback failed")
-                        });
-                    }
-                }
-            };
-            return Ok(wire::dict([
-                ("KeyData", Value::Data(archive_key.to_vec())),
-                ("KeySource", "LocalUnwrapped".into()),
-            ]));
-        }
-        assets.response(request)
-    }
+fn serialize_bytes<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_bytes(bytes)
 }
 
 pub(super) struct FileDataWriter<'a> {
@@ -90,7 +29,6 @@ pub(super) struct FileDataWriter<'a> {
     pub(super) stream: &'a mut MuxStream,
     pub(super) session: &'a Session,
     pub(super) assets: &'a net::AssetClient,
-    pub(super) file_data: Value,
     pub(super) pending: Vec<u8>,
     pub(super) pending_payload: u64,
     pub(super) prefix: ImagePrefix,
@@ -111,7 +49,6 @@ impl<'a> FileDataWriter<'a> {
             stream,
             session,
             assets,
-            file_data: wire::dict([("FileData", Value::Data(Vec::with_capacity(FILE_DATA_CHUNK)))]),
             pending: Vec::with_capacity(FILE_DATA_BATCH + FILE_DATA_CHUNK),
             pending_payload: 0,
             prefix: ImagePrefix::Collecting(Vec::new()),
@@ -124,15 +61,9 @@ impl<'a> FileDataWriter<'a> {
         let first = self.profile.bytes == 0;
         let n = data.len().min(FILE_DATA_CHUNK);
         let header_ready = self.prefix.observe(&data[..n])?;
-        // Reuse the dictionary and payload allocation, and serialize straight
-        // into the batch instead of allocating and copying another whole frame.
-        let Value::Data(payload) = &mut self.file_data.as_dictionary_mut().unwrap()["FileData"]
-        else {
-            unreachable!("FileData buffer is always plist data")
-        };
-        payload.clear();
-        payload.extend_from_slice(&data[..n]);
-        let encoded = wire::append_binary(&mut self.pending, &self.file_data);
+        // Serialize the borrowed payload straight into the batch. No mutable
+        // plist shape or intermediate payload allocation needs to be maintained.
+        let encoded = wire::append_binary(&mut self.pending, &FileData { bytes: &data[..n] });
         self.profile.prepare += started.elapsed();
         encoded?;
         self.pending_payload += n as u64;
@@ -209,47 +140,6 @@ impl<'a> FileDataWriter<'a> {
     }
 }
 
-pub(super) fn key_exchange(
-    stream: &mut MuxStream,
-    session: &Session,
-    key_requests: &mut usize,
-    mut reply: impl FnMut(&Value) -> Result<Value>,
-) -> Result<()> {
-    while let Some(request) = wire::try_receive(stream)? {
-        *key_requests += 1;
-        ensure!(*key_requests <= 64, "too many AEA key requests");
-        let kind = wire::string(&request, &["MsgType"])
-            .or_else(|_| wire::string(&request, &["DataType"]))?;
-        let data_type = if matches!(kind, "DataRequestMsg" | "AsyncDataRequestMsg") {
-            wire::string(&request, &["DataType"])?
-        } else {
-            kind
-        };
-        ensure!(
-            matches!(data_type, "URLAsset" | "StreamedImageDecryptionKey"),
-            "unexpected AEA data type {data_type} in {kind}"
-        );
-        let port = asr::data_port(&request, 0).context("invalid AEA DataPort")?;
-        if kind == "AsyncDataRequestMsg" {
-            ensure!(
-                port != 0 && port != RESTORED_PORT,
-                "asynchronous AEA {data_type} requires a separate DataPort"
-            );
-        }
-        eprintln!("AEA requests {data_type} via {kind}, DataPort={port}");
-        let response = reply(&request)?;
-        if port != 0 {
-            let mut service = session.connect_retry(port, Duration::from_secs(60))?;
-            wire::send_binary(&mut service, &response)?;
-        } else {
-            wire::send_binary(stream, &response)?;
-        }
-        if !stream.has_pending_input()? {
-            break;
-        }
-    }
-    Ok(())
-}
 impl Write for FileDataWriter<'_> {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         if self.failed {
@@ -284,3 +174,7 @@ pub(super) fn send_file_data(
     writer.write_all(input)?;
     writer.finish()
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/restore/file_data.rs"]
+mod tests;

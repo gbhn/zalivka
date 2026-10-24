@@ -5,6 +5,7 @@ mod data;
 mod data_type;
 mod file_data;
 mod images;
+mod keys;
 mod options;
 mod recovery;
 mod requests;

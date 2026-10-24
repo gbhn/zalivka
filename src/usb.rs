@@ -1,8 +1,10 @@
 mod backend;
+mod descriptors;
 use crate::device::{DeviceInfo, Mode};
 use anyhow::{Context, Result, bail};
 use backend::{BulkInput, BulkOutput};
 pub(crate) use backend::{UsbInterface, cancel_and_drain};
+pub(crate) use descriptors::{NcmInterface, mux_interface, ncm_interface, recovery_interface};
 use nusb::{
     Device, MaybeFuture,
     transfer::{ControlIn, ControlOut, ControlType, Recipient},
@@ -99,17 +101,11 @@ impl RecoveryUsb {
             if info.ecid != ecid {
                 continue;
             }
-            let mut selected = (0, 0);
-            if mode == Mode::Recovery {
-                for descriptor in device.active_configuration()?.interface_alt_settings() {
-                    if descriptor.endpoints().any(|e| e.address() == 0x04) {
-                        selected = (
-                            descriptor.interface_number(),
-                            descriptor.alternate_setting(),
-                        );
-                    }
-                }
-            }
+            let selected = if mode == Mode::Recovery {
+                recovery_interface(device.active_configuration()?)?
+            } else {
+                (0, 0)
+            };
             let interface = UsbInterface::claim(&device, &usb, selected.0)
                 .context("claiming Apple USB interface; another process or driver may own it")?;
             interface.set_alt_setting(selected.1)?;
@@ -224,55 +220,6 @@ pub struct MuxUsb {
     packet_size: usize,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct MuxInterface {
-    configuration: u8,
-    number: u8,
-    alternate: u8,
-    output: u8,
-    input: u8,
-    packet_size: usize,
-}
-
-fn select_mux_interface<'a>(
-    configurations: impl Iterator<Item = nusb::descriptors::ConfigurationDescriptor<'a>>,
-    active: Option<u8>,
-) -> Option<MuxInterface> {
-    let mut fallback = None;
-    for configuration in configurations {
-        for descriptor in configuration.interface_alt_settings() {
-            if (
-                descriptor.class(),
-                descriptor.subclass(),
-                descriptor.protocol(),
-            ) != MUX_INTERFACE
-            {
-                continue;
-            }
-            let out = descriptor.endpoints().find(|e| e.address() & 0x80 == 0);
-            let input = descriptor.endpoints().find(|e| e.address() & 0x80 != 0);
-            if let (Some(out), Some(input)) = (out, input) {
-                let selected = MuxInterface {
-                    configuration: configuration.configuration_value(),
-                    number: descriptor.interface_number(),
-                    alternate: descriptor.alternate_setting(),
-                    output: out.address(),
-                    input: input.address(),
-                    packet_size: out.max_packet_size(),
-                };
-                // WinUSB cannot change configurations. Prefer the interface in
-                // the configuration already selected by the OS, even when a
-                // later configuration also contains a multiplex interface.
-                if Some(configuration.configuration_value()) == active {
-                    return Some(selected);
-                }
-                fallback.get_or_insert(selected);
-            }
-        }
-    }
-    fallback
-}
-
 impl MuxUsb {
     pub fn candidates() -> Result<Vec<nusb::DeviceInfo>> {
         Ok(nusb::list_devices()
@@ -287,8 +234,7 @@ impl MuxUsb {
             .active_configuration()
             .ok()
             .map(|c| c.configuration_value());
-        let selected = select_mux_interface(device.configurations(), active)
-            .context("no Apple USB multiplex interface")?;
+        let selected = mux_interface(&device)?;
         if active != Some(selected.configuration) {
             device.set_configuration(selected.configuration).wait().context("selecting USB multiplex configuration (Windows requires an active WinUSB configuration)")?;
         }
@@ -336,7 +282,3 @@ impl MuxUsb {
         self.input.input_ready()
     }
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/usb.rs"]
-mod tests;
