@@ -12,7 +12,7 @@ const CHUNK: usize = 131072;
 const BATCH_CHUNKS: usize = 4;
 
 fn info(stream: &mut impl Write, length: u64, checksum: bool) -> Result<()> {
-    let mut d = wire::dict([
+    let mut d = plist::Dictionary::from_iter([
         ("Version", 1u64.into()),
         ("Stream ID", 1u64.into()),
         ("FEC Slice Stride", 40u64.into()),
@@ -24,11 +24,9 @@ fn info(stream: &mut impl Write, length: u64, checksum: bool) -> Result<()> {
         ),
     ]);
     if checksum {
-        d.as_dictionary_mut()
-            .unwrap()
-            .insert("Checksum Chunk Size".into(), (CHUNK as u64).into());
+        d.insert("Checksum Chunk Size".into(), (CHUNK as u64).into());
     }
-    stream.write_all(&wire::xml(&d)?)?;
+    stream.write_all(&wire::xml(&Value::Dictionary(d))?)?;
     Ok(())
 }
 

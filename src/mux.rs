@@ -93,6 +93,21 @@ struct Channel {
     consumed: usize,
 }
 
+impl Channel {
+    fn tcp_header(&self, source: u16, flags: u8) -> [u8; 20] {
+        let mut tcp = [0; 20];
+        tcp[..2].copy_from_slice(&source.to_be_bytes());
+        tcp[2..4].copy_from_slice(&self.destination.to_be_bytes());
+        tcp[4..8].copy_from_slice(&self.seq.to_be_bytes());
+        tcp[8..12].copy_from_slice(&self.ack.to_be_bytes());
+        tcp[12] = 5 << 4;
+        tcp[13] = flags;
+        let window = ((RECEIVE_WINDOW - self.input.len()) >> 8) as u16;
+        tcp[14..16].copy_from_slice(&window.to_be_bytes());
+        tcp
+    }
+}
+
 struct Link {
     usb: Box<dyn PacketTransport>,
     version: u32,
@@ -300,32 +315,21 @@ impl Link {
         Ok(())
     }
     fn send_tcp(&mut self, source: u16, flags: u8, data: &[u8]) -> Result<()> {
-        let tcp = self.tcp_header(source, flags)?;
+        let tcp = self
+            .channels
+            .get(&source)
+            .context("closed mux connection")?
+            .tcp_header(source, flags);
         self.send(6, &tcp, data)
     }
 
-    fn tcp_header(&self, source: u16, flags: u8) -> Result<[u8; 20]> {
-        let c = self
-            .channels
-            .get(&source)
-            .context("closed mux connection")?;
-        let mut tcp = [0; 20];
-        tcp[..2].copy_from_slice(&source.to_be_bytes());
-        tcp[2..4].copy_from_slice(&c.destination.to_be_bytes());
-        tcp[4..8].copy_from_slice(&c.seq.to_be_bytes());
-        tcp[8..12].copy_from_slice(&c.ack.to_be_bytes());
-        tcp[12] = 5 << 4;
-        tcp[13] = flags;
-        let window = ((RECEIVE_WINDOW - c.input.len()) >> 8) as u16;
-        tcp[14..16].copy_from_slice(&window.to_be_bytes());
-        Ok(tcp)
-    }
-
     fn send_data(&mut self, source: u16, data: &[u8]) -> Result<()> {
-        let mut tcp = self.tcp_header(source, ACK)?;
         if data.len() <= MAX_PAYLOAD {
-            self.send(6, &tcp, data)?;
-            let c = self.channels.get_mut(&source).unwrap();
+            self.send_tcp(source, ACK, data)?;
+            let c = self
+                .channels
+                .get_mut(&source)
+                .context("closed mux connection")?;
             c.seq = c.seq.wrapping_add(data.len() as u32);
             return Ok(());
         }
@@ -333,12 +337,17 @@ impl Link {
             data.len() <= WRITE_BATCH,
             "USB mux burst exceeds batch limit"
         );
+        let channel = self
+            .channels
+            .get_mut(&source)
+            .context("closed mux connection")?;
+        let mut tcp = channel.tcp_header(source, ACK);
         let count = data.len().div_ceil(MAX_PAYLOAD);
         if self.output_batch.len() < count {
             self.output_batch
                 .resize_with(count, || Vec::with_capacity(MTU));
         }
-        let mut seq = self.channels[&source].seq;
+        let mut seq = channel.seq;
         for (index, (packet, payload)) in self.output_batch[..count]
             .iter_mut()
             .zip(data.chunks(MAX_PAYLOAD))
@@ -370,7 +379,7 @@ impl Link {
             return Err(error);
         }
         self.tx = self.tx.wrapping_add(count as u16);
-        self.channels.get_mut(&source).unwrap().seq = seq;
+        channel.seq = seq;
         Ok(())
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>> {

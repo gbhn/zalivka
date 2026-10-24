@@ -78,6 +78,26 @@ fn hex_ecid_is_consistent() {
         device::encode_hex(&device::decode_hex("aB01").unwrap()),
         "ab01"
     );
+    assert!(device::decode_hex("").unwrap().is_empty());
+    for value in ["+1", "0a+1", "-1", " 1", "1 ", "0x", "gg", "\0\0", "é"] {
+        assert!(device::decode_hex(value).is_err(), "accepted {value:?}");
+    }
+}
+
+#[test]
+fn invalid_nonces_leave_both_previous_values_intact() {
+    let mut device = device_info();
+    let previous = device.clone();
+    for value in ["NONC:zz SNON:1122", "NONC:1122 SNON:zz", "SNON:+1"] {
+        assert!(device.set_nonces(value).is_err());
+        assert_eq!(device, previous);
+    }
+    device.set_nonces("NONC:1122 SNON:aAbB").unwrap();
+    assert_eq!(device.ap_nonce, [0x11, 0x22]);
+    assert_eq!(device.sep_nonce, [0xaa, 0xbb]);
+    device.set_nonces("").unwrap();
+    assert!(device.ap_nonce.is_empty());
+    assert!(device.sep_nonce.is_empty());
 }
 
 #[test]

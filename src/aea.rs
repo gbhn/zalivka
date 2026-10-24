@@ -79,8 +79,7 @@ impl PublicFcs {
         let url = std::str::from_utf8(url)
             .context("invalid FCS URL")?
             .to_owned();
-        crate::net::validate_apple_url(&url)?;
-        let uri: ureq::http::Uri = url.parse()?;
+        let uri = crate::net::apple_url(&url)?;
         ensure!(
             uri.host() == Some("wkms-public.apple.com") && uri.query().is_none(),
             "FCS key must use Apple's public key service"
@@ -189,8 +188,7 @@ fn hpke_open(
     let secret = labeled_extract(suite, &shared, b"secret", &[]);
     let key: [u8; 32] = labeled_expand(suite, &secret, b"key", &context)?;
     let nonce: [u8; 12] = labeled_expand(suite, &secret, b"base_nonce", &context)?;
-    Aes256Gcm::new_from_slice(&key)
-        .unwrap()
+    Aes256Gcm::new((&key).into())
         .decrypt(
             (&nonce).into(),
             aes_gcm::aead::Payload {

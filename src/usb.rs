@@ -119,7 +119,7 @@ impl RecoveryUsb {
                 None
             };
             let nonces = device
-                .get_string_descriptor(std::num::NonZeroU8::new(1).unwrap(), 0x0409, TIMEOUT)
+                .get_string_descriptor(std::num::NonZeroU8::MIN, 0x0409, TIMEOUT)
                 .wait()?;
             info.set_nonces(&nonces)?;
             return Ok(Self {

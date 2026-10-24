@@ -351,7 +351,7 @@ impl App {
     }
     pub(super) fn active_job(&mut self, ui: &mut egui::Ui) {
         card(ui.ctx()).show(ui, |ui| {
-            let job = self.job.as_ref().unwrap();
+            let Some(job) = self.job.as_ref() else { return };
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(24.0).color(BLUE));
                 ui.label(RichText::new(job.action.title()).size(21.0).strong());
@@ -453,17 +453,16 @@ impl App {
         });
     }
     pub(super) fn confirmation(&mut self, ctx: &egui::Context) {
-        if self.confirmation.is_none() {
+        let Some(mut pending) = self.confirmation.take() else {
             return;
-        }
-        let target = self.target().cloned();
+        };
+        let target = self.target();
         let mut cancel = false;
         let mut launch = None;
         let response = egui::Modal::new(egui::Id::new("confirm"))
             .frame(card(ctx).inner_margin(26))
             .show(ctx, |ui| {
                 ui.set_width(400.0);
-                let pending = self.confirmation.as_mut().unwrap();
                 let erase = pending.action == Action::Restore;
                 ui.label(
                     RichText::new(if erase {
@@ -500,10 +499,7 @@ impl App {
                     &mut pending.accepted,
                     "Я понимаю экспериментальный статус инструмента",
                 );
-                if target
-                    .as_ref()
-                    .is_none_or(|d| d.ecid != pending.ecid || d.mode != Mode::Dfu)
-                {
+                if target.is_none_or(|d| d.ecid != pending.ecid || d.mode != Mode::Dfu) {
                     ui.label(
                         RichText::new("Выбранный Mac недоступен в DFU")
                             .color(ui.visuals().error_fg_color),
@@ -521,7 +517,7 @@ impl App {
                     };
                     if ui
                         .add_enabled(
-                            pending.ready(target.as_ref()),
+                            pending.ready(target),
                             egui::Button::new(RichText::new(label).color(Color32::WHITE))
                                 .fill(if erase { RED } else { BLUE }),
                         )
@@ -531,8 +527,8 @@ impl App {
                     }
                 });
             });
-        if cancel || response.should_close() || launch.is_some() {
-            self.confirmation = None;
+        if !cancel && !response.should_close() && launch.is_none() {
+            self.confirmation = Some(pending);
         }
         if let Some(action) = launch {
             self.start(action, ctx);

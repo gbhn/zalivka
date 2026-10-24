@@ -8,10 +8,22 @@ use std::sync::Arc;
 use ureq::http::{Request, Response};
 
 /// Host-scoped credentials supplied by the operator. Never sent to restored.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AssetClient {
+    // Agent clones share connections across synchronous and asynchronous requests.
+    agent: ureq::Agent,
     tokens: Arc<std::collections::HashMap<String, ureq::http::HeaderValue>>,
     apple_connect: Option<ureq::http::HeaderValue>,
+}
+
+impl Default for AssetClient {
+    fn default() -> Self {
+        Self {
+            agent: agent(),
+            tokens: Arc::default(),
+            apple_connect: None,
+        }
+    }
 }
 
 impl AssetClient {
@@ -50,6 +62,7 @@ impl AssetClient {
         Ok(Self {
             tokens: Arc::new(values),
             apple_connect,
+            ..Self::default()
         })
     }
 
@@ -81,7 +94,7 @@ impl AssetClient {
         let wrapped_key = wrapped_key_request(message)?;
         let mut request = asset_request(wire::get(message, &["Arguments"])?)?;
         self.authorize(&mut request, wrapped_key)?;
-        let reply = fetch(request, &agent())?;
+        let reply = fetch(request, &self.agent)?;
         if wrapped_key && matches!(reply.status().as_u16(), 401 | 403) {
             anyhow::bail!(
                 "Apple WKMS requires valid authorization; supply --authorization-tokens or --apple-connect-data from an authorized AppleConnect session (HTTP {})",
@@ -170,3 +183,7 @@ pub(super) fn asset_reply(mut response: Response<ureq::Body>, wrapped_key: bool)
         ("ResponseStatus", status.into()),
     ]))
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/net/client.rs"]
+mod tests;

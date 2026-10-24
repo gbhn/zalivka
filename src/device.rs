@@ -65,14 +65,13 @@ impl DeviceInfo {
     }
 
     pub fn set_nonces(&mut self, s: &str) -> Result<()> {
-        self.ap_nonce = field(s, "NONC")
-            .map(decode_hex)
-            .transpose()?
-            .unwrap_or_default();
-        self.sep_nonce = field(s, "SNON")
-            .map(decode_hex)
-            .transpose()?
-            .unwrap_or_default();
+        let nonce = |name| {
+            field(s, name)
+                .map(decode_hex)
+                .transpose()
+                .map(Option::unwrap_or_default)
+        };
+        (self.ap_nonce, self.sep_nonce) = (nonce("NONC")?, nonce("SNON")?);
         Ok(())
     }
 }
@@ -86,8 +85,8 @@ fn field<'a>(s: &'a str, key: &str) -> Option<&'a str> {
 
 pub fn decode_hex(s: &str) -> Result<Vec<u8>> {
     ensure!(
-        s.len().is_multiple_of(2) && s.is_ascii(),
-        "invalid hex length"
+        s.len().is_multiple_of(2) && s.bytes().all(|b| b.is_ascii_hexdigit()),
+        "expected an even number of hexadecimal digits"
     );
     s.as_bytes()
         .chunks_exact(2)
