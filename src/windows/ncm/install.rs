@@ -3,7 +3,11 @@ use super::{GUID_TEXT, Key, parameters_path, parse_guid, read_value, text};
 use crate::windows::{wide, windows_directory};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::{io, path::PathBuf, ptr};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    ptr,
+};
 use windows_sys::{
     Win32::{
         Devices::{
@@ -37,6 +41,22 @@ struct Backup {
     inf: Option<String>,
     section: Option<String>,
     guids: Option<(u32, Vec<u8>)>,
+}
+
+impl Backup {
+    fn save(&self, path: &Path) -> Result<()> {
+        let directory = path.parent().context("invalid NCM backup path")?;
+        let mut saved = tempfile::NamedTempFile::new_in(directory)?;
+        serde_json::to_writer_pretty(&mut saved, self)?;
+        saved.as_file().sync_all()?;
+        // Publish only a complete backup. A failed write must not leave a
+        // truncated JSON file that a later installation mistakes for a backup.
+        saved
+            .persist_noclobber(path)
+            .map_err(|error| error.error)
+            .context("saving original NCM driver settings")?;
+        Ok(())
+    }
 }
 fn parameters(instance: &str) -> Result<Key> {
     let path = parameters_path(instance);
@@ -159,13 +179,7 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
             backup.inf.is_none() || backup.section.is_some(),
             "the original driver section could not be read; no driver changes were made"
         );
-        let bytes = serde_json::to_vec_pretty(&backup)?;
-        use std::io::Write;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?
-            .write_all(&bytes)?;
+        backup.save(&path)?;
         backup
     };
     ensure!(
@@ -325,3 +339,7 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
         )
     })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/windows/ncm/install.rs"]
+mod tests;

@@ -3,15 +3,13 @@ use super::{wide, windows_directory};
 use crate::{device::Mode, drivers::HostStatus, usb::APPLE_VENDOR};
 use anyhow::{Context, Result, bail, ensure};
 use nusb::MaybeFuture;
-use sha2::{Digest, Sha256};
 use std::{
-    os::windows::{
-        io::{AsRawHandle, FromRawHandle, OwnedHandle},
-        process::CommandExt,
-    },
-    path::{Path, PathBuf},
-    process::Command,
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     time::{Duration, Instant},
+};
+use windows_service::{
+    service::{Service, ServiceAccess, ServiceState},
+    service_manager::{ServiceManager, ServiceManagerAccess},
 };
 use windows_sys::Win32::{
     Foundation::{
@@ -19,7 +17,6 @@ use windows_sys::Win32::{
         WAIT_OBJECT_0,
     },
     System::{
-        Services::*,
         SystemInformation::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64},
         Threading::{
             GetCurrentProcess, GetExitCodeProcess, INFINITE, IsWow64Process2, WaitForSingleObject,
@@ -35,10 +32,6 @@ use windows_sys::Win32::{
 };
 
 const SERVICE: &str = "Apple Mobile Device Service";
-const X64_CAB: &[u8] = include_bytes!("../../packaging/apple-usb/apple-usb-x64.cab");
-const ARM64_CAB: &[u8] = include_bytes!("../../packaging/apple-usb/apple-usb-arm64.cab");
-const X64_SHA256: &str = "8ae3b3001e3733f24ef0178f149c6534f94e57d16e8a0d75647ab979e03151ca";
-const ARM64_SHA256: &str = "2d7040ff12724ce300534888aa5727b415f6439896916f602d5605d0737192b4";
 
 fn architecture() -> Result<&'static str> {
     let mut process = 0;
@@ -55,50 +48,25 @@ fn architecture() -> Result<&'static str> {
     }
 }
 
-struct ServiceHandle(SC_HANDLE);
-impl Drop for ServiceHandle {
-    fn drop(&mut self) {
-        unsafe { CloseServiceHandle(self.0) };
-    }
-}
-
-fn open_service(access: u32) -> Result<Option<ServiceHandle>> {
-    let manager = ServiceHandle(unsafe {
-        OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT)
-    });
-    ensure!(
-        !manager.0.is_null(),
-        "Открытие диспетчера служб Windows: {}",
-        std::io::Error::last_os_error()
-    );
-    let service = unsafe { OpenServiceW(manager.0, wide(SERVICE).as_ptr(), access) };
-    if service.is_null() {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32) {
-            return Ok(None);
+fn open_service(access: ServiceAccess) -> Result<Option<Service>> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .context("Открытие диспетчера служб Windows")?;
+    match manager.open_service(SERVICE, access) {
+        Ok(service) => Ok(Some(service)),
+        Err(windows_service::Error::Winapi(error))
+            if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32) =>
+        {
+            Ok(None)
         }
-        return Err(error).context("Открытие Apple Mobile Device Service");
+        Err(error) => Err(error).context("Открытие Apple Mobile Device Service"),
     }
-    Ok(Some(ServiceHandle(service)))
 }
 
-fn service_state(service: &ServiceHandle) -> Result<u32> {
-    let mut status: SERVICE_STATUS_PROCESS = unsafe { std::mem::zeroed() };
-    let mut needed = 0;
-    ensure!(
-        unsafe {
-            QueryServiceStatusEx(
-                service.0,
-                SC_STATUS_PROCESS_INFO,
-                (&mut status as *mut SERVICE_STATUS_PROCESS).cast(),
-                std::mem::size_of_val(&status) as u32,
-                &mut needed,
-            )
-        } != 0,
-        "Проверка Apple Mobile Device Service: {}",
-        std::io::Error::last_os_error()
-    );
-    Ok(status.dwCurrentState)
+fn service_state(service: &Service) -> Result<ServiceState> {
+    Ok(service
+        .query_status()
+        .context("Проверка Apple Mobile Device Service")?
+        .current_state)
 }
 
 fn apple_driver_installed() -> Result<bool> {
@@ -128,12 +96,12 @@ fn apple_driver_installed() -> Result<bool> {
 }
 
 pub(crate) fn status() -> Result<HostStatus> {
-    let service = open_service(SERVICE_QUERY_STATUS)?;
+    let service = open_service(ServiceAccess::QUERY_STATUS)?;
     let active = service
         .as_ref()
         .map(service_state)
         .transpose()?
-        .is_some_and(|s| s != SERVICE_STOPPED);
+        .is_some_and(|s| s != ServiceState::Stopped);
     // A working WinUSB binding remains supported even without Apple's package.
     let compatible_usb_driver = nusb::list_devices().wait()?.any(|d| {
         d.vendor_id() == APPLE_VENDOR
@@ -154,70 +122,31 @@ pub(crate) fn status() -> Result<HostStatus> {
 }
 
 fn stop_service() -> Result<()> {
-    let Some(service) = open_service(SERVICE_QUERY_STATUS | SERVICE_STOP)? else {
+    let Some(service) = open_service(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)? else {
         return Ok(());
     };
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let state = service_state(&service)?;
-        if state == SERVICE_STOPPED {
+        if state == ServiceState::Stopped {
             return Ok(());
         }
         ensure!(
             Instant::now() < deadline,
             "Apple Mobile Device Service не остановилась за 30 секунд. Закройте iTunes / Apple Devices и повторите подготовку Windows."
         );
-        if state != SERVICE_STOP_PENDING {
-            let mut status: SERVICE_STATUS = unsafe { std::mem::zeroed() };
-            if unsafe { ControlService(service.0, SERVICE_CONTROL_STOP, &mut status) } == 0 {
-                let error = std::io::Error::last_os_error();
-                if !matches!(error.raw_os_error(), Some(code) if code == ERROR_SERVICE_NOT_ACTIVE as i32 || code == ERROR_SERVICE_CANNOT_ACCEPT_CTRL as i32)
-                {
-                    return Err(error).context("Остановка Apple Mobile Device Service");
-                }
+        if state != ServiceState::StopPending {
+            match service.stop() {
+                Ok(_) => {}
+                Err(windows_service::Error::Winapi(error))
+                    if matches!(error.raw_os_error(), Some(code)
+                        if code == ERROR_SERVICE_NOT_ACTIVE as i32
+                            || code == ERROR_SERVICE_CANNOT_ACCEPT_CTRL as i32) => {}
+                Err(error) => return Err(error).context("Остановка Apple Mobile Device Service"),
             }
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-}
-
-fn unpack_driver(directory: &Path, arch: &str) -> Result<PathBuf> {
-    let (cab, expected) = match arch {
-        "amd64" => (X64_CAB, X64_SHA256),
-        "arm64" => (ARM64_CAB, ARM64_SHA256),
-        _ => bail!("Неподдерживаемая архитектура драйвера: {arch}"),
-    };
-    ensure!(
-        Sha256::digest(cab).as_slice() == crate::device::decode_hex(expected)?,
-        "Повреждён встроенный пакет драйвера Apple"
-    );
-    let archive = directory.join("apple-usb.cab");
-    std::fs::write(&archive, cab)?;
-    let output = Command::new(windows_directory()?.join(r"System32\expand.exe"))
-        .arg("-F:*")
-        .arg(&archive)
-        .arg(directory)
-        .creation_flags(0x08000000)
-        .output()
-        .context("Распаковка встроенного драйвера Apple")?;
-    ensure!(
-        output.status.success(),
-        "Не удалось распаковать драйвер Apple: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    for name in [
-        "AppleUsb.inf",
-        "appleusb.cat",
-        "AppleUsbFilter.dll",
-        "AppleKmdfFilter.sys",
-        "AppleLowerFilter.sys",
-    ] {
-        ensure!(
-            directory.join(name).is_file(),
-            "В пакете драйвера отсутствует {name}"
-        );
-    }
-    Ok(directory.join("AppleUsb.inf"))
 }
 
 pub(crate) fn prepare_elevated() -> Result<bool> {
@@ -232,7 +161,7 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
         let directory = tempfile::Builder::new()
             .prefix("zalivka-apple-usb-")
             .tempdir()?;
-        let inf = unpack_driver(directory.path(), architecture()?)?;
+        let inf = super::package::unpack(directory.path(), architecture()?)?;
         // Windows verifies the original CAT. No forced ranking or signing bypass.
         reboot = crate::drivers::install(&inf)?;
     }
@@ -355,7 +284,3 @@ pub(crate) fn run_elevated(arguments: &str) -> Result<u32> {
     );
     Ok(code)
 }
-
-#[cfg(test)]
-#[path = "../../tests/unit/windows/setup.rs"]
-mod tests;

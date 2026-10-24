@@ -30,6 +30,7 @@ type Ioctl = unsafe extern "system" fn(
 
 pub(crate) mod apple;
 pub(crate) mod ncm;
+mod package;
 pub(crate) mod proxy;
 pub(crate) mod reset;
 pub(crate) mod setup;
