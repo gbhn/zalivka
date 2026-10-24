@@ -5,8 +5,10 @@ use connection::{confirm_restore_service, wait_restored};
 pub use requests::AsyncRequests;
 mod data;
 mod file_data;
+mod images;
+mod recovery;
 pub use boot::probe_boot_state;
-pub use data::cpio_header;
+pub use images::cpio_header;
 mod options;
 pub use options::{boot_arguments, options, supported_data_types};
 

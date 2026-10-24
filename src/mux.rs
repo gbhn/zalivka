@@ -289,6 +289,19 @@ pub fn is_device_removal(error: &anyhow::Error) -> bool {
 }
 
 impl Link {
+    /// A failed USB write may already be on the wire. Retire the whole session
+    /// before another channel can reuse an uncertain mux/TCP sequence.
+    fn finish_write(&mut self, sent: Result<()>, started: Instant, count: u16) -> Result<()> {
+        self.usb_write_time += started.elapsed();
+        if let Err(error) = sent {
+            self.disconnected |= is_device_removal(&error);
+            self.cancelled.store(true, Ordering::Release);
+            return Err(error);
+        }
+        self.tx = self.tx.wrapping_add(count);
+        Ok(())
+    }
+
     fn send(&mut self, proto: u32, header: &[u8], data: &[u8]) -> Result<()> {
         ensure!(
             !self.cancelled.load(Ordering::Acquire),
@@ -306,13 +319,7 @@ impl Link {
         self.output.extend_from_slice(data);
         let started = Instant::now();
         let sent = self.usb.write_packet(&self.output);
-        self.usb_write_time += started.elapsed();
-        if let Err(error) = sent {
-            self.disconnected |= is_device_removal(&error);
-            return Err(error);
-        }
-        self.tx = self.tx.wrapping_add(1);
-        Ok(())
+        self.finish_write(sent, started, 1)
     }
     fn send_tcp(&mut self, source: u16, flags: u8, data: &[u8]) -> Result<()> {
         let tcp = self
@@ -339,7 +346,7 @@ impl Link {
         );
         let channel = self
             .channels
-            .get_mut(&source)
+            .get(&source)
             .context("closed mux connection")?;
         let mut tcp = channel.tcp_header(source, ACK);
         let count = data.len().div_ceil(MAX_PAYLOAD);
@@ -370,16 +377,11 @@ impl Link {
         let sent = self
             .usb
             .write_packets(&self.output_batch[..count], &self.cancelled);
-        self.usb_write_time += started.elapsed();
-        if let Err(error) = sent {
-            self.disconnected |= is_device_removal(&error);
-            // A failed burst may already be partially on the wire. Its mux/TCP
-            // sequence cannot safely be reused by this or another channel.
-            self.cancelled.store(true, Ordering::Release);
-            return Err(error);
-        }
-        self.tx = self.tx.wrapping_add(count as u16);
-        channel.seq = seq;
+        self.finish_write(sent, started, count as u16)?;
+        self.channels
+            .get_mut(&source)
+            .context("closed mux connection")?
+            .seq = seq;
         Ok(())
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>> {

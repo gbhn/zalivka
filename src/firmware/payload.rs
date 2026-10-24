@@ -1,5 +1,5 @@
 //! Device-specific auxiliary-controller payload assembly.
-use super::{Ftab, containers::ftab_index, payload_ranges, retimer_info};
+use super::{Ftab, containers::ftab_index, payload_ranges, request::Request};
 use crate::{
     ipsw::{Identity, Ipsw},
     wire,
@@ -16,18 +16,16 @@ fn unique<T>(mut items: impl Iterator<Item = T>) -> Option<T> {
 pub(super) fn payload(
     ipsw: &mut Ipsw,
     id: &Identity,
-    updater: &str,
-    info: &Dictionary,
-    arguments: &Value,
-    tags: &[String],
+    updater: &Request<'_>,
 ) -> Result<Option<Value>> {
-    if updater == "PS190" {
+    let info = updater.info;
+    if updater.name == "PS190" {
         let name = if info.contains_key("InfoArray") {
-            let tag = wire::number(wire::get(retimer_info(info, tags)?, &["TagNumber"])?)?;
+            let tag = wire::number(wire::get(updater.retimer_info()?, &["TagNumber"])?)?;
             ensure!(tag <= u32::MAX as u64, "invalid PS190 tag number");
             format!("PCON{tag},Firmware")
         } else {
-            let generated = wire::dictionary(wire::get(arguments, &["DeviceGeneratedRequest"])?)?;
+            let generated = updater.generated()?;
             unique(generated.keys().filter(|name| {
                 name.starts_with("PCON") && name.ends_with(",Firmware") && id.has(name)
             }))
@@ -53,7 +51,7 @@ pub(super) fn payload(
             ("SecurityDomain", domain.into()),
         ])));
     }
-    let data = match updater {
+    let data = match updater.name {
         "Ace3" if info.contains_key("ManifestPrefix") => {
             let prefix = info["ManifestPrefix"]
                 .as_string()
@@ -80,7 +78,7 @@ pub(super) fn payload(
         "AppleTCON" => ipsw.component(id, "Baobab,TCON")?,
         "Rose" => rtkit_payload(ipsw, id, "Rap,RTKitOS", "Rap,RestoreRTKitOS")?,
         "AppleTypeCRetimer" => {
-            let tag = wire::number(wire::get(retimer_info(info, tags)?, &["TagNumber"])?)?;
+            let tag = wire::number(wire::get(updater.retimer_info()?, &["TagNumber"])?)?;
             ensure!(tag <= 255, "invalid retimer tag");
             rtkit_payload(
                 ipsw,
@@ -105,7 +103,7 @@ pub(super) fn payload(
         }
         "Centauri" => centauri_payload(ipsw.component(id, "Wireless1,RTKitOS")?, info)?,
         _ => {
-            let generated = wire::dictionary(wire::get(arguments, &["DeviceGeneratedRequest"])?)?;
+            let generated = updater.generated()?;
             let Some(name) = unique(generated.keys().filter(|name| id.has(name))) else {
                 // The signing service may itself supply FirmwareData. Never
                 // guess a multi-component payload if it does not.

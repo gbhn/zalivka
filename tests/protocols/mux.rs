@@ -479,3 +479,56 @@ fn pending_mux_connection_allows_other_writes_and_session_cancellation() {
         packet.protocol == 6 && packet.payload.get(20..) == Some(b"request".as_slice())
     }));
 }
+
+#[test]
+fn mux_single_packet_failure_prevents_reuse_by_any_channel() {
+    struct FaultUsb(MockMux);
+    impl PacketTransport for FaultUsb {
+        fn read_packet(&mut self) -> Result<Vec<u8>> {
+            self.0.read_packet()
+        }
+        fn write_packet(&mut self, bytes: &[u8]) -> Result<()> {
+            // Record the bytes before reporting failure, as a USB completion can
+            // fail after the device has already received part or all of a frame.
+            self.0.write_packet(bytes)?;
+            if let Ok(packet) = mux::decode_packet(bytes, 2)
+                && packet.protocol == 6
+                && packet.payload.len() > 20
+            {
+                anyhow::bail!("injected uncertain USB completion");
+            }
+            Ok(())
+        }
+    }
+    for write_all in [false, true] {
+        let (usb, output) = mock_mux(vec![
+            version_packet(),
+            tcp(12345, 1, 0, 1, 0x12, &[]),
+            tcp(54321, 2, 0, 1, 0x12, &[]),
+        ]);
+        let session = Session::new(FaultUsb(usb)).unwrap();
+        let mut first = session.connect(12345).unwrap();
+        let mut second = session.connect(54321).unwrap();
+        let error = if write_all {
+            first.write_all(b"payload").unwrap_err()
+        } else {
+            first.write(b"payload").unwrap_err()
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("injected uncertain USB completion")
+        );
+        let sent = output.lock().unwrap().len();
+        assert!(first.write(b"retry").is_err());
+        assert!(second.write(b"different channel").is_err());
+        assert!(session.connect(1000).is_err());
+        drop(first);
+        drop(second);
+        assert_eq!(output.lock().unwrap().len(), sent);
+        assert!(
+            !session.disconnected(),
+            "a write failure is not device removal"
+        );
+    }
+}

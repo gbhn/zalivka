@@ -1715,3 +1715,87 @@ fn receive_mux_data(output: &mpsc::Receiver<Vec<u8>>, port: u16, length: usize) 
     }
     bytes
 }
+
+#[test]
+fn identity_independent_requests_do_not_require_recovery_firmware() {
+    let file = fixture(None, false);
+    let mut state = restore_state(file.path());
+    let (usb, output) = mock_mux(vec![
+        version_packet(),
+        tcp(restore::RESTORED_PORT, 1, 0, 1, 0x12, &[]),
+    ]);
+    let session = Session::new(usb).unwrap();
+    let mut main = session.connect(restore::RESTORED_PORT).unwrap();
+    let arguments = wire::dict([("IsRecoveryOS", true.into())]);
+    for kind in [
+        "FDRTrustData",
+        "FirmwareUpdaterPreflight",
+        "DeviceRestoreInfoPreflight",
+        "RootTicket",
+    ] {
+        state
+            .serve(
+                &session,
+                &mut main,
+                &wire::dict([("DataType", kind.into()), ("Arguments", arguments.clone())]),
+            )
+            .unwrap();
+    }
+    let mut replies = mux_output(&output, restore::RESTORED_PORT);
+    for _ in 0..3 {
+        assert!(
+            wire::dictionary(&wire::receive(&mut replies).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        wire::receive(&mut replies).unwrap(),
+        wire::dict([("RootTicketData", Value::Data(ticket()))])
+    );
+    assert_eq!(replies.position(), replies.get_ref().len() as u64);
+
+    // An invalid asset URL must reach the network decoder without requiring an
+    // unrelated RecoveryOS identity. This test never performs a network request.
+    for kind in ["URLAsset", "StreamedImageDecryptionKey"] {
+        let error = state
+            .serve(
+                &session,
+                &mut main,
+                &wire::dict([
+                    ("DataType", kind.into()),
+                    (
+                        "Arguments",
+                        wire::dict([
+                            ("IsRecoveryOS", true.into()),
+                            ("RequestURL", "https://invalid.example/asset".into()),
+                            ("RequestMethod", "GET".into()),
+                        ]),
+                    ),
+                ]),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("Apple distribution host"),
+            "{kind}: {error:#}"
+        );
+    }
+    // Requests which actually consume recovery firmware must still fail.
+    for kind in [
+        "BuildIdentityDict",
+        "ReceiptManifest",
+        "KernelCache",
+        "RecoveryOSRootTicketData",
+    ] {
+        assert!(
+            state
+                .serve(
+                    &session,
+                    &mut main,
+                    &wire::dict([("DataType", kind.into()), ("Arguments", arguments.clone())]),
+                )
+                .is_err(),
+            "{kind} accepted missing recovery firmware"
+        );
+    }
+}
