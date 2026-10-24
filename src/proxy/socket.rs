@@ -214,19 +214,15 @@ fn http_connect(
         stream.read_exact(&mut byte)?;
         header.push(byte[0]);
     }
-    let status = std::str::from_utf8(&header)?
-        .lines()
-        .next()
-        .context("empty proxy response")?;
-    let mut parts = status.split_whitespace();
+    let mut headers =
+        vec![httparse::EMPTY_HEADER; header.iter().filter(|b| **b == b'\n').count() - 2];
+    let mut response = httparse::Response::new(&mut headers);
     ensure!(
-        matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")),
+        matches!(response.parse(&header)?, httparse::Status::Complete(end) if end == header.len())
+            && matches!(response.version, Some(0 | 1)),
         "invalid HTTP proxy response"
     );
-    let code = parts
-        .next()
-        .context("missing proxy status")?
-        .parse::<u16>()?;
+    let code = response.code.context("missing proxy status")?;
     ensure!(
         code == 200,
         "proxy refused CONNECT (HTTP {code}); direct fallback is disabled"

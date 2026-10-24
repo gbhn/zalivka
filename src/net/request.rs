@@ -111,28 +111,37 @@ pub(super) fn serialized_asset_request(bytes: &[u8]) -> Result<Request<Vec<u8>>>
         .windows(4)
         .position(|part| part == b"\r\n\r\n")
         .context("SerializedRequest has missing or oversized HTTP headers")?;
-    let body = &bytes[end + 4..];
-    let mut lines = std::str::from_utf8(&bytes[..end])?.split("\r\n");
-    let mut parts = lines.next().unwrap_or("").splitn(3, ' ');
-    let method = parts.next().unwrap_or("");
-    let target = parts
-        .next()
-        .context("SerializedRequest has no HTTP target")?;
-    let version = parts.next().unwrap_or("");
+    let raw = &bytes[..end + 4];
     ensure!(
-        matches!(method, "GET" | "POST") && matches!(version, "HTTP/1.0" | "HTTP/1.1"),
+        !raw.starts_with(b"\r\n")
+            && raw
+                .split_inclusive(|b| *b == b'\n')
+                .all(|line| line.ends_with(b"\r\n")),
+        "serialized HTTP requires CRLF line endings"
+    );
+    let mut headers = vec![httparse::EMPTY_HEADER; raw.iter().filter(|b| **b == b'\n').count() - 2];
+    let mut parsed = httparse::Request::new(&mut headers);
+    ensure!(
+        parsed.parse(raw)?.is_complete(),
+        "incomplete serialized HTTP request"
+    );
+    let method = parsed.method.context("serialized request has no method")?;
+    let target = parsed.path.context("serialized request has no target")?;
+    let version = parsed
+        .version
+        .context("serialized request has no version")?;
+    let body = &bytes[end + 4..];
+    ensure!(
+        matches!(method, "GET" | "POST") && matches!(version, 0 | 1),
         "unsupported SerializedRequest HTTP request line"
     );
     let mut host = None;
     let mut length = None;
     let mut chunked = false;
     let mut request = Request::builder().method(method);
-    for line in lines {
-        let (name, value) = line
-            .split_once(':')
-            .context("invalid serialized HTTP header")?;
-        let name: ureq::http::HeaderName = name.parse()?;
-        let value = value.trim_matches([' ', '\t']);
+    for header in parsed.headers.iter() {
+        let name: ureq::http::HeaderName = header.name.parse()?;
+        let value = std::str::from_utf8(header.value)?;
         let checked: ureq::http::HeaderValue = value.parse()?;
         match name.as_str() {
             "host" => {
@@ -163,7 +172,7 @@ pub(super) fn serialized_asset_request(bytes: &[u8]) -> Result<Request<Vec<u8>>>
             length.is_none(),
             "serialized request combines Content-Length and Transfer-Encoding"
         );
-        ensure!(version == "HTTP/1.1", "chunked request requires HTTP/1.1");
+        ensure!(version == 1, "chunked request requires HTTP/1.1");
         decode_http_chunks(body)?
     } else {
         ensure!(body.len() <= MAX_BODY, "asset request body too large");

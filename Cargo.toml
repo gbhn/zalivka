@@ -14,6 +14,7 @@ gui = ["dep:eframe", "dep:rfd"]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1.5"
+domain = { version = "0.12", default-features = false, features = ["std"] }
 fs4 = { version = "1.1", default-features = false }
 oxiri = "0.3"
 nusb = "0.2.8"
@@ -22,11 +23,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
 sha2 = "0.10"
-aes-gcm = "0.10"
+hpke = { version = "0.13", default-features = false, features = ["alloc", "std", "p256"] }
 base64 = "0.23"
 hkdf = "0.12"
 hmac = "0.12"
-p256 = { version = "0.13", default-features = false, features = ["ecdh", "pem", "std"] }
+httparse = "1.10"
+p256 = { version = "0.13", default-features = false, features = ["pem", "std"] }
 ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "socks-proxy"] }
 oxitls-rustcrypto-provider = "0.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }

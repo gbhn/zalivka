@@ -1,4 +1,12 @@
 //! Session-local DNS names: resolution happens when Windows opens the stream.
+use domain::{
+    base::{
+        Message, MessageBuilder, Ttl,
+        iana::{Class, Opcode, Rcode, Rtype},
+        name::ToLabelIter,
+    },
+    rdata::A,
+};
 use std::{
     collections::{HashMap, VecDeque},
     io::{self, Read},
@@ -24,110 +32,81 @@ impl Resolver {
             .map(String::as_str)
     }
     pub fn reply(&mut self, query: &[u8]) -> Option<Vec<u8>> {
-        if query.len() < 12 || query.len() > MAX_MESSAGE || query[2] & 0x80 != 0 {
+        if query.len() > MAX_MESSAGE {
             return None;
         }
-        let mut reply = query[..12].to_vec();
-        reply[2] = 0x80 | (query[2] & 1); // QR and client's RD; never claim DNSSEC validation.
-        reply[3] = 0x80; // RA
-        reply[4..12].fill(0);
-        if query[2] & 0x78 != 0 {
-            reply[3] |= 4;
-            return Some(reply);
+        let request = Message::from_slice(query).ok()?;
+        if request.header().qr() {
+            return None;
         }
-        let Some((name, end)) = question(query) else {
-            reply[3] |= 1;
-            return Some(reply);
+        let mut reply = MessageBuilder::new_vec();
+        reply.header_mut().set_id(request.header().id());
+        reply.header_mut().set_qr(true);
+        reply.header_mut().set_rd(request.header().rd());
+        reply.header_mut().set_ra(true);
+        if request.header().opcode() != Opcode::QUERY {
+            reply.header_mut().set_rcode(Rcode::NOTIMP);
+            return Some(reply.finish());
+        }
+        let question = request.sole_question().ok().filter(|question| {
+            let name = question.qname();
+            !name.is_root()
+                && name.iter_labels().all(|label| {
+                    label
+                        .as_slice()
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+                })
+        });
+        let Some(question) = question else {
+            reply.header_mut().set_rcode(Rcode::FORMERR);
+            return Some(reply.finish());
         };
-        let kind = u16::from_be_bytes([query[end], query[end + 1]]);
-        let class = u16::from_be_bytes([query[end + 2], query[end + 3]]);
-        reply[5] = 1;
-        for label in name.split('.') {
-            reply.push(label.len() as u8);
-            reply.extend(label.bytes());
-        }
-        reply.push(0);
-        reply.extend_from_slice(&query[end..end + 4]);
-        if class != 1 {
-            reply[3] |= 4;
-            return Some(reply);
-        }
-        // IPv4 gateway: no AAAA or HTTPS/SVCB hints which could bypass the name map.
-        if matches!(kind, 28 | 64 | 65) {
-            return Some(reply);
-        }
-        if kind != 1 {
-            reply[3] |= 4;
-            return Some(reply);
-        }
+        let mut reply = reply.question();
+        reply.push(question).ok()?;
+        let mut reply = reply.answer();
+        let code = if question.qclass() != Class::IN {
+            Rcode::NOTIMP
+        } else {
+            match question.qtype() {
+                Rtype::A => match self.address(&question.qname().to_string()) {
+                    Ok(address) => {
+                        // Synthetic addresses are valid only within this USB session.
+                        reply
+                            .push((question.qname(), Ttl::ZERO, A::new(address)))
+                            .ok()?;
+                        Rcode::NOERROR
+                    }
+                    Err(code) => code,
+                },
+                // Do not advertise IPv6 or alternate connection hints outside the gateway.
+                Rtype::AAAA | Rtype::SVCB | Rtype::HTTPS => Rcode::NOERROR,
+                _ => Rcode::NOTIMP,
+            }
+        };
+        reply.header_mut().set_rcode(code);
+        Some(reply.finish())
+    }
+
+    fn address(&mut self, name: &str) -> Result<Ipv4Addr, Rcode> {
         let key = name.to_ascii_lowercase();
         if key == "localhost" || key == "wpad" || key.ends_with(".local") {
-            reply[3] |= 5;
-            return Some(reply);
+            return Err(Rcode::REFUSED);
         }
-        let address = if let Some(ip) = self.addresses.get(&key) {
-            *ip
-        } else {
-            if self.names.len() == MAX_NAMES {
-                reply[3] |= 2;
-                return Some(reply);
-            }
-            let ip = Ipv4Addr::from(u32::from(ADDRESS_BASE) + self.names.len() as u32 + 1);
-            self.names.push(key.clone());
-            self.addresses.insert(key, ip);
-            ip
-        };
-        reply[7] = 1;
-        reply.extend([0xc0, 0x0c, 0, 1, 0, 1]);
-        // These addresses are valid only within this USB session.
-        reply.extend(0u32.to_be_bytes());
-        reply.extend([0, 4]);
-        reply.extend(address.octets());
-        Some(reply)
+        if let Some(ip) = self.addresses.get(&key) {
+            return Ok(*ip);
+        }
+        if self.names.len() == MAX_NAMES {
+            return Err(Rcode::SERVFAIL);
+        }
+        let ip = Ipv4Addr::from(u32::from(ADDRESS_BASE) + self.names.len() as u32 + 1);
+        self.names.push(key.clone());
+        self.addresses.insert(key, ip);
+        Ok(ip)
     }
 }
 pub(super) fn synthetic(ip: Ipv4Addr) -> bool {
     ip.octets()[0] == 198 && matches!(ip.octets()[1], 18 | 19)
-}
-fn question(bytes: &[u8]) -> Option<(String, usize)> {
-    if bytes[4..6] != [0, 1] {
-        return None;
-    }
-    let mut cursor = 12;
-    let mut end = None;
-    let mut labels = vec![];
-    let mut length = 0;
-    for _ in 0..128 {
-        let size = *bytes.get(cursor)? as usize;
-        if size == 0 {
-            let end = end.unwrap_or(cursor + 1);
-            bytes.get(end..end + 4)?;
-            return (!labels.is_empty()).then(|| (labels.join("."), end));
-        }
-        if size & 0xc0 == 0xc0 {
-            let next = *bytes.get(cursor + 1)? as usize;
-            end.get_or_insert(cursor + 2);
-            cursor = ((size & 0x3f) << 8) | next;
-            continue;
-        }
-        if size > 63 {
-            return None;
-        }
-        let label = bytes.get(cursor + 1..cursor + 1 + size)?;
-        if !label
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-        {
-            return None;
-        }
-        length += size + 1;
-        if length > 254 {
-            return None;
-        }
-        labels.push(std::str::from_utf8(label).ok()?.to_owned());
-        cursor += size + 1;
-    }
-    None
 }
 
 /// Per-connection DNS framing. The router owns and lends the shared name map.

@@ -1,5 +1,4 @@
 //! Public FCS key unwrapping for AEA profile 1. No AppleConnect credentials.
-use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
 use anyhow::{Context, Result, ensure};
 use base64::{
     Engine,
@@ -7,7 +6,8 @@ use base64::{
 };
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use p256::{PublicKey, SecretKey, elliptic_curve::sec1::ToEncodedPoint, pkcs8::DecodePrivateKey};
+use hpke::{Deserializable, Kem, OpModeR, aead::AesGcm256, kdf::HkdfSha256, kem::DhP256HkdfSha256};
+use p256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint, pkcs8::DecodePrivateKey};
 use sha2::{Digest, Sha256};
 
 const MAX_AUTH: usize = 1024 * 1024;
@@ -176,54 +176,19 @@ fn hpke_open(
     info: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>> {
-    let sender = PublicKey::from_sec1_bytes(enc).context("invalid FCS P-256 point")?;
-    let dh = p256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), sender.as_affine());
-    let context = [enc, secret.public_key().to_encoded_point(false).as_bytes()].concat();
-    let eae = labeled_extract(b"KEM\0\x10", &[], b"eae_prk", dh.raw_secret_bytes());
-    let shared: [u8; 32] = labeled_expand(b"KEM\0\x10", &eae, b"shared_secret", &context)?;
-    let suite = b"HPKE\0\x10\0\x01\0\x02";
-    let psk = labeled_extract(suite, &[], b"psk_id_hash", &[]);
-    let info = labeled_extract(suite, &[], b"info_hash", info);
-    let context = [&[0][..], &psk, &info].concat();
-    let secret = labeled_extract(suite, &shared, b"secret", &[]);
-    let key: [u8; 32] = labeled_expand(suite, &secret, b"key", &context)?;
-    let nonce: [u8; 12] = labeled_expand(suite, &secret, b"base_nonce", &context)?;
-    Aes256Gcm::new((&key).into())
-        .decrypt(
-            (&nonce).into(),
-            aes_gcm::aead::Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("FCS wrapped key authentication failed"))
-}
-
-fn labeled_extract(suite: &[u8], salt: &[u8], label: &[u8], input: &[u8]) -> [u8; 32] {
-    let input = [b"HPKE-v1".as_slice(), suite, label, input].concat();
-    Hkdf::<Sha256>::extract(Some(salt), &input).0.into()
-}
-
-fn labeled_expand<const N: usize>(
-    suite: &[u8],
-    key: &[u8],
-    label: &[u8],
-    info: &[u8],
-) -> Result<[u8; N]> {
-    let info = [
-        &(N as u16).to_be_bytes()[..],
-        b"HPKE-v1",
-        suite,
-        label,
+    let secret = <DhP256HkdfSha256 as Kem>::PrivateKey::from_bytes(&secret.to_bytes())
+        .context("invalid FCS recipient key")?;
+    let enc = <DhP256HkdfSha256 as Kem>::EncappedKey::from_bytes(enc)
+        .context("invalid FCS P-256 point")?;
+    hpke::single_shot_open::<AesGcm256, HkdfSha256, DhP256HkdfSha256>(
+        &OpModeR::Base,
+        &secret,
+        &enc,
         info,
-    ]
-    .concat();
-    let mut out = [0; N];
-    Hkdf::<Sha256>::from_prk(key)
-        .map_err(|_| anyhow::anyhow!("invalid HPKE key"))?
-        .expand(&info, &mut out)
-        .map_err(|_| anyhow::anyhow!("HPKE expansion failed"))?;
-    Ok(out)
+        ciphertext,
+        aad,
+    )
+    .map_err(|_| anyhow::anyhow!("FCS wrapped key authentication failed"))
 }
 
 #[cfg(test)]

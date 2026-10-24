@@ -133,6 +133,33 @@ fn refused_proxy_never_connects_to_the_target_directly() {
     }
 }
 #[test]
+fn http_tunnels_reject_malformed_headers_and_bytes_after_an_early_terminator() {
+    for connect in [connect_blocking, connect_via] {
+        for reply in [
+            &b"NOT-HTTP 200 OK\r\n\r\n"[..],
+            b"HTTP/1.2 200 OK\r\n\r\n",
+            b"HTTP/1.1 0200 OK\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nInvalid Header: value\r\n\r\n",
+            b"HTTP/1.1 200 OK\n\nopaque-target-bytes\r\n\r\n",
+        ] {
+            let proxy_listener = listener();
+            let proxy =
+                Proxy::new(&format!("http://{}", proxy_listener.local_addr().unwrap())).unwrap();
+            let server = thread::spawn(move || {
+                let mut stream = accept(proxy_listener);
+                let _ = header(&mut stream);
+                stream.write_all(reply).unwrap();
+            });
+            assert!(
+                connect("does-not-resolve.invalid", 443, Some(proxy)).is_err(),
+                "{reply:?}"
+            );
+            server.join().unwrap();
+        }
+    }
+}
+
+#[test]
 fn socks5h_authenticates_and_sends_the_unresolved_domain() {
     for connect in [connect_blocking, connect_via] {
         let proxy_listener = listener();

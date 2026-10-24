@@ -58,6 +58,48 @@ fn truncated_and_cyclic_questions_are_bounded() {
         assert_eq!(dns.reply(&query(name, 1)).unwrap()[3] & 15, 5);
     }
 }
+
+#[test]
+fn unsupported_questions_echo_the_name_type_and_class_without_allocating_addresses() {
+    let mut dns = Resolver::default();
+    for (kind, class) in [(15, 1), (u16::MAX, 1), (1, u16::MAX)] {
+        let mut q = query("Mixed-Case.invalid", kind);
+        let end = q.len();
+        q[end - 2..].copy_from_slice(&class.to_be_bytes());
+        q[2] = 0; // RD is unset; the reply must leave it unset too.
+        q[3] = 0x20; // Never echo the request's AD bit as our own validation.
+        let reply = dns.reply(&q).unwrap();
+        assert_eq!(
+            &reply[..12],
+            &[0x12, 0x34, 0x80, 0x84, 0, 1, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(&reply[12..], &q[12..]);
+    }
+    assert!(dns.names.is_empty());
+    assert!(dns.addresses.is_empty());
+}
+
+#[test]
+fn invalid_names_and_question_counts_return_format_errors_without_allocating_addresses() {
+    let mut dns = Resolver::default();
+    for name in ["bad label.invalid", "dots_in_label.invalid"] {
+        let mut q = query(name, 1);
+        if name.starts_with("dots") {
+            // A literal dot inside one label must not become a hostname separator.
+            q[17] = b'.';
+            q[20] = b'.';
+        }
+        assert_eq!(dns.reply(&q).unwrap()[3] & 15, 1);
+    }
+    for count in [0u16, 2, u16::MAX] {
+        let mut q = query("valid.invalid", 1);
+        q[4..6].copy_from_slice(&count.to_be_bytes());
+        let reply = dns.reply(&q).unwrap();
+        assert_eq!(reply[3] & 15, 1);
+        assert_eq!(&reply[4..12], &[0; 8]);
+    }
+    assert!(dns.names.is_empty());
+}
 #[test]
 fn tcp_dns_handles_partial_and_pipelined_queries_and_half_close() {
     let mut resolver = Resolver::default();

@@ -124,6 +124,10 @@ fn serialized_assets_reject_ambiguous_framing_and_non_apple_destinations() {
         "GET /key\r\nHost: wkms.sd.apple.com\r\n\r\n",
         "GET https://wkms.sd.apple.com/key HTTP/1.1\r\nContent-Length: 1\r\n\r\nx",
         "GET https://wkms.sd.apple.com/key HTTP/1.1\r\n invalid: folded\r\n\r\n",
+        "\r\nGET /key HTTP/1.1\r\nHost: wkms.sd.apple.com\r\n\r\n",
+        "GET /key HTTP/1.1\nHost: wkms.sd.apple.com\r\n\r\n",
+        "GET /key HTTP/1.1\r\nHost: wkms.sd.apple.com\nX-Test: value\r\n\r\n",
+        "GET /key HTTP/1.1\r\nHost: wkms.sd.apple.com\r\nX-Test: value\r\n continued\r\n\r\n",
     ] {
         assert!(serialized_asset_request(raw.as_bytes()).is_err(), "{raw:?}");
     }
