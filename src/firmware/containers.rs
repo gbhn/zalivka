@@ -24,15 +24,15 @@ pub fn tcon_metadata_matches(bytes: &[u8], digest: &[u8]) -> Result<bool> {
     Ok(false)
 }
 
-struct FtabEntry {
-    tag: [u8; 4],
-    range: Range<u64>,
+pub(super) struct FtabEntry {
+    pub(super) tag: [u8; 4],
+    pub(super) range: Range<u64>,
     padding: u32,
 }
 
 /// Validate the complete index before either hashing ranges or copying payloads.
 /// Payload bytes may be absent from a streaming prefix.
-fn ftab_index(bytes: &[u8], length: u64) -> Result<Vec<FtabEntry>> {
+pub(super) fn ftab_index(bytes: &[u8], length: u64) -> Result<Vec<FtabEntry>> {
     ensure!(
         bytes.len() >= 48 && &bytes[36..40] == b"ftab",
         "invalid FTAB header"

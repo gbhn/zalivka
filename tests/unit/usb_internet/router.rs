@@ -136,11 +136,7 @@ fn udp_dns_is_local_and_other_datagrams_are_not_forwarded() {
     assert!(udp.verify_checksum(&key.destination.into(), &CLIENT.into()));
     assert_eq!(&udp.payload()[udp.payload().len() - 4..], &[198, 18, 0, 1]);
     assert_eq!(
-        router
-            .dns
-            .lock()
-            .unwrap()
-            .host(Ipv4Addr::new(198, 18, 0, 1)),
+        router.dns.borrow().host(Ipv4Addr::new(198, 18, 0, 1)),
         Some("x.invalid")
     );
     for port in [443, 123, 5353] {

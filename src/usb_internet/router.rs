@@ -8,13 +8,12 @@ use smoltcp::{
     wire::*,
 };
 use std::{
+    cell::RefCell,
     collections::{HashMap, VecDeque},
     io::{Read, Write},
     net::Ipv4Addr,
-    sync::{
-        Arc, Mutex,
-        mpsc::{self, Receiver},
-    },
+    rc::Rc,
+    sync::mpsc::{self, Receiver},
     time::{Duration, Instant as Clock},
 };
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 168, 249, 1);
@@ -112,7 +111,7 @@ impl Write for Stream {
 }
 struct Tcp {
     handle: SocketHandle,
-    connecting: Option<Receiver<std::io::Result<Stream>>>,
+    connecting: Option<Receiver<std::io::Result<crate::proxy::socket::Stream>>>,
     stream: Option<Stream>,
     write_closed: bool,
     last: Clock,
@@ -122,7 +121,8 @@ pub(super) struct Router {
     interface: Interface,
     sockets: SocketSet<'static>,
     tcp: HashMap<Flow, Tcp>,
-    dns: Arc<Mutex<dns::Resolver>>,
+    // DNS streams run in this router's thread; connection workers receive only hostnames.
+    dns: Rc<RefCell<dns::Resolver>>,
     started: Clock,
     sent: u64,
     received: u64,
@@ -150,7 +150,7 @@ impl Router {
             interface,
             sockets,
             tcp: HashMap::new(),
-            dns: Arc::new(Mutex::new(dns::Resolver::default())),
+            dns: Rc::default(),
             started: Clock::now(),
             sent: 0,
             received: 0,
@@ -178,12 +178,12 @@ impl Router {
             }
             if ethernet.ethertype() == EthernetProtocol::Ipv4
                 && let Ok(ip) = Ipv4Packet::new_checked(ethernet.payload())
+                && ip.verify_checksum()
             {
                 if ip.more_frags() || ip.frag_offset() != 0 {
                     return;
                 }
                 if ip.next_header() == IpProtocol::Tcp
-                    && ip.verify_checksum()
                     && let Ok(packet) = TcpPacket::new_checked(ip.payload())
                     && packet.syn()
                     && !packet.ack()
@@ -198,7 +198,6 @@ impl Router {
                     self.connect_tcp(key);
                 }
                 if ip.next_header() == IpProtocol::Udp
-                    && ip.verify_checksum()
                     && let Ok(packet) = UdpPacket::new_checked(ip.payload())
                     && packet.verify_checksum(&ip.src_addr().into(), &ip.dst_addr().into())
                 {
@@ -242,12 +241,7 @@ impl Router {
         let (connecting, stream) = if key.destination_port == 53 {
             (None, Some(Stream::Dns(dns::Tcp::new(self.dns.clone()))))
         } else {
-            let host = self
-                .dns
-                .lock()
-                .unwrap()
-                .host(key.destination)
-                .map(str::to_owned);
+            let host = self.dns.borrow().host(key.destination).map(str::to_owned);
             if dns::synthetic(key.destination) && host.is_none() {
                 return;
             }
@@ -257,7 +251,6 @@ impl Router {
                 .name("usb-internet-connect".into())
                 .spawn(move || {
                     let result = crate::proxy::socket::connect(&host, key.destination_port)
-                        .map(Stream::Network)
                         .map_err(|e| std::io::Error::other(format!("{e:#}")));
                     let _ = tx.send(result);
                 })
@@ -300,7 +293,7 @@ impl Router {
         // QUIC and multicast discovery) cannot bypass the TCP proxy policy.
         if key.destination_port == 53
             && self.ethernet.output.len() < 192
-            && let Some(reply) = self.dns.lock().unwrap().reply(bytes)
+            && let Some(reply) = self.dns.borrow_mut().reply(bytes)
         {
             self.ethernet.output.extend(udp_reply(key, mac, &reply));
         }
@@ -319,7 +312,7 @@ impl Router {
                             "USB internet: TCP connected {}:{}",
                             key.destination, key.destination_port
                         );
-                        flow.stream = Some(s);
+                        flow.stream = Some(Stream::Network(s));
                         flow.connecting = None;
                     }
                     Ok(Err(error)) => {

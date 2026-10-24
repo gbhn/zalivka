@@ -1,5 +1,5 @@
 //! Host-scoped authorization and restored asset replies.
-use super::{agent, fetch, request::asset_request, validate_apple_url};
+use super::{agent, fetch, request::asset_request, validate_apple_uri, validate_apple_url};
 use crate::wire;
 use anyhow::{Context, Result, ensure};
 use plist::Value;
@@ -71,7 +71,7 @@ impl AssetClient {
         request: &mut Request<Vec<u8>>,
         wrapped_key: bool,
     ) -> Result<()> {
-        validate_apple_url(&request.uri().to_string())?;
+        validate_apple_uri(request.uri())?;
         if wrapped_key && !request.headers().contains_key("authorization") {
             let host = request
                 .uri()

@@ -1,9 +1,10 @@
 //! Session-local DNS names: resolution happens when Windows opens the stream.
 use std::{
+    cell::RefCell,
     collections::{HashMap, VecDeque},
     io::{self, Read, Write},
     net::Ipv4Addr,
-    sync::{Arc, Mutex},
+    rc::Rc,
 };
 const MAX_NAMES: usize = 4096;
 const MAX_MESSAGE: usize = 4096;
@@ -132,13 +133,13 @@ fn question(bytes: &[u8]) -> Option<(String, usize)> {
 }
 
 pub(super) struct Tcp {
-    resolver: Arc<Mutex<Resolver>>,
+    resolver: Rc<RefCell<Resolver>>,
     input: Vec<u8>,
     output: VecDeque<u8>,
     closed: bool,
 }
 impl Tcp {
-    pub fn new(resolver: Arc<Mutex<Resolver>>) -> Self {
+    pub fn new(resolver: Rc<RefCell<Resolver>>) -> Self {
         Self {
             resolver,
             input: vec![],
@@ -178,12 +179,7 @@ impl Write for Tcp {
             if self.input.len() < size + 2 {
                 break;
             }
-            if let Some(reply) = self
-                .resolver
-                .lock()
-                .unwrap()
-                .reply(&self.input[2..size + 2])
-            {
+            if let Some(reply) = self.resolver.borrow_mut().reply(&self.input[2..size + 2]) {
                 if self.output.len() + reply.len() + 2 > 65536 {
                     return Err(io::ErrorKind::OutOfMemory.into());
                 }

@@ -60,7 +60,7 @@ fn truncated_and_cyclic_questions_are_bounded() {
 }
 #[test]
 fn tcp_dns_handles_partial_and_pipelined_queries_and_half_close() {
-    let resolver = Arc::new(Mutex::new(Resolver::default()));
+    let resolver = Rc::new(RefCell::new(Resolver::default()));
     let mut tcp = Tcp::new(resolver.clone());
     let q = query("x.invalid", 1);
     let mut bytes = (q.len() as u16).to_be_bytes().to_vec();
@@ -76,14 +76,14 @@ fn tcp_dns_handles_partial_and_pipelined_queries_and_half_close() {
     assert_eq!(replies.len(), 2 * (n + 2));
     assert_eq!(&replies[..n + 2], &replies[n + 2..]);
     assert_eq!(
-        resolver.lock().unwrap().host(Ipv4Addr::new(198, 18, 0, 1)),
+        resolver.borrow().host(Ipv4Addr::new(198, 18, 0, 1)),
         Some("x.invalid")
     );
 }
 
 #[test]
 fn empty_tcp_reads_succeed_without_consuming_pending_dns_replies() {
-    let mut tcp = Tcp::new(Arc::new(Mutex::new(Resolver::default())));
+    let mut tcp = Tcp::new(Rc::default());
     assert_eq!(tcp.read(&mut []).unwrap(), 0);
     assert_eq!(
         tcp.read(&mut [0]).unwrap_err().kind(),

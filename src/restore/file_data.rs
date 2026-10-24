@@ -13,6 +13,7 @@ use std::{
 };
 
 pub(super) const FILE_DATA_BATCH: usize = 256 * 1024;
+const FILE_DATA_CHUNK: usize = 8192;
 
 pub(super) enum ImagePrefix {
     Collecting(Vec<u8>),
@@ -112,8 +113,8 @@ impl<'a> FileDataWriter<'a> {
             stream,
             session,
             assets,
-            file_data: wire::dict([("FileData", Value::Data(Vec::with_capacity(8192)))]),
-            pending: Vec::with_capacity(FILE_DATA_BATCH + 8192),
+            file_data: wire::dict([("FileData", Value::Data(Vec::with_capacity(FILE_DATA_CHUNK)))]),
+            pending: Vec::with_capacity(FILE_DATA_BATCH + FILE_DATA_CHUNK),
             pending_payload: 0,
             first: true,
             prefix: ImagePrefix::Collecting(Vec::new()),
@@ -123,7 +124,7 @@ impl<'a> FileDataWriter<'a> {
     }
     fn write_chunk(&mut self, data: &[u8]) -> Result<usize> {
         let started = Instant::now();
-        let n = data.len().min(8192);
+        let n = data.len().min(FILE_DATA_CHUNK);
         let header_ready = self.prefix.observe(&data[..n])?;
         // Reuse the dictionary and payload allocation, and serialize straight
         // into the batch instead of allocating and copying another whole frame.

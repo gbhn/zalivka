@@ -1,5 +1,5 @@
 //! Device-specific auxiliary-controller payload assembly.
-use super::{Ftab, payload_ranges, retimer_info};
+use super::{Ftab, containers::ftab_index, payload_ranges, retimer_info};
 use crate::{
     ipsw::{Identity, Ipsw},
     wire,
@@ -126,7 +126,7 @@ fn centauri_payload(mut bytes: Vec<u8>, info: &Dictionary) -> Result<Vec<u8>> {
         .and_then(Value::as_data)
         .filter(|data| data.len() == 2)
         .context("Centauri Wireless1,ChipRev must contain two bytes")?;
-    let mut table = Ftab::parse(&bytes).context("invalid Centauri FTAB")?;
+    let mut table = ftab_index(&bytes, bytes.len() as u64).context("invalid Centauri FTAB")?;
     if u16::from_le_bytes(revision.try_into()?) != u16::MAX {
         let revision = revision[0];
         // ACFU accepts major A..D and minor 0..5. Unsupported revisions or
@@ -137,9 +137,10 @@ fn centauri_payload(mut bytes: Vec<u8>, info: &Dictionary) -> Result<Vec<u8>> {
                 [b'_', major, b'0' + (revision & 0xf), b'f'],
                 [b'_', major, b'x', b'f'],
             ] {
-                if let Some(entry) = table.entries.iter().find(|e| e.0 == tag) {
-                    bytes = entry.1.clone();
-                    table = Ftab::parse(&bytes).context("invalid embedded Centauri FTAB")?;
+                if let Some(entry) = table.iter().find(|entry| entry.tag == tag) {
+                    bytes = bytes[entry.range.start as usize..entry.range.end as usize].to_vec();
+                    table = ftab_index(&bytes, bytes.len() as u64)
+                        .context("invalid embedded Centauri FTAB")?;
                     break;
                 }
             }
@@ -148,7 +149,7 @@ fn centauri_payload(mut bytes: Vec<u8>, info: &Dictionary) -> Result<Vec<u8>> {
     // CentauriRestoreHost::init marks only Wireless1,RTKitOS/rkos required;
     // the remaining wireless components are optional in isFirmwareValid.
     ensure!(
-        table.entries.iter().any(|entry| entry.0 == *b"rkos"),
+        table.iter().any(|entry| entry.tag == *b"rkos"),
         "Centauri FTAB has no required rkos entry"
     );
     if let Some(nonce) = info.get("Wireless1,RestoreBootNonce") {

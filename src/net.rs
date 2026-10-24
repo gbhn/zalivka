@@ -67,6 +67,11 @@ pub(crate) fn is_apple_host(host: &str) -> bool {
 /// Return the validated URI so callers can use it without parsing again.
 pub(crate) fn apple_url(url: &str) -> Result<Uri> {
     let uri: Uri = url.parse().context("invalid URL")?;
+    validate_apple_uri(&uri)?;
+    Ok(uri)
+}
+
+pub(crate) fn validate_apple_uri(uri: &Uri) -> Result<()> {
     ensure!(
         uri.scheme_str() == Some("https"),
         "only HTTPS Apple URLs are accepted"
@@ -87,7 +92,7 @@ pub(crate) fn apple_url(url: &str) -> Result<Uri> {
         }),
         "only HTTPS port 443 is accepted"
     );
-    Ok(uri)
+    Ok(())
 }
 
 pub fn get(url: &str) -> Result<ureq::http::Response<ureq::Body>> {
@@ -106,7 +111,7 @@ fn get_with_agent(url: &str, agent: &ureq::Agent) -> Result<Response<ureq::Body>
 
 fn fetch(mut request: Request<Vec<u8>>, agent: &ureq::Agent) -> Result<Response<ureq::Body>> {
     for redirects in 0..=5 {
-        validate_apple_url(&request.uri().to_string())?;
+        validate_apple_uri(request.uri())?;
         let response = send_http(agent, &request)?;
         if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
             return Ok(response);
