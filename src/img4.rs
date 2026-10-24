@@ -1,21 +1,36 @@
 //! Small, bounded DER codec for Apple's IM4P / IMG4 containers.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
+use std::ops::Range;
 
 pub fn element(tag: u8, data: &[u8]) -> Vec<u8> {
-    let mut out = vec![tag];
-    if data.len() < 128 {
-        out.push(data.len() as u8);
+    let mut out = Vec::with_capacity(1 + length_size(data.len()) + data.len());
+    append_header(&mut out, tag, data.len());
+    out.extend_from_slice(data);
+    out
+}
+
+fn length_size(length: usize) -> usize {
+    if length < 128 {
+        1
     } else {
-        let bytes = data.len().to_be_bytes();
-        let first = bytes
-            .iter()
-            .position(|b| *b != 0)
-            .unwrap_or(bytes.len() - 1);
+        1 + (usize::BITS - length.leading_zeros()).div_ceil(8) as usize
+    }
+}
+
+fn append_header(out: &mut Vec<u8>, tag: u8, length: usize) {
+    out.push(tag);
+    append_length(out, length);
+}
+
+fn append_length(out: &mut Vec<u8>, length: usize) {
+    if length < 128 {
+        out.push(length as u8);
+    } else {
+        let bytes = length.to_be_bytes();
+        let first = bytes.len() - (length_size(length) - 1);
         out.push(0x80 | (bytes.len() - first) as u8);
         out.extend_from_slice(&bytes[first..]);
     }
-    out.extend_from_slice(data);
-    out
 }
 
 #[derive(Debug)]
@@ -26,6 +41,20 @@ pub struct Der<'a> {
 }
 
 pub fn parse(data: &[u8]) -> Result<(Der<'_>, &[u8])> {
+    let range = content_range(data)?;
+    let content = data.get(range.clone()).context("truncated DER value")?;
+    Ok((
+        Der {
+            tag: data[0],
+            content,
+            encoded: &data[..range.end],
+        },
+        &data[range.end..],
+    ))
+}
+
+/// Parse the complete header even when only a prefix of the body is available.
+fn content_range(data: &[u8]) -> Result<Range<usize>> {
     ensure!(data.len() >= 2, "truncated DER header");
     let mut tag_end = 1;
     if data[0] & 31 == 31 {
@@ -65,18 +94,8 @@ pub fn parse(data: &[u8]) -> Result<(Der<'_>, &[u8])> {
         ensure!(value >= 128, "noncanonical DER long length");
         value
     };
-    let end = start
-        .checked_add(length)
-        .filter(|n| *n <= data.len())
-        .ok_or_else(|| anyhow::anyhow!("truncated DER value"))?;
-    Ok((
-        Der {
-            tag: data[0],
-            content: &data[start..end],
-            encoded: &data[..end],
-        },
-        &data[end..],
-    ))
+    let end = start.checked_add(length).context("DER length overflow")?;
+    Ok(start..end)
 }
 
 pub fn empty_local_policy() -> Vec<u8> {
@@ -88,28 +107,21 @@ pub fn empty_local_policy() -> Vec<u8> {
 }
 
 pub fn personalize(component: &str, payload: &[u8], ticket: &[u8]) -> Result<Vec<u8>> {
-    Ok(element(
-        0x30,
-        &personalized_body(component, payload, ticket)?,
-    ))
+    personalized_image(component, payload, ticket, &[])
 }
 
-fn personalized_body(component: &str, payload: &[u8], ticket: &[u8]) -> Result<Vec<u8>> {
+fn personalized_image(
+    component: &str,
+    payload: &[u8],
+    ticket: &[u8],
+    metadata: &[u8],
+) -> Result<Vec<u8>> {
     let (outer, rest) = parse(payload)?;
     ensure!(
         outer.tag == 0x30 && rest.is_empty(),
         "component is not a DER sequence"
     );
-    let (magic, fields) = parse(outer.content)?;
-    ensure!(
-        magic.tag == 0x16 && magic.content == b"IM4P",
-        "component is not an IM4P payload"
-    );
-    let (kind, trailing) = parse(fields)?;
-    ensure!(
-        kind.tag == 0x16 && kind.content.len() == 4,
-        "invalid IM4P type"
-    );
+    let kind = im4p_type_range(payload)?;
     let (manifest, rest) = parse(ticket)?;
     ensure!(
         manifest.tag == 0x30 && rest.is_empty(),
@@ -120,18 +132,30 @@ fn personalized_body(component: &str, payload: &[u8], ticket: &[u8]) -> Result<V
         magic_ticket.tag == 0x16 && magic_ticket.content == b"IM4M",
         "TSS ticket is not IM4M"
     );
-    let tag = restore_tag(component).unwrap_or(
-        kind.content
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid component tag"))?,
-    );
-    let mut fields = magic.encoded.to_vec();
-    fields.extend(element(0x16, &tag));
-    fields.extend_from_slice(trailing);
-    let mut body = element(0x16, b"IMG4");
-    body.extend(element(0x30, &fields));
-    body.extend(element(0xa0, ticket));
-    Ok(body)
+    let tag = restore_tag(component).unwrap_or(payload[kind.clone()].try_into()?);
+    let length = [
+        6,
+        payload.len(),
+        1,
+        length_size(ticket.len()),
+        ticket.len(),
+        metadata.len(),
+    ]
+    .into_iter()
+    .try_fold(0usize, usize::checked_add)
+    .context("IMG4 length overflow")?;
+    // Allocate the final envelope once. The firmware body is copied directly
+    // from the input, with only its four type bytes replaced.
+    let mut image = Vec::with_capacity(1 + length_size(length) + length);
+    append_header(&mut image, 0x30, length);
+    image.extend_from_slice(b"\x16\x04IMG4");
+    image.extend_from_slice(&payload[..kind.start]);
+    image.extend_from_slice(&tag);
+    image.extend_from_slice(&payload[kind.end..]);
+    append_header(&mut image, 0xa0, ticket.len());
+    image.extend_from_slice(ticket);
+    image.extend_from_slice(metadata);
+    Ok(image)
 }
 
 fn private_property(name: &[u8; 4], value: &[u8]) -> Vec<u8> {
@@ -147,7 +171,8 @@ fn private_property(name: &[u8; 4], value: &[u8]) -> Vec<u8> {
     }
     let mut encoded = vec![0xff];
     encoded.extend(digits.into_iter().rev());
-    encoded.extend_from_slice(&element(0, &sequence)[1..]);
+    append_length(&mut encoded, sequence.len());
+    encoded.extend_from_slice(&sequence);
     encoded
 }
 
@@ -205,11 +230,13 @@ pub fn personalize_with_metadata(
     tss: &plist::Value,
     identity: &plist::Value,
 ) -> Result<Vec<u8>> {
-    let mut body = personalized_body(component, payload, crate::tss::ticket(tss)?)?;
-    if let Some(info) = restore_info(tss, component, identity)? {
-        body.extend(info);
-    }
-    Ok(element(0x30, &body))
+    let info = restore_info(tss, component, identity)?;
+    personalized_image(
+        component,
+        payload,
+        crate::tss::ticket(tss)?,
+        info.as_deref().unwrap_or_default(),
+    )
 }
 
 /// IM4P restore variants share a file with normal components and change its tag.
@@ -238,26 +265,23 @@ pub fn restore_tag(component: &str) -> Option<[u8; 4]> {
 
 /// Locate the four tag bytes from a prefix; the image body may be gigabytes long.
 pub fn type_offset(prefix: &[u8]) -> Option<usize> {
-    if *prefix.first()? != 0x30 {
-        return None;
-    }
-    let length = *prefix.get(1)?;
-    let start = if length < 128 {
-        2
-    } else {
-        let count = usize::from(length & 0x7f);
-        if count == 0 || count > size_of::<usize>() {
-            return None;
-        }
-        2 + count
-    };
-    let (magic, fields) = parse(prefix.get(start..)?).ok()?;
-    if magic.tag != 0x16 || magic.content != b"IM4P" {
-        return None;
-    }
-    let (kind, trailing) = parse(fields).ok()?;
-    if kind.tag != 0x16 || kind.content.len() != 4 {
-        return None;
-    }
-    Some(prefix.len() - trailing.len() - 4)
+    im4p_type_range(prefix).ok().map(|range| range.start)
+}
+
+fn im4p_type_range(prefix: &[u8]) -> Result<Range<usize>> {
+    let range = content_range(prefix)?;
+    ensure!(prefix[0] == 0x30, "component is not a DER sequence");
+    let content = &prefix[range.start..range.end.min(prefix.len())];
+    let (magic, fields) = parse(content)?;
+    ensure!(
+        magic.tag == 0x16 && magic.content == b"IM4P",
+        "component is not an IM4P payload"
+    );
+    let (kind, _) = parse(fields)?;
+    ensure!(
+        kind.tag == 0x16 && kind.content.len() == 4,
+        "invalid IM4P type"
+    );
+    let end = range.start + magic.encoded.len() + kind.encoded.len();
+    Ok(end - 4..end)
 }

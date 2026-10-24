@@ -41,6 +41,60 @@ fn ftab_roundtrip_preserves_entries_and_rejects_bad_offsets() {
 }
 
 #[test]
+fn container_indexes_must_fit_the_declared_file_even_without_payloads() {
+    use zalivka::firmware::{Ftab, payload_ranges};
+    let mut header = [0; 48];
+    header[36..40].copy_from_slice(b"ftab");
+    let mut table = Ftab {
+        header,
+        entries: vec![],
+    };
+    let bytes = table.encode().unwrap();
+    assert!(payload_ranges(&bytes, 48).unwrap().is_empty());
+    assert!(payload_ranges(&bytes, 47).is_err());
+    table.header[36..40].fill(0);
+    assert!(table.encode().is_err());
+
+    let mut uarp = vec![0; 44];
+    uarp[..4].copy_from_slice(&3u32.to_be_bytes());
+    uarp[4..8].copy_from_slice(&44u32.to_be_bytes());
+    uarp[36..40].copy_from_slice(&44u32.to_be_bytes());
+    assert!(payload_ranges(&uarp, 44).unwrap().is_empty());
+    assert!(payload_ranges(&uarp, 43).is_err());
+    uarp[36..40].copy_from_slice(&43u32.to_be_bytes());
+    assert!(payload_ranges(&uarp, 44).is_err());
+    uarp[36..40].copy_from_slice(&44u32.to_be_bytes());
+    uarp[40..44].copy_from_slice(&40u32.to_be_bytes());
+    assert!(payload_ranges(&uarp, 84).is_err()); // The index is not in the prefix yet.
+}
+
+#[test]
+fn nested_payloads_keep_their_parsed_tags_when_layout_entries_change_order() {
+    use zalivka::firmware::payload_ranges;
+    let mut layout = centauri_table(vec![(*b"msww", vec![], 0)]);
+    layout[52..56].copy_from_slice(&640u32.to_le_bytes());
+    layout[56..60].copy_from_slice(&0x20_0000u32.to_le_bytes());
+    let nested = centauri_table(vec![(*b"rkos", vec![1, 2, 3], 0)]);
+    for entries in [
+        vec![(*b"2ftb", layout.clone(), 0), (*b"FIRM", nested.clone(), 0)],
+        vec![(*b"FIRM", nested.clone(), 0), (*b"2ftb", layout.clone(), 0)],
+    ] {
+        let nested_index = entries
+            .iter()
+            .position(|entry| entry.0 == *b"FIRM")
+            .unwrap();
+        let bytes = centauri_table(entries);
+        let mut expected = payload_ranges(&bytes[..80], bytes.len() as u64).unwrap();
+        let start = expected[nested_index].start + 64;
+        expected.push(start..start + 3);
+        assert_eq!(
+            payload_ranges(&bytes, bytes.len() as u64).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn se_update_selects_production_hashes_and_requires_the_requested_ticket() {
     let fixture = fixture(None, false);
     let mut ipsw = Ipsw::open(fixture.path()).unwrap();

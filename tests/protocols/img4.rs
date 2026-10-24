@@ -26,6 +26,40 @@ fn der_roundtrip_and_reject_truncated_or_noncanonical_values() {
 }
 
 #[test]
+fn im4p_prefix_uses_canonical_headers_and_stays_inside_the_declared_sequence() {
+    let payload = im4p(b"krnl");
+    let offset = img4::type_offset(&payload).unwrap();
+    for length in 0..=payload.len() {
+        assert_eq!(
+            img4::type_offset(&payload[..length]),
+            (length >= offset + 4).then_some(offset),
+            "prefix length {length}"
+        );
+    }
+    let fields = &payload[2..];
+    for header in [
+        vec![0x30, 0],
+        vec![0x30, 6], // Only the magic belongs to the sequence.
+        vec![0x30, 0x80],
+        vec![0x30, 0x81, fields.len() as u8],
+        vec![0x30, 0x82, 0, 128],
+        [
+            vec![0x30, 0x80 | size_of::<usize>() as u8],
+            vec![255; size_of::<usize>()],
+        ]
+        .concat(),
+    ] {
+        let malformed = [header, fields.to_vec()].concat();
+        assert_eq!(img4::type_offset(&malformed), None, "{malformed:?}");
+        assert!(img4::personalize("iBSS", &malformed, &ticket()).is_err());
+    }
+    // A large image can expose its type before the body has arrived.
+    let prefix = [vec![0x30, 0x84, 0x40, 0, 0, 0], fields[..12].to_vec()].concat();
+    assert_eq!(img4::type_offset(&prefix), Some(14));
+    assert!(img4::parse(&prefix).is_err());
+}
+
+#[test]
 fn img4_preserves_payload_and_uses_restore_tag() {
     let payload = im4p(b"krnl");
     let image = img4::personalize("RestoreKernelCache", &payload, &ticket()).unwrap();
@@ -75,12 +109,14 @@ fn img4_metadata_matches_the_existing_envelope_at_der_length_boundaries() {
                     ]),
                 );
             }
-            // Retain the previous composition as a byte compatibility check:
-            // IMG4 body, followed by optional IM4R, inside one outer sequence.
-            let base = img4::personalize("SEP", &payload, &ticket()).unwrap();
-            let (outer, rest) = img4::parse(&base).unwrap();
-            assert!(rest.is_empty());
-            let mut expected = outer.content.to_vec();
+            // Construct the expected wire envelope independently of personalization.
+            let mut expected = img4::element(0x16, b"IMG4");
+            expected.extend_from_slice(&payload);
+            expected.extend(img4::element(0xa0, &ticket()));
+            assert_eq!(
+                img4::personalize("SEP", &payload, &ticket()).unwrap(),
+                img4::element(0x30, &expected)
+            );
             if let Some(info) = img4::restore_info(&tss, "SEP", &id.value).unwrap() {
                 expected.extend(info);
             }

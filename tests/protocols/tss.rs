@@ -81,6 +81,75 @@ fn shared_component_preparation_keeps_default_flags_specific_to_restore_requests
 }
 
 #[test]
+fn signing_rejects_malformed_metadata_instead_of_skipping_components() {
+    for entry in [
+        true.into(),
+        wire::dict([("Info", "invalid".into())]),
+        wire::dict([
+            ("Info", wire::dict([] as [(&str, Value); 0])),
+            ("Trusted", "true".into()),
+        ]),
+        wire::dict([
+            ("Trusted", true.into()),
+            ("Info", wire::dict([("RestoreRequestRules", false.into())])),
+        ]),
+    ] {
+        let mut id = identity();
+        manifest_mut(&mut id).insert("Extra".into(), entry);
+        for build in [tss::request, tss::recovery_request] {
+            let error = build(&device_info(), &id).unwrap_err();
+            assert!(format!("{error:#}").contains("Extra"), "{error:#}");
+        }
+    }
+    let mut id = identity();
+    manifest_mut(&mut id).insert("SigningOnly".into(), wire::dict([("Trusted", true.into())]));
+    for build in [tss::request, tss::recovery_request] {
+        assert!(wire::get(&build(&device_info(), &id).unwrap(), &["SigningOnly"]).is_err());
+    }
+}
+
+#[test]
+fn component_rules_use_device_parameters_independently_of_manifest_order() {
+    let first = wire::dict([
+        ("Trusted", true.into()),
+        ("Info", wire::dict([] as [(&str, Value); 0])),
+    ]);
+    for build in [tss::request, tss::recovery_request] {
+        let mut id = identity();
+        manifest_mut(&mut id).insert("First".into(), first.clone());
+        let prepared = wire::get(&build(&device_info(), &id).unwrap(), &["First"])
+            .unwrap()
+            .clone();
+        let second = wire::dict([
+            ("Trusted", true.into()),
+            (
+                "Info",
+                wire::dict([(
+                    "RestoreRequestRules",
+                    Value::Array(vec![wire::dict([
+                        ("Conditions", wire::dict([("First", prepared)])),
+                        ("Actions", wire::dict([("ESEC", false.into())])),
+                    ])]),
+                )]),
+            ),
+        ]);
+        manifest_mut(&mut id).insert("Second".into(), second.clone());
+        let forward = build(&device_info(), &id).unwrap();
+        let entries = manifest_mut(&mut id);
+        entries.remove("First");
+        entries.remove("Second");
+        entries.insert("Second".into(), second);
+        entries.insert("First".into(), first.clone());
+        let reverse = build(&device_info(), &id).unwrap();
+        assert_eq!(
+            wire::get(&forward, &["Second"]).unwrap(),
+            wire::get(&reverse, &["Second"]).unwrap()
+        );
+        assert!(wire::get(&forward, &["Second", "ESEC"]).is_err());
+    }
+}
+
+#[test]
 fn local_policy_omits_firmware_metadata_without_changing_firmware_requests() {
     let mut id = identity();
     let metadata = [
@@ -224,4 +293,17 @@ fn tss_never_accepts_rejection_or_malformed_success() {
     ]
     .concat();
     assert_eq!(tss::parse_response(&bytes).unwrap(), response);
+    for header in [
+        "STATUS=94&STATUS=0",
+        "STATUS=0&STATUS=94",
+        "STATUS=0&STATUS=0",
+        "MESSAGE=SUCCESS",
+    ] {
+        let bytes = [
+            format!("{header}&REQUEST_STRING=").into_bytes(),
+            wire::xml(&response).unwrap(),
+        ]
+        .concat();
+        assert!(tss::parse_response(&bytes).is_err(), "{header}");
+    }
 }
