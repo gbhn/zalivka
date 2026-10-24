@@ -1,5 +1,5 @@
 use super::*;
-use std::{ffi::OsString, fs::File};
+use std::{ffi::OsString, fs::File, path::Path};
 
 fn job(action: Action) -> Job {
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())

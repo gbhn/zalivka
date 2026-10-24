@@ -1,7 +1,9 @@
+mod digest;
 mod identity;
 mod verify;
 use crate::{img4, wire};
 use anyhow::{Context, Result, ensure};
+pub use digest::verify_digest;
 pub use identity::{Behavior, Identity, IdentitySummary};
 use plist::Value;
 use std::{
@@ -11,7 +13,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
-pub use verify::{Verification, verify_digest};
+pub use verify::Verification;
 use zip::ZipArchive;
 
 pub const MAX_COMPONENT: u64 = 1024 * 1024 * 1024;
@@ -128,13 +130,13 @@ impl Ipsw {
         if let Ok(digest) = wire::get(&id.value, &["Manifest", name, "Digest"]) {
             let expected = digest.as_data().context("invalid component digest")?;
             if !expected.is_empty() {
-                let inputs = verify::DigestInput::variants(
+                let inputs = digest::DigestInput::variants(
                     &data,
                     data.len() as u64,
                     img4::restore_tag(name),
                 )?;
-                let verified = verify::verify_component_digest(
-                    &inputs,
+                let verified = digest::verify_component_digest(
+                    inputs,
                     expected,
                     |input| input.matches(&data, expected),
                     (name == "Baobab,TCON").then_some(data.as_slice()),

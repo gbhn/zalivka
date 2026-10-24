@@ -1,20 +1,21 @@
+mod cards;
+mod dialogs;
 mod events;
 mod setup;
 mod widgets;
 use setup::{Action, Setup};
-use widgets::*;
 mod theme;
 mod view;
 mod worker;
 use worker::Job;
 
-use theme::{BLUE, RED, Tone, configure};
+use theme::{Tone, configure};
 
 use anyhow::Result;
-use eframe::egui::{self, Color32, RichText, Vec2};
+use eframe::egui;
 use std::{
     collections::VecDeque,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
 };
@@ -79,13 +80,6 @@ struct Confirmation {
     ecid: u64,
     accepted: bool,
     erase: String,
-}
-impl Confirmation {
-    fn ready(&self, target: Option<&DeviceInfo>) -> bool {
-        self.accepted
-            && target.is_some_and(|d| d.ecid == self.ecid && d.mode == Mode::Dfu)
-            && (self.action != Action::Restore || self.erase == "ERASE")
-    }
 }
 
 struct App {

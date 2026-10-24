@@ -1,5 +1,10 @@
 //! Apply background events and finish jobs only after their logs are drained.
-use super::*;
+use super::theme::Tone;
+use super::worker::Job;
+use super::{App, Event, Notice, Picker, SCAN_INTERVAL, worker};
+use eframe::egui;
+use std::time::Instant;
+use zalivka::progress;
 
 impl App {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {

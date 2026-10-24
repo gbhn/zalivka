@@ -1,6 +1,7 @@
 //! Firmware updater personalization for the auxiliary controllers in Macs.
 mod canary;
 mod containers;
+mod legacy;
 mod payload;
 mod request;
 use crate::{
