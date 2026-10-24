@@ -140,8 +140,9 @@ impl eframe::App for App {
                     "Операция ещё выполняется",
                     "Дождитесь завершения перед закрытием окна.",
                 );
-            } else {
-                let _ = job.stop();
+            } else if let Err(error) = job.stop() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.error("Не удалось остановить операцию", error);
             }
         }
         if self.job.is_none() && !self.picking && self.confirmation.is_none() {

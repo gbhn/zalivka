@@ -1,4 +1,4 @@
-//! Nonblocking TCP tunnels for USB forwarding, using the shared Windows policy.
+//! TCP tunnels shared by FDR and USB forwarding, with blocking and polling I/O.
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned, pki_types::ServerName};
@@ -92,8 +92,8 @@ pub(crate) fn connect(host: &str, port: u16) -> Result<Stream> {
     let uri = super::target_uri(host, port)?;
     connect_via(host, port, super::for_url(&uri)?)
 }
-fn tcp_connect(host: &str, port: u16) -> Result<TcpStream> {
-    let deadline = Instant::now() + TIMEOUT;
+fn tcp_connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
+    let deadline = Instant::now() + timeout;
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let addresses = (host, port)
         .to_socket_addrs()
@@ -106,8 +106,8 @@ fn tcp_connect(host: &str, port: u16) -> Result<TcpStream> {
         }
         match TcpStream::connect_timeout(&address, remaining.min(Duration::from_secs(3))) {
             Ok(stream) => {
-                stream.set_read_timeout(Some(TIMEOUT))?;
-                stream.set_write_timeout(Some(TIMEOUT))?;
+                stream.set_read_timeout(Some(timeout))?;
+                stream.set_write_timeout(Some(timeout))?;
                 stream.set_nodelay(true)?;
                 return Ok(stream);
             }
@@ -119,12 +119,30 @@ fn tcp_connect(host: &str, port: u16) -> Result<TcpStream> {
         .into())
 }
 pub(crate) fn connect_via(host: &str, port: u16, proxy: Option<Proxy>) -> Result<Stream> {
+    let mut stream = open(host, port, proxy, TIMEOUT)?;
+    stream.tcp().set_read_timeout(None)?;
+    stream.tcp().set_write_timeout(None)?;
+    stream.tcp().set_nonblocking(true)?;
+    stream.poll()?;
+    Ok(stream)
+}
+
+pub(super) fn connect_blocking(host: &str, port: u16, proxy: Option<Proxy>) -> Result<Stream> {
+    let stream = open(host, port, proxy, Duration::from_secs(30))?;
+    stream
+        .tcp()
+        .set_read_timeout(Some(Duration::from_millis(100)))?;
+    Ok(stream)
+}
+
+fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Result<Stream> {
     let mut stream = if let Some(proxy) = proxy {
         eprintln!(
-            "USB internet: route {host}:{port} via {:?} proxy",
+            "TCP tunnel: route {host}:{port} via {:?} proxy",
             proxy.protocol()
         );
-        let tcp = tcp_connect(proxy.host(), proxy.port()).context("connecting configured proxy")?;
+        let tcp = tcp_connect(proxy.host(), proxy.port(), timeout)
+            .context("connecting configured proxy")?;
         let transport = if proxy.protocol() == ProxyProtocol::Https {
             tls_transport(tcp, proxy.host(), tls_config())?
         } else {
@@ -136,7 +154,7 @@ pub(crate) fn connect_via(host: &str, port: u16, proxy: Option<Proxy>) -> Result
         };
         match proxy.protocol() {
             ProxyProtocol::Http | ProxyProtocol::Https => {
-                http_connect(&mut stream, host, port, &proxy)?
+                http_connect(&mut stream, host, port, &proxy, timeout)?
             }
             ProxyProtocol::Socks4
             | ProxyProtocol::Socks4A
@@ -146,16 +164,13 @@ pub(crate) fn connect_via(host: &str, port: u16, proxy: Option<Proxy>) -> Result
         }
         stream
     } else {
-        eprintln!("USB internet: route {host}:{port} directly from the Windows host");
+        eprintln!("TCP tunnel: route {host}:{port} directly from the host");
         Stream {
-            transport: Transport::Tcp(tcp_connect(host, port)?),
+            transport: Transport::Tcp(tcp_connect(host, port, timeout)?),
             shutdown_pending: false,
         }
     };
-    stream.tcp().set_read_timeout(None)?;
-    stream.tcp().set_write_timeout(None)?;
-    stream.tcp().set_nonblocking(true)?;
-    stream.poll()?;
+    stream.flush()?;
     Ok(stream)
 }
 fn tls_transport(tcp: TcpStream, host: &str, config: Arc<ClientConfig>) -> Result<Transport> {
@@ -166,7 +181,13 @@ fn tls_transport(tcp: TcpStream, host: &str, config: Arc<ClientConfig>) -> Resul
     }
     Ok(Transport::Tls(Box::new(tls)))
 }
-fn http_connect(stream: &mut Stream, host: &str, port: u16, proxy: &Proxy) -> Result<()> {
+fn http_connect(
+    stream: &mut Stream,
+    host: &str,
+    port: u16,
+    proxy: &Proxy,
+    timeout: Duration,
+) -> Result<()> {
     write!(
         stream,
         "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n"
@@ -182,7 +203,7 @@ fn http_connect(stream: &mut Stream, host: &str, port: u16, proxy: &Proxy) -> Re
     stream.write_all(b"\r\n")?;
     stream.flush()?;
     let mut header = vec![];
-    let deadline = Instant::now() + TIMEOUT;
+    let deadline = Instant::now() + timeout;
     // Read only the header; opaque target bytes in the same packet must survive.
     while !header.ends_with(b"\r\n\r\n") {
         ensure!(header.len() < 16384, "proxy response header exceeds 16 KiB");

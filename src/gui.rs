@@ -7,7 +7,7 @@ use setup::{Action, Setup};
 mod theme;
 mod view;
 mod worker;
-use worker::Job;
+use worker::{Job, Output};
 
 use theme::{Tone, configure};
 
@@ -63,9 +63,7 @@ enum Event {
         devices: std::result::Result<Vec<DeviceInfo>, String>,
         host: std::result::Result<Option<drivers::HostStatus>, String>,
     },
-    Line(u64, String),
-    Worker(u64, progress::Event),
-    ReaderDone(u64),
+    Worker(u64, Output),
     Picked(Picker, Option<PathBuf>),
     Saved(std::result::Result<PathBuf, String>),
 }
@@ -174,12 +172,6 @@ impl App {
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n")
-    }
-    fn log(&mut self, line: String) {
-        if let Some(job) = &mut self.job {
-            job.log_line(&line);
-        }
-        self.journal_line(line);
     }
     fn journal_line(&mut self, line: String) {
         self.logs.push_back(line);

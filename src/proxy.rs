@@ -4,14 +4,7 @@ use std::{
     io::{self, Read, Write},
     sync::Arc,
 };
-use ureq::unversioned::{
-    resolver::{DefaultResolver, Resolver},
-    transport::{
-        ConnectProxyConnector, ConnectionDetails, Connector, DefaultConnector, NextTimeout,
-        SocksConnector, TcpConnector, Transport, TransportAdapter,
-        time::{Duration, Instant},
-    },
-};
+use ureq::unversioned::transport::{ConnectionDetails, Connector, DefaultConnector, Transport};
 use ureq::{Proxy, http::Uri};
 
 pub(crate) mod socket;
@@ -129,62 +122,27 @@ fn target_uri(host: &str, port: u16) -> Result<Uri> {
 }
 
 fn connect_via(uri: &Uri, proxy: Option<Proxy>) -> Result<Tunnel> {
-    // Reuse ureq's HTTP(S) CONNECT and SOCKS implementations. The target TLS
-    // session belongs to restoreOS: only TLS to an HTTPS proxy is terminated here.
-    let config = ureq::Agent::config_builder()
-        .tls_config(crate::net::tls_config(ureq::tls::RootCerts::WebPki))
-        .proxy(proxy)
-        .build();
-    let resolver = DefaultResolver::default();
-    let timeout = NextTimeout {
-        after: Duration::from_secs(30),
-        reason: ureq::Timeout::Connect,
-    };
-    let addrs = if config.proxy().is_none_or(|p| p.resolve_target()) {
-        resolver.resolve(uri, &config, timeout)?
-    } else {
-        // Domain names are resolved by CONNECT/SOCKS4a/SOCKS5h proxies.
-        resolver.empty()
-    };
-    let details = ConnectionDetails {
-        uri,
-        addrs,
-        config: &config,
-        request_level: false,
-        resolver: &resolver,
-        now: Instant::now(),
-        timeout,
-        current_time: Arc::new(Instant::now),
-        run_connector: Arc::new(|details| {
-            DefaultConnector::default()
-                .connect(details, None)?
-                .ok_or(ureq::Error::ConnectionFailed)
-        }),
-    };
-    let transport =
-        ().chain(SocksConnector::default())
-            .chain(ConnectProxyConnector::default())
-            .chain(TcpConnector::default())
-            .connect(&details, None)?
-            .context("proxy did not establish an FDR tunnel")?;
-    Ok(Tunnel(TransportAdapter::new(transport.boxed())))
+    let host = uri.host().context("tunnel destination has no host")?;
+    let port = uri
+        .port_u16()
+        .unwrap_or(if uri.scheme_str() == Some("http") {
+            80
+        } else {
+            443
+        });
+    // FDR and USB networking share CONNECT/SOCKS, proxy TLS and authentication.
+    // Only the I/O mode differs; the target's TLS remains opaque in both paths.
+    Ok(Tunnel(socket::connect_blocking(host, port, proxy)?))
 }
 
-pub(crate) struct Tunnel(TransportAdapter);
+pub(crate) struct Tunnel(socket::Stream);
 
 impl Read for Tunnel {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.0.set_timeout(NextTimeout {
-            after: Duration::from_millis(100),
-            reason: ureq::Timeout::RecvBody,
-        });
         self.0.read(buffer).map_err(|error| {
-            if matches!(
-                error
-                    .get_ref()
-                    .and_then(|e| e.downcast_ref::<ureq::Error>()),
-                Some(ureq::Error::Timeout(_))
-            ) {
+            // Unix reports an expired SO_RCVTIMEO as WouldBlock. Keep the FDR
+            // idle-read contract the same across host operating systems.
+            if error.kind() == io::ErrorKind::WouldBlock {
                 io::Error::new(io::ErrorKind::TimedOut, error)
             } else {
                 error
@@ -195,10 +153,6 @@ impl Read for Tunnel {
 
 impl Write for Tunnel {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0.set_timeout(NextTimeout {
-            after: Duration::from_secs(30),
-            reason: ureq::Timeout::SendBody,
-        });
         self.0.write(buffer)
     }
 

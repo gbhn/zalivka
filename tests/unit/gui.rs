@@ -20,7 +20,7 @@ fn worker_line(event: progress::Event) -> String {
 
 fn send_worker(app: &mut App, event: progress::Event) {
     app.tx
-        .send(Event::worker_output(7, worker_line(event), true))
+        .send(Event::Worker(7, Output::parse(worker_line(event), true)))
         .unwrap();
     app.poll(&egui::Context::default());
 }
@@ -208,16 +208,44 @@ fn scan_results_keep_host_and_usb_failures_independent() {
 
 #[test]
 fn stale_worker_events_do_not_enter_a_new_journal() {
-    let mut app = App::new();
-    let ctx = egui::Context::default();
-    app.tx.send(Event::Line(999, "stale error".into())).unwrap();
-    app.tx
-        .send(Event::Worker(999, progress::Event::RestoreCompleted))
+    for active in [false, true] {
+        let mut app = App::new();
+        if active {
+            app.job = Some(job(Action::Restore));
+        }
+        for output in [
+            Output::Line("stale error".into()),
+            Output::State(progress::Event::RestoreCompleted),
+            Output::State(progress::Event::RebootRequired),
+            Output::Closed,
+        ] {
+            app.tx.send(Event::Worker(999, output)).unwrap();
+        }
+        app.poll(&egui::Context::default());
+        assert!(app.logs.is_empty());
+        assert!(app.notice.is_none());
+        assert!(!app.windows_reboot_required);
+        if let Some(job) = app.job {
+            assert_eq!(job.readers, 2);
+            assert!(!job.restore_completed);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn stopped_worker_is_reaped_when_the_window_drops_without_another_poll() {
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--help")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .unwrap();
-    app.tx.send(Event::ReaderDone(999)).unwrap();
-    app.poll(&ctx);
-    assert!(app.logs.is_empty());
-    assert!(app.notice.is_none());
+    let pid = child.id();
+    let mut job = Job::new(7, Action::Download, child, tempfile::tempfile().unwrap());
+    job.stop().unwrap();
+    drop(job);
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
 }
 
 #[test]
@@ -231,22 +259,24 @@ fn exited_worker_keeps_final_lines_until_both_readers_finish() {
     app.poll(&ctx);
     assert_eq!(app.job.as_ref().unwrap().success, Some(true));
     assert!(app.notice.is_none());
-    app.tx.send(Event::ReaderDone(999)).unwrap();
-    app.tx.send(Event::ReaderDone(7)).unwrap();
+    app.tx.send(Event::Worker(999, Output::Closed)).unwrap();
+    app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
     app.poll(&ctx);
     assert_eq!(app.job.as_ref().unwrap().readers, 1);
     assert!(app.notice.is_none());
 
     app.tx
-        .send(Event::worker_output(
+        .send(Event::Worker(
             7,
-            worker_line(progress::Event::InternetUnavailable {
-                error: "disconnected".into(),
-            }),
-            true,
+            Output::parse(
+                worker_line(progress::Event::InternetUnavailable {
+                    error: "disconnected".into(),
+                }),
+                true,
+            ),
         ))
         .unwrap();
-    app.tx.send(Event::ReaderDone(7)).unwrap();
+    app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
     app.poll(&ctx);
     assert!(app.job.is_none());
     let notice = app.notice.as_ref().unwrap();
@@ -262,9 +292,9 @@ fn exited_worker_keeps_final_lines_until_both_readers_finish() {
 #[test]
 fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
     let mut job = job(Action::Restore);
-    job.worker_event(progress::Event::InternetUnavailable {
+    job.output(Output::State(progress::Event::InternetUnavailable {
         error: "no network".into(),
-    });
+    }));
     job.cancelled = true;
     for success in [false, true] {
         let notice = job.completion_notice(success, true);
@@ -297,7 +327,7 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
     let notice = job.completion_notice(true, true);
     assert_eq!(notice.detail, "no network");
     assert_eq!(notice.tone, Tone::Neutral);
-    job.worker_event(progress::Event::InternetReady);
+    job.output(Output::State(progress::Event::InternetReady));
     for action in [
         Action::Restore,
         Action::Revive,
@@ -320,13 +350,12 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
     let mut app = App::new();
     app.job = Some(job(Action::Restore));
     assert!(!app.job.as_ref().unwrap().can_stop());
-    app.log("Restore completed; waiting for the Mac's USB network".into());
-    app.log("Перезагрузите Windows перед восстановлением Mac.".into());
+    app.journal_line("Restore completed; waiting for the Mac's USB network".into());
+    app.journal_line("Перезагрузите Windows перед восстановлением Mac.".into());
     app.tx
-        .send(Event::worker_output(
+        .send(Event::Worker(
             7,
-            worker_line(progress::Event::RestoreCompleted),
-            false,
+            Output::parse(worker_line(progress::Event::RestoreCompleted), false),
         ))
         .unwrap();
     app.poll(&egui::Context::default());
@@ -374,7 +403,7 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
         },
     );
     for index in 0..4001 {
-        app.log(format!("message {index}"));
+        app.journal_line(format!("message {index}"));
     }
     assert_eq!(app.logs.len(), 4000);
     let job = app.job.as_mut().unwrap();
@@ -429,7 +458,7 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
     send_worker(&mut app, progress::Event::InternetReady);
     let line = worker_line(progress::Event::Transfer(update));
     app.tx
-        .send(Event::worker_output(7, line.clone(), false))
+        .send(Event::Worker(7, Output::parse(line.clone(), false)))
         .unwrap();
     app.poll(&egui::Context::default());
     assert!(app.job.as_ref().unwrap().transfer.is_none());

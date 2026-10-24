@@ -56,6 +56,23 @@ enum Internet {
     Unavailable(String),
 }
 
+/// Both output pipes belong to one job; only stdout carries state events.
+pub(super) enum Output {
+    Line(String),
+    State(progress::Event),
+    Closed,
+}
+
+impl Output {
+    pub(super) fn parse(line: String, state_events: bool) -> Self {
+        if state_events && let Some(event) = progress::Event::parse(&line) {
+            Self::State(event)
+        } else {
+            Self::Line(line)
+        }
+    }
+}
+
 impl Job {
     pub(super) fn new(id: u64, action: Action, child: Child, log: File) -> Self {
         let now = Instant::now();
@@ -99,12 +116,22 @@ impl Job {
         Ok(())
     }
 
-    pub(super) fn log_line(&mut self, line: &str) {
-        self.last_activity = Instant::now();
-        let _ = writeln!(self.log, "{line}");
+    pub(super) fn output(&mut self, output: Output) -> Option<String> {
+        match output {
+            Output::Line(line) => {
+                self.last_activity = Instant::now();
+                let _ = writeln!(self.log, "{line}");
+                Some(line)
+            }
+            Output::State(event) => self.worker_event(event),
+            Output::Closed => {
+                self.readers = self.readers.saturating_sub(1);
+                None
+            }
+        }
     }
 
-    pub(super) fn worker_event(&mut self, event: progress::Event) -> Option<String> {
+    fn worker_event(&mut self, event: progress::Event) -> Option<String> {
         let _ = event.write_to(&mut self.log);
         self.last_activity = Instant::now();
         let mut journal = None;
@@ -282,19 +309,22 @@ impl Job {
                         let line = match line {
                             Ok(line) => line,
                             Err(e) => {
-                                let _ = tx.send(Event::Line(id, format!("Log read error: {e}")));
+                                let _ = tx.send(Event::Worker(
+                                    id,
+                                    Output::Line(format!("Log read error: {e}")),
+                                ));
                                 break;
                             }
                         };
                         if tx
-                            .send(Event::worker_output(id, line, state_events))
+                            .send(Event::Worker(id, Output::parse(line, state_events)))
                             .is_err()
                         {
                             break;
                         }
                         ctx.request_repaint();
                     }
-                    let _ = tx.send(Event::ReaderDone(id));
+                    let _ = tx.send(Event::Worker(id, Output::Closed));
                     ctx.request_repaint();
                 })
             {
@@ -304,6 +334,16 @@ impl Job {
             }
         }
         Ok((Self::new(id, action, child, log), path))
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        // A window can close immediately after stop(). Reap the killed child
+        // here as well as in finished(), which may never run for that window.
+        if self.cancelled {
+            let _ = self.child.wait();
+        }
     }
 }
 

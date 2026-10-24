@@ -1,9 +1,4 @@
 use super::*;
-use std::{
-    net::{TcpListener, TcpStream},
-    thread,
-    time::Duration as StdDuration,
-};
 
 #[test]
 fn environment_policy_is_scheme_specific_and_invalid_config_does_not_bypass() {
@@ -150,120 +145,14 @@ fn windows_exceptions_honor_wildcards_scheme_port_and_local_names() {
     }
 }
 
-fn listener() -> TcpListener {
-    TcpListener::bind("127.0.0.1:0").unwrap()
-}
-
-fn accept(listener: TcpListener) -> TcpStream {
-    listener.set_nonblocking(true).unwrap();
-    let deadline = std::time::Instant::now() + StdDuration::from_secs(5);
-    let stream = loop {
-        match listener.accept() {
-            Ok((stream, _)) => break stream,
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    && std::time::Instant::now() < deadline =>
-            {
-                thread::sleep(StdDuration::from_millis(10));
-            }
-            Err(error) => panic!("proxy test accept failed: {error}"),
-        }
-    };
-    stream.set_nonblocking(false).unwrap();
-    stream
-        .set_read_timeout(Some(StdDuration::from_secs(5)))
-        .unwrap();
-    stream
-}
-
-#[test]
-fn fdr_connect_tunnel_preserves_opaque_bytes_and_buffered_reply() {
-    for port in [80, 443] {
-        let listener = listener();
-        let proxy = Proxy::new(&format!(
-            "http://user:pass@{}",
-            listener.local_addr().unwrap()
-        ))
-        .unwrap();
-        let server = thread::spawn(move || {
-            let mut stream = accept(listener);
-            let mut headers = Vec::new();
-            while !headers.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                stream.read_exact(&mut byte).unwrap();
-                headers.push(byte[0]);
-                assert!(headers.len() < 65536);
-            }
-            let headers = String::from_utf8(headers).unwrap();
-            assert!(headers.starts_with(&format!(
-                "CONNECT does-not-resolve.invalid:{port} HTTP/1.1\r\n"
-            )));
-            assert!(headers.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
-            stream
-                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n\x16\x03\x03\x00\x02")
-                .unwrap();
-            let mut bytes = [0; 5];
-            stream.read_exact(&mut bytes).unwrap();
-            assert_eq!(bytes, [0x16, 3, 1, 0, 0]);
-        });
-        let mut tunnel = connect_via(
-            &target_uri("does-not-resolve.invalid", port).unwrap(),
-            Some(proxy),
-        )
-        .unwrap();
-        let mut bytes = [0; 5];
-        tunnel.read_exact(&mut bytes).unwrap();
-        assert_eq!(bytes, [0x16, 3, 3, 0, 2]);
-        tunnel.write_all(&[0x16, 3, 1, 0, 0]).unwrap();
-        server.join().unwrap();
-    }
-}
-
-#[test]
-fn fdr_socks5h_tunnel_sends_hostname_without_local_dns() {
-    let listener = listener();
-    let proxy = Proxy::new(&format!("socks5h://{}", listener.local_addr().unwrap())).unwrap();
-    let server = thread::spawn(move || {
-        let mut stream = accept(listener);
-        let mut greeting = [0; 3];
-        stream.read_exact(&mut greeting).unwrap();
-        assert_eq!(greeting, [5, 1, 0]);
-        stream.write_all(&[5, 0]).unwrap();
-        let mut request = [0; 5];
-        stream.read_exact(&mut request).unwrap();
-        assert_eq!(&request[..4], &[5, 1, 0, 3]);
-        let mut host = vec![0; request[4] as usize];
-        stream.read_exact(&mut host).unwrap();
-        assert_eq!(host, b"does-not-resolve.invalid");
-        let mut port = [0; 2];
-        stream.read_exact(&mut port).unwrap();
-        assert_eq!(u16::from_be_bytes(port), 443);
-        stream.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).unwrap();
-        let mut data = [0; 3];
-        stream.read_exact(&mut data).unwrap();
-        assert_eq!(data, *b"FDR");
-        stream.write_all(b"ACK").unwrap();
-    });
-    let mut tunnel = connect_via(
-        &"https://does-not-resolve.invalid/".parse().unwrap(),
-        Some(proxy),
-    )
-    .unwrap();
-    tunnel.write_all(b"FDR").unwrap();
-    let mut reply = [0; 3];
-    tunnel.read_exact(&mut reply).unwrap();
-    assert_eq!(reply, *b"ACK");
-    server.join().unwrap();
-}
-
 #[test]
 fn fdr_direct_connection_retains_short_read_timeout() {
-    let listener = listener();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let uri = format!("https://{}/", listener.local_addr().unwrap())
         .parse()
         .unwrap();
     let mut tunnel = connect_via(&uri, None).unwrap();
-    let mut stream = accept(listener);
+    let (mut stream, _) = listener.accept().unwrap();
     let mut byte = [0];
     assert_eq!(
         tunnel.read(&mut byte).unwrap_err().kind(),

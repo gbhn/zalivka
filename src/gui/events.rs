@@ -1,6 +1,6 @@
 //! Apply background events and finish jobs only after their logs are drained.
 use super::theme::Tone;
-use super::worker::Job;
+use super::worker::{Job, Output};
 use super::{App, Event, Notice, Picker, SCAN_INTERVAL, worker};
 use eframe::egui;
 use std::time::Instant;
@@ -27,22 +27,16 @@ impl App {
                         }
                     }
                 }
-                Event::Line(id, line) if self.job.as_ref().is_some_and(|j| j.id == id) => {
-                    self.log(line)
-                }
-                Event::Worker(id, event) if self.job.as_ref().is_some_and(|job| job.id == id) => {
-                    if matches!(event, progress::Event::RebootRequired) {
+                Event::Worker(id, output) => {
+                    let Some(job) = &mut self.job else { continue };
+                    if job.id != id {
+                        continue;
+                    }
+                    if matches!(&output, Output::State(progress::Event::RebootRequired)) {
                         self.windows_reboot_required = true;
                     }
-                    if let Some(line) = self.job.as_mut().and_then(|job| job.worker_event(event)) {
+                    if let Some(line) = job.output(output) {
                         self.journal_line(line);
-                    }
-                }
-                Event::ReaderDone(id) => {
-                    if let Some(j) = &mut self.job
-                        && j.id == id
-                    {
-                        j.readers = j.readers.saturating_sub(1);
                     }
                 }
                 Event::Picked(picker, path) => {
@@ -79,7 +73,6 @@ impl App {
                     });
                 }
                 Event::Saved(Err(e)) => self.error("Журнал не сохранён", e),
-                _ => {}
             }
         }
         let success = match self.job.as_mut().map(Job::finished) {
@@ -97,15 +90,5 @@ impl App {
         }
         self.notice = Some(notice);
         self.last_scan = Instant::now() - SCAN_INTERVAL;
-    }
-}
-
-impl Event {
-    pub(super) fn worker_output(id: u64, line: String, state_events: bool) -> Self {
-        if state_events && let Some(event) = progress::Event::parse(&line) {
-            Self::Worker(id, event)
-        } else {
-            Self::Line(id, line)
-        }
     }
 }
