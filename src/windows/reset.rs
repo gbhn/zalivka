@@ -1,5 +1,6 @@
 //! The WinUSB API has no device reset. Ask the *parent hub* to cycle just this port.
 //! https://learn.microsoft.com/windows-hardware/drivers/ddi/usbioctl/ni-usbioctl-ioctl_usb_hub_cycle_port
+use super::Ioctl;
 use anyhow::{Context, Result, ensure};
 use std::{
     ffi::c_void,
@@ -10,7 +11,7 @@ use windows_sys::Win32::{
     Devices::Usb::{GUID_DEVINTERFACE_USB_HUB, IOCTL_USB_HUB_CYCLE_PORT, USB_CYCLE_PORT_PARAMS},
     Foundation::{GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE},
     Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
-    System::IO::{DeviceIoControl, OVERLAPPED},
+    System::IO::DeviceIoControl,
 };
 
 fn parent_hub(device: &nusb::DeviceInfo) -> Result<OwnedHandle> {
@@ -61,18 +62,6 @@ pub fn cycle_port(device: &nusb::DeviceInfo) -> Result<()> {
         DeviceIoControl,
     )
 }
-
-// Keep the actual FFI call testable without power-cycling a real USB port.
-type Ioctl = unsafe extern "system" fn(
-    HANDLE,
-    u32,
-    *const c_void,
-    u32,
-    *mut c_void,
-    u32,
-    *mut u32,
-    *mut OVERLAPPED,
-) -> i32;
 
 fn cycle_port_request(handle: HANDLE, port: u32, ioctl: Ioctl) -> Result<()> {
     ensure!(port != 0, "Windows returned an invalid USB port number");

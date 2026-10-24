@@ -29,7 +29,10 @@ pub fn parse(data: &[u8]) -> Result<(Der<'_>, &[u8])> {
     ensure!(data.len() >= 2, "truncated DER header");
     let mut tag_end = 1;
     if data[0] & 31 == 31 {
-        ensure!(data[1] & 0x7f != 0, "noncanonical high DER tag");
+        ensure!(
+            data[1] & 0x7f != 0 && data[1] >= 31,
+            "noncanonical high DER tag"
+        );
         loop {
             ensure!(tag_end < data.len() && tag_end <= 5, "invalid high DER tag");
             let b = data[tag_end];

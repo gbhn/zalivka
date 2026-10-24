@@ -1,7 +1,7 @@
 //! Windows APIs used by USB transport, proxy discovery and host preparation.
 use anyhow::{Result, bail, ensure};
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::{OsStr, OsString, c_void},
     os::windows::ffi::{OsStrExt, OsStringExt},
     path::PathBuf,
     ptr,
@@ -12,8 +12,21 @@ use windows_sys::{
         CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CM_Get_Device_Interface_List_SizeW,
         CM_Get_Device_Interface_ListW, CR_BUFFER_SMALL, CR_SUCCESS,
     },
+    Win32::{Foundation::HANDLE, System::IO::OVERLAPPED},
     core::GUID,
 };
+
+// Shared signature for the testable DeviceIoControl calls in both USB backends.
+type Ioctl = unsafe extern "system" fn(
+    HANDLE,
+    u32,
+    *const c_void,
+    u32,
+    *mut c_void,
+    u32,
+    *mut u32,
+    *mut OVERLAPPED,
+) -> i32;
 
 pub(crate) mod apple;
 pub(crate) mod ncm;

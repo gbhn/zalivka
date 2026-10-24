@@ -316,3 +316,20 @@ fn wkms_forwards_opaque_wrapped_key_and_rejects_http_errors_and_empty_keys() {
         assert_eq!(wire::dictionary(&reply).unwrap().len(), 2);
     }
 }
+
+#[test]
+fn wkms_key_reply_does_not_decode_unused_http_headers() {
+    let response = Response::builder()
+        .header(
+            "x-opaque",
+            ureq::http::HeaderValue::from_bytes(&[0xff]).unwrap(),
+        )
+        .body(ureq::Body::builder().data(b"opaque-wrapped-key"))
+        .unwrap();
+    let reply = asset_reply(response, true).unwrap();
+    assert_eq!(wire::string(&reply, &["KeySource"]).unwrap(), "Remote");
+    assert_eq!(
+        wire::get(&reply, &["KeyData"]).unwrap().as_data().unwrap(),
+        b"opaque-wrapped-key"
+    );
+}

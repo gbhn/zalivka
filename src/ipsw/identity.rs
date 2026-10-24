@@ -1,5 +1,5 @@
 //! Manifest identities and selection of erase, upgrade and recoveryOS variants.
-use super::Ipsw;
+use super::{Ipsw, component_path};
 use crate::{device::DeviceInfo, wire};
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
@@ -51,7 +51,8 @@ impl Identity {
         wire::get(&self.value, &["Info", key])
     }
     pub fn path(&self, name: &str) -> Result<&str> {
-        wire::string(&self.value, &["Manifest", name, "Info", "Path"])
+        component_path(wire::get(&self.value, &["Manifest", name])?)?
+            .with_context(|| format!("missing component path {name}"))
     }
     pub fn has(&self, name: &str) -> bool {
         self.path(name).is_ok()

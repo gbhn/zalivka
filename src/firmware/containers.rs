@@ -115,8 +115,9 @@ fn payload_ranges_inner(
     }
     // RT15 UARP v3 wraps an FTAB in its FIRM payload. Its manifest digests
     // describe rkos/cphy entries inside that table, plus the separate RRKO.
-    let outer = ranges.clone();
-    for (index, range) in outer.into_iter().enumerate() {
+    let outer_count = ranges.len();
+    for index in 0..outer_count {
+        let range = ranges[index].clone();
         // Centauri's 2ftb is a layout index for device memory, not a nested
         // on-disk container: its offsets intentionally exceed its own size.
         // Keep its byte range hashable without interpreting those offsets.

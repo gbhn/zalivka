@@ -1,4 +1,6 @@
 use super::*;
+use std::ffi::c_void;
+use windows_sys::Win32::Foundation::HANDLE;
 
 unsafe extern "system" fn read_pipe(
     handle: HANDLE,

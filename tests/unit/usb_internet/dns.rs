@@ -80,3 +80,22 @@ fn tcp_dns_handles_partial_and_pipelined_queries_and_half_close() {
         Some("x.invalid")
     );
 }
+
+#[test]
+fn empty_tcp_reads_succeed_without_consuming_pending_dns_replies() {
+    let mut tcp = Tcp::new(Arc::new(Mutex::new(Resolver::default())));
+    assert_eq!(tcp.read(&mut []).unwrap(), 0);
+    assert_eq!(
+        tcp.read(&mut [0]).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    let q = query("x.invalid", 1);
+    tcp.write_all(&(q.len() as u16).to_be_bytes()).unwrap();
+    tcp.write_all(&q).unwrap();
+    assert_eq!(tcp.read(&mut []).unwrap(), 0);
+    tcp.shutdown_write();
+    let mut reply = Vec::new();
+    tcp.read_to_end(&mut reply).unwrap();
+    assert!(!reply.is_empty());
+    assert_eq!(tcp.read(&mut []).unwrap(), 0);
+}

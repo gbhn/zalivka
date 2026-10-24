@@ -16,6 +16,19 @@ use zip::ZipArchive;
 
 pub const MAX_COMPONENT: u64 = 1024 * 1024 * 1024;
 
+/// Signing-only entries may omit a path; present metadata must still be valid.
+fn component_path(entry: &Value) -> Result<Option<&str>> {
+    let Some(info) = wire::dictionary(entry)?.get("Info") else {
+        return Ok(None);
+    };
+    let Some(path) = wire::dictionary(info)?.get("Path") else {
+        return Ok(None);
+    };
+    let path = path.as_string().context("invalid component path")?;
+    validate_path(path)?;
+    Ok(Some(path))
+}
+
 pub struct Ipsw {
     path: PathBuf,
     archive: ZipArchive<BufReader<File>>,
@@ -199,36 +212,29 @@ impl Ipsw {
 
     pub fn preflight(&mut self, id: &Identity) -> Result<()> {
         self.preflight_paths(id)?;
+        id.path("OS")?;
         for name in [
             "iBSS",
             "iBEC",
             "RestoreRamDisk",
             "RestoreDeviceTree",
             "RestoreKernelCache",
-            "OS",
         ] {
-            let path = id.path(name)?;
-            ensure!(self.contains(path), "IPSW is missing {name}: {path}");
-            if name != "OS" {
-                self.component(id, name)?;
-            }
+            self.component(id, name)?;
         }
         Ok(())
     }
 
-    pub fn preflight_recovery(&mut self, id: &Identity) -> Result<()> {
-        let path = id.path("OS")?;
-        ensure!(self.contains(path), "IPSW is missing recoveryOS: {path}");
+    pub fn preflight_recovery(&self, id: &Identity) -> Result<()> {
+        id.path("OS")?;
         self.preflight_paths(id)
     }
 
-    fn preflight_paths(&mut self, id: &Identity) -> Result<()> {
+    fn preflight_paths(&self, id: &Identity) -> Result<()> {
         for (name, entry) in id.manifest()? {
-            if let Some(info) = wire::dictionary(entry)?.get("Info")
-                && let Some(path) = wire::dictionary(info)?.get("Path")
+            if let Some(path) = component_path(entry)
+                .with_context(|| format!("invalid manifest component {name}"))?
             {
-                let path = path.as_string().context("invalid component path")?;
-                validate_path(path)?;
                 ensure!(self.contains(path), "IPSW is missing {name}: {path}");
             }
         }

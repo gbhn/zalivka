@@ -243,14 +243,13 @@ pub fn export(directory: &Path, pid: u16, interface: Option<u8>) -> Result<()> {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 pub fn install(inf: &Path) -> Result<bool> {
-    use std::os::windows::ffi::OsStrExt;
     let inf = inf.canonicalize()?;
     ensure!(
         inf.extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("inf")),
         "expected a signed driver package's .inf file"
     );
-    let path: Vec<u16> = inf.as_os_str().encode_wide().chain(Some(0)).collect();
+    let path = crate::windows::wide(inf);
     let mut reboot = 0;
     // Use Windows' normal signature and driver ranking enforcement. No FORCE flag.
     let ok = unsafe {

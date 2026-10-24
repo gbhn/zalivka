@@ -1,6 +1,7 @@
 //! CDC-NCM 1.0 NTB16 framing. Lengths and offsets are untrusted USB input.
 use anyhow::{Result, ensure};
 const MAX_FRAME: usize = 16014;
+const MAX_DATAGRAMS: usize = 128;
 fn word(bytes: &[u8], at: usize) -> Result<usize> {
     ensure!(at + 2 <= bytes.len(), "truncated NCM word");
     Ok(u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize)
@@ -28,8 +29,8 @@ impl Parameters {
         let remainder = word(bytes, 22)?;
         let alignment = word(bytes, 24)?;
         let max_datagrams = match word(bytes, 26)? {
-            0 => 128,
-            limit => limit.min(128),
+            0 => MAX_DATAGRAMS,
+            limit => limit.min(MAX_DATAGRAMS),
         };
         ensure!(
             (2048..=65535).contains(&input_size) && (2048..=65535).contains(&output_size),
@@ -118,6 +119,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
             "invalid NCM block length"
         );
         let ntb = &ntb[..length];
+        let frame_start = frames.len();
         let mut table = word(ntb, 10)?;
         let mut seen = vec![];
         while table != 0 {
@@ -147,7 +149,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
                     start >= 12
                         && (14..=MAX_FRAME).contains(&count)
                         && start + count <= length
-                        && frames.len() < 128,
+                        && frames.len() - frame_start < MAX_DATAGRAMS,
                     "invalid NCM datagram bounds"
                 );
                 ensure!(

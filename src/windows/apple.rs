@@ -1,10 +1,10 @@
 //! AppleUsbFilter exposes its MUX1 interface through Apple IOCTLs, not WinUSB.
 //! Wire layouts were checked against AppleUsbFilter 538.0.0.0. No Apple code is linked.
+use super::Ioctl;
 use anyhow::{Context, Result, bail, ensure};
 use nusb::transfer::{ControlIn, ControlOut};
 use std::{
     cell::UnsafeCell,
-    ffi::c_void,
     io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     ptr,
@@ -22,7 +22,7 @@ use windows_sys::{
         },
         Foundation::{
             ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, GENERIC_READ,
-            GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            GENERIC_WRITE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -45,17 +45,6 @@ const CONTROL: u32 = 0x2200a0;
 const PIPE_INFO: u32 = 0x2200a4;
 const INTERFACE_INFO: u32 = 0x2200a8;
 const TIMEOUT: Duration = Duration::from_secs(10);
-
-type Ioctl = unsafe extern "system" fn(
-    HANDLE,
-    u32,
-    *const c_void,
-    u32,
-    *mut c_void,
-    u32,
-    *mut u32,
-    *mut OVERLAPPED,
-) -> i32;
 
 pub(crate) struct AppleUsb {
     handle: OwnedHandle,

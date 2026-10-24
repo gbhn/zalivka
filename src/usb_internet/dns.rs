@@ -152,6 +152,9 @@ impl Tcp {
 }
 impl Read for Tcp {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
         if self.output.is_empty() && !self.closed {
             return Err(io::ErrorKind::WouldBlock.into());
         }

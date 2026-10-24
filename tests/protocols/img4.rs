@@ -15,8 +15,13 @@ fn der_roundtrip_and_reject_truncated_or_noncanonical_values() {
         &[4, 0x82, 0, 128],
         &[4, 4, 0],
         &[0xff, 0x80, 0],
+        &[0x1f, 0x1e, 0],
+        &[0xff, 0x01, 0],
     ] {
         assert!(img4::parse(bad).is_err(), "{bad:?}");
+    }
+    for valid in [&[0x1f, 0x1f, 0][..], &[0xff, 0x81, 0x00, 0]] {
+        assert!(img4::parse(valid).is_ok(), "{valid:?}");
     }
 }
 

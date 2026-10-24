@@ -1,4 +1,30 @@
 use super::*;
+
+#[test]
+fn concatenated_blocks_apply_the_datagram_limit_to_each_block() {
+    let params = Parameters {
+        input_size: 32768,
+        output_size: 32768,
+        divisor: 4,
+        remainder: 0,
+        alignment: 4,
+        max_datagrams: 128,
+    };
+    let frames = vec![vec![0x5a; 60]; 128];
+    let (mut bytes, count) = params.encode(&frames, 0).unwrap();
+    assert_eq!(count, frames.len());
+    bytes.extend(params.encode(&frames, 1).unwrap().0);
+    assert_eq!(decode(&bytes).unwrap(), [frames.clone(), frames].concat());
+
+    let oversized = Parameters {
+        max_datagrams: 129,
+        ..params
+    };
+    let (bytes, count) = oversized.encode(&vec![vec![0x5a; 60]; 129], 0).unwrap();
+    assert_eq!(count, 129);
+    assert!(decode(&bytes).is_err());
+}
+
 #[test]
 fn parses_the_macs_datagram_limit_including_unspecified_zero() {
     let mut bytes = vec![

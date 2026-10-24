@@ -1,5 +1,6 @@
 use super::*;
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, SetLastError};
+use windows_sys::Win32::System::IO::OVERLAPPED;
 
 unsafe extern "system" fn cycle_ok(
     handle: HANDLE,

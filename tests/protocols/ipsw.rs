@@ -2,6 +2,37 @@ use super::*;
 use zalivka::ipsw::Behavior;
 
 #[test]
+fn manifest_paths_are_checked_consistently_before_restore_and_full_verification() {
+    for entry in [
+        false.into(),
+        wire::dict([("Info", false.into())]),
+        wire::dict([("Info", wire::dict([("Path", false.into())]))]),
+        wire::dict([("Info", wire::dict([("Path", "../OS".into())]))]),
+        wire::dict([("Info", wire::dict([("Path", "Firmware/missing".into())]))]),
+    ] {
+        let mut id = identity();
+        manifest_mut(&mut id).insert("Extra".into(), entry.clone());
+        let file = fixture(Some(id.clone()), false);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        assert!(ipsw.preflight(&id).is_err(), "{entry:?}");
+        assert!(ipsw.preflight_recovery(&id).is_err(), "{entry:?}");
+        assert!(ipsw.verify_all().is_err(), "{entry:?}");
+    }
+    for entry in [
+        wire::dict([("Trusted", true.into())]),
+        wire::dict([("Info", wire::dict([("IsFTAB", true.into())]))]),
+    ] {
+        let mut id = identity();
+        manifest_mut(&mut id).insert("SigningMetadata".into(), entry);
+        let file = fixture(Some(id.clone()), false);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        ipsw.preflight(&id).unwrap();
+        ipsw.preflight_recovery(&id).unwrap();
+        ipsw.verify_all().unwrap();
+    }
+}
+
+#[test]
 fn oversized_components_are_rejected_from_zip_metadata_before_reading() {
     let file = fixture(None, false);
     let mut bytes = std::fs::read(file.path()).unwrap();

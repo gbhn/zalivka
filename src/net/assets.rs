@@ -136,13 +136,6 @@ pub(super) fn asset_reply(mut response: Response<ureq::Body>, wrapped_key: bool)
         !wrapped_key || response.status().is_success(),
         "Apple WKMS key request returned HTTP {status}"
     );
-    let headers = Value::Dictionary(
-        response
-            .headers()
-            .iter()
-            .map(|(k, v)| Ok((k.to_string(), Value::String(v.to_str()?.to_owned()))))
-            .collect::<Result<plist::Dictionary>>()?,
-    );
     let body = crate::storage::read_limited(
         response.body_mut().as_reader(),
         32 * 1024 * 1024,
@@ -163,6 +156,13 @@ pub(super) fn asset_reply(mut response: Response<ureq::Body>, wrapped_key: bool)
             ("KeySource", "Remote".into()),
         ]));
     }
+    let headers = Value::Dictionary(
+        response
+            .headers()
+            .iter()
+            .map(|(k, v)| Ok((k.to_string(), Value::String(v.to_str()?.to_owned()))))
+            .collect::<Result<plist::Dictionary>>()?,
+    );
     Ok(wire::dict([
         ("ResponseBody", Value::Data(body)),
         ("ResponseBodyDone", true.into()),

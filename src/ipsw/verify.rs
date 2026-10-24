@@ -1,5 +1,5 @@
 //! Bounded archive and component digest verification, including container ranges.
-use super::{Ipsw, validate_path};
+use super::{Ipsw, component_path};
 use crate::{checksum::hasher, firmware, img4, wire};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
@@ -101,10 +101,11 @@ impl Ipsw {
         let mut tcon_paths = HashSet::new();
         for (_, value) in self.identity_values() {
             for (name, entry) in wire::dictionary(wire::get(value, &["Manifest"])?)? {
-                let Ok(path) = wire::string(entry, &["Info", "Path"]) else {
+                let Some(path) = component_path(entry)
+                    .with_context(|| format!("invalid manifest component {name}"))?
+                else {
                     continue;
                 };
-                validate_path(path)?;
                 if name == "Baobab,TCON" {
                     tcon_paths.insert(path.to_owned());
                 }
