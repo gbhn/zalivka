@@ -150,6 +150,44 @@ fn component_rules_use_device_parameters_independently_of_manifest_order() {
 }
 
 #[test]
+fn local_policy_volume_uuid_preserves_byte_order_and_rejects_misplaced_hyphens() {
+    for (valid, uuid) in [
+        (true, "00112233-4455-6677-8899-aabbccddeeff"),
+        (true, "00112233-4455-6677-8899-AABBCCDDEEFF"),
+        (true, "00112233445566778899aabbccddeeff"),
+        (false, "-00112233445566778899aabbccddeeff"),
+        (false, "00112233445566778899aabbccddeeff-"),
+        (false, "0011223344556677-8899aabbccddeeff"),
+        (false, "00112233--4455-6677-8899-aabbccddeeff"),
+        (false, "00112233-4455-6677-8899-aabbccddeezz"),
+        (false, "00112233-4455-6677-8899-aabbccddee"),
+    ] {
+        let args = wire::dict([
+            ("Ap,NextStageIM4MHash", Value::Data(vec![5; 48])),
+            ("Ap,RecoveryOSPolicyNonceHash", Value::Data(vec![6; 48])),
+            ("Ap,VolumeUUID", uuid.into()),
+        ]);
+        let policy = tss::local_policy_request(&device_info(), &ticket(), Some(&args));
+        if valid {
+            let policy = policy.unwrap();
+            assert_eq!(
+                wire::get(&policy, &["Ap,VolumeUUID"])
+                    .unwrap()
+                    .as_data()
+                    .unwrap(),
+                &[
+                    0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+                    0xdd, 0xee, 0xff
+                ],
+                "{uuid}"
+            );
+        } else {
+            assert!(policy.is_err(), "accepted {uuid:?}");
+        }
+    }
+}
+
+#[test]
 fn local_policy_omits_firmware_metadata_without_changing_firmware_requests() {
     let mut id = identity();
     let metadata = [

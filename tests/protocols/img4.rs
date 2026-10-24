@@ -17,11 +17,31 @@ fn der_roundtrip_and_reject_truncated_or_noncanonical_values() {
         &[0xff, 0x80, 0],
         &[0x1f, 0x1e, 0],
         &[0xff, 0x01, 0],
+        &[0xff, 0x80, 0x81, 0, 0],
+        &[0xff, 0x90, 0x80, 0x80, 0x80, 0, 0], // Tag overflows u32.
+        &[4, 0x89, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ] {
         assert!(img4::parse(bad).is_err(), "{bad:?}");
     }
     for valid in [&[0x1f, 0x1f, 0][..], &[0xff, 0x81, 0x00, 0]] {
         assert!(img4::parse(valid).is_ok(), "{valid:?}");
+    }
+}
+
+#[test]
+fn der_length_headers_match_wire_fixtures() {
+    for (length, header) in [
+        (0, &b"\x04\x00"[..]),
+        (127, b"\x04\x7f"),
+        (128, b"\x04\x81\x80"),
+        (255, b"\x04\x81\xff"),
+        (256, b"\x04\x82\x01\x00"),
+        (65535, b"\x04\x82\xff\xff"),
+        (65536, b"\x04\x83\x01\x00\x00"),
+    ] {
+        let encoded = img4::element(4, &vec![0xab; length]);
+        assert_eq!(&encoded[..header.len()], header, "length {length}");
+        assert_eq!(encoded.len(), header.len() + length);
     }
 }
 
@@ -57,6 +77,12 @@ fn im4p_prefix_uses_canonical_headers_and_stays_inside_the_declared_sequence() {
     let prefix = [vec![0x30, 0x84, 0x40, 0, 0, 0], fields[..12].to_vec()].concat();
     assert_eq!(img4::type_offset(&prefix), Some(14));
     assert!(img4::parse(&prefix).is_err());
+    // Header-only inspection must also support images larger than 4 GiB.
+    if usize::BITS > 32 {
+        let prefix = [vec![0x30, 0x85, 1, 0, 0, 0, 0], fields[..12].to_vec()].concat();
+        assert_eq!(img4::type_offset(&prefix), Some(15));
+        assert!(img4::parse(&prefix).is_err());
+    }
 }
 
 #[test]
@@ -126,6 +152,49 @@ fn img4_metadata_matches_the_existing_envelope_at_der_length_boundaries() {
                 img4::element(0x30, &expected),
                 "size {size}, IM4R {metadata}"
             );
+        }
+    }
+}
+
+#[test]
+fn nonce_slots_use_positive_der_integers_and_apple_private_tags() {
+    for (slot, integer) in [
+        (0, &b"\x02\x01\x00"[..]),
+        (127, b"\x02\x01\x7f"),
+        (128, b"\x02\x02\x00\x80"),
+        (255, b"\x02\x02\x00\xff"),
+        (256, b"\x02\x02\x01\x00"),
+        (u64::MAX, b"\x02\x09\x00\xff\xff\xff\xff\xff\xff\xff\xff"),
+    ] {
+        let identity = wire::dict([(
+            "Info",
+            wire::dict([
+                ("RequiresNonceSlot", true.into()),
+                ("SepNonceSlotID", slot.into()),
+                ("ApNonceSlotID", slot.into()),
+            ]),
+        )]);
+        for (component, tag, name) in [
+            ("SEP", b"\xff\x87\x9b\xb9\xd2\x64", b"snid"),
+            ("SepStage1", b"\xff\x87\x9b\xb9\xd2\x64", b"snid"),
+            ("LLB", b"\xff\x86\x8b\xb9\xd2\x64", b"anid"),
+        ] {
+            let info =
+                img4::restore_info(&wire::dict([] as [(&str, Value); 0]), component, &identity)
+                    .unwrap()
+                    .unwrap();
+            let (outer, _) = img4::parse(&info).unwrap();
+            let (sequence, _) = img4::parse(outer.content).unwrap();
+            let (_, fields) = img4::parse(sequence.content).unwrap();
+            let (set, _) = img4::parse(fields).unwrap();
+            let (property, rest) = img4::parse(set.content).unwrap();
+            assert!(rest.is_empty());
+            assert_eq!(&property.encoded[..6], tag);
+            let (sequence, rest) = img4::parse(property.content).unwrap();
+            assert!(rest.is_empty());
+            let (actual_name, actual_integer) = img4::parse(sequence.content).unwrap();
+            assert_eq!(actual_name.content, name);
+            assert_eq!(actual_integer, integer, "{component}, slot {slot}");
         }
     }
 }

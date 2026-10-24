@@ -263,10 +263,12 @@ pub fn local_policy_request(
         for key in ["Ap,NextStageIM4MHash", "Ap,RecoveryOSPolicyNonceHash"] {
             d.insert(key.into(), wire::get(args, &[key])?.clone());
         }
-        let uuid = wire::string(args, &["Ap,VolumeUUID"])?;
-        let bytes = crate::device::decode_hex(&uuid.replace('-', ""))?;
-        ensure!(bytes.len() == 16, "invalid local policy volume UUID");
-        d.insert("Ap,VolumeUUID".into(), Value::Data(bytes));
+        let uuid = uuid::Uuid::parse_str(wire::string(args, &["Ap,VolumeUUID"])?)
+            .context("invalid local policy volume UUID")?;
+        d.insert(
+            "Ap,VolumeUUID".into(),
+            Value::Data(uuid.as_bytes().to_vec()),
+        );
     }
     Ok(Value::Dictionary(d))
 }

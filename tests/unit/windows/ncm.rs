@@ -185,11 +185,20 @@ fn interface_guid_roundtrip_and_invalid_values() {
         install::guid_string(parse_guid(GUID_TEXT).unwrap()),
         GUID_TEXT
     );
+    let guid = parse_guid(&GUID_TEXT.to_ascii_lowercase()).unwrap();
+    assert_eq!(guid.data1, 0x6e36578f);
+    assert_eq!(guid.data2, 0x6547);
+    assert_eq!(guid.data3, 0x4ba7);
+    assert_eq!(guid.data4, [0x97, 0xde, 0x25, 0xd5, 0x89, 0x2f, 0x14, 0x0e]);
+    assert_eq!(install::guid_string(guid), GUID_TEXT);
     for invalid in [
         "",
         "{bad}",
         "6E36578F-6547-4BA7-97DE-25D5892F140E",
         "{6E36578F_6547_4BA7_97DE_25D5892F140E}",
+        "{6E36578F-6547-4BA7-97DE-25D5892F140G}",
+        "{6E36578F6547-4BA7-97DE-25D5892F140E-}",
+        "{6E36578F-6547-4BA7-97DE-25D5892F140E}\0",
     ] {
         assert!(parse_guid(invalid).is_err());
     }

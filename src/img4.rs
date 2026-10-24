@@ -1,36 +1,30 @@
-//! Small, bounded DER codec for Apple's IM4P / IMG4 containers.
+//! Apple's IM4P / IMG4 envelopes, using ASN.1 headers without copying image bodies.
 use anyhow::{Context, Result, ensure};
+use asn1_rs::{Class, FromDer, Header, Length, Tag, ToDer};
 use std::ops::Range;
 
 pub fn element(tag: u8, data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + length_size(data.len()) + data.len());
-    append_header(&mut out, tag, data.len());
+    let mut out = encoded_header(header(tag, data.len()));
+    out.reserve(data.len());
     out.extend_from_slice(data);
     out
 }
 
-fn length_size(length: usize) -> usize {
-    if length < 128 {
-        1
-    } else {
-        1 + (usize::BITS - length.leading_zeros()).div_ceil(8) as usize
-    }
+fn header(tag: u8, length: usize) -> Header<'static> {
+    Header::new(
+        Class::try_from(tag >> 6).expect("two-bit ASN.1 class"),
+        tag & 0x20 != 0,
+        Tag(u32::from(tag & 0x1f)),
+        Length::Definite(length),
+    )
 }
 
-fn append_header(out: &mut Vec<u8>, tag: u8, length: usize) {
-    out.push(tag);
-    append_length(out, length);
-}
-
-fn append_length(out: &mut Vec<u8>, length: usize) {
-    if length < 128 {
-        out.push(length as u8);
-    } else {
-        let bytes = length.to_be_bytes();
-        let first = bytes.len() - (length_size(length) - 1);
-        out.push(0x80 | (bytes.len() - first) as u8);
-        out.extend_from_slice(&bytes[first..]);
-    }
+fn encoded_header(header: Header<'_>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    header
+        .write_der_header(&mut out)
+        .expect("encoding an ASN.1 header into memory");
+    out
 }
 
 #[derive(Debug)]
@@ -55,45 +49,15 @@ pub fn parse(data: &[u8]) -> Result<(Der<'_>, &[u8])> {
 
 /// Parse the complete header even when only a prefix of the body is available.
 fn content_range(data: &[u8]) -> Result<Range<usize>> {
-    ensure!(data.len() >= 2, "truncated DER header");
-    let mut tag_end = 1;
-    if data[0] & 31 == 31 {
-        ensure!(
-            data[1] & 0x7f != 0 && data[1] >= 31,
-            "noncanonical high DER tag"
-        );
-        loop {
-            ensure!(tag_end < data.len() && tag_end <= 5, "invalid high DER tag");
-            let b = data[tag_end];
-            tag_end += 1;
-            if b & 0x80 == 0 {
-                break;
-            }
-        }
-    }
-    ensure!(tag_end < data.len(), "missing DER length");
-    let mut start = tag_end + 1;
-    let length = if data[tag_end] < 128 {
-        data[tag_end] as usize
-    } else {
-        let n = usize::from(data[tag_end] & 0x7f);
-        ensure!(
-            n != 0 && n <= size_of::<usize>() && data.len() >= start + n,
-            "invalid DER length"
-        );
-        ensure!(data[start] != 0, "noncanonical DER length");
-        let length_start = start;
-        start += n;
-        let mut value = 0usize;
-        for b in &data[length_start..start] {
-            value = value
-                .checked_mul(256)
-                .and_then(|v| v.checked_add(*b as usize))
-                .ok_or_else(|| anyhow::anyhow!("DER length overflow"))?;
-        }
-        ensure!(value >= 128, "noncanonical DER long length");
-        value
-    };
+    let (rest, header) =
+        Header::from_der(data).map_err(|error| anyhow::anyhow!("invalid DER header: {error}"))?;
+    let start = data.len() - rest.len();
+    let length = header.length().definite()?;
+    // Header parsing also accepts some BER spellings. Re-encoding enforces
+    // minimal tag and length encodings without a second handwritten parser.
+    let mut encoded = [0; 16]; // u32 tag + usize length, including their prefixes.
+    let size = header.write_der_header(&mut encoded.as_mut_slice())?;
+    ensure!(data[..start] == encoded[..size], "noncanonical DER header");
     let end = start.checked_add(length).context("DER length overflow")?;
     Ok(start..end)
 }
@@ -133,11 +97,11 @@ fn personalized_image(
         "TSS ticket is not IM4M"
     );
     let tag = restore_tag(component).unwrap_or(payload[kind.clone()].try_into()?);
+    let manifest_header = encoded_header(header(0xa0, ticket.len()));
     let length = [
         6,
         payload.len(),
-        1,
-        length_size(ticket.len()),
+        manifest_header.len(),
         ticket.len(),
         metadata.len(),
     ]
@@ -146,13 +110,14 @@ fn personalized_image(
     .context("IMG4 length overflow")?;
     // Allocate the final envelope once. The firmware body is copied directly
     // from the input, with only its four type bytes replaced.
-    let mut image = Vec::with_capacity(1 + length_size(length) + length);
-    append_header(&mut image, 0x30, length);
+    let image_header = encoded_header(header(0x30, length));
+    let mut image = Vec::with_capacity(image_header.len() + length);
+    image.extend_from_slice(&image_header);
     image.extend_from_slice(b"\x16\x04IMG4");
     image.extend_from_slice(&payload[..kind.start]);
     image.extend_from_slice(&tag);
     image.extend_from_slice(&payload[kind.end..]);
-    append_header(&mut image, 0xa0, ticket.len());
+    image.extend_from_slice(&manifest_header);
     image.extend_from_slice(ticket);
     image.extend_from_slice(metadata);
     Ok(image)
@@ -162,16 +127,12 @@ fn private_property(name: &[u8; 4], value: &[u8]) -> Vec<u8> {
     let mut fields = element(0x16, name);
     fields.extend_from_slice(value);
     let sequence = element(0x30, &fields);
-    let mut tag = u32::from_be_bytes(*name);
-    let mut digits = vec![(tag & 0x7f) as u8];
-    tag >>= 7;
-    while tag != 0 {
-        digits.push((tag & 0x7f) as u8 | 0x80);
-        tag >>= 7;
-    }
-    let mut encoded = vec![0xff];
-    encoded.extend(digits.into_iter().rev());
-    append_length(&mut encoded, sequence.len());
+    let mut encoded = encoded_header(Header::new(
+        Class::Private,
+        true,
+        Tag(u32::from_be_bytes(*name)),
+        Length::Definite(sequence.len()),
+    ));
     encoded.extend_from_slice(&sequence);
     encoded
 }
@@ -196,16 +157,7 @@ pub fn restore_info(
             .map(wire::number)
             .transpose()?
             .unwrap_or(default);
-        let bytes = slot.to_be_bytes();
-        let start = bytes
-            .iter()
-            .position(|b| *b != 0)
-            .unwrap_or(bytes.len() - 1);
-        let mut integer = bytes[start..].to_vec();
-        if integer[0] & 0x80 != 0 {
-            integer.insert(0, 0);
-        }
-        properties.extend(private_property(tag, &element(2, &integer)));
+        properties.extend(private_property(tag, &slot.to_der_vec()?));
     }
     if let Ok(tbm) = wire::get(tss, &[&format!("{component}-TBM")]) {
         for name in [b"ucon", b"ucer"] {

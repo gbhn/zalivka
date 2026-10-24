@@ -77,15 +77,8 @@ fn parse_guid(text: &str) -> Result<GUID> {
         text.len() == 38 && text.starts_with('{') && text.ends_with('}'),
         "invalid interface GUID"
     );
-    ensure!(
-        [9, 14, 19, 24]
-            .into_iter()
-            .all(|i| text.as_bytes()[i] == b'-'),
-        "invalid interface GUID"
-    );
-    let hex: String = text.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    ensure!(hex.len() == 32, "invalid interface GUID");
-    Ok(GUID::from_u128(u128::from_str_radix(&hex, 16)?))
+    let uuid = uuid::Uuid::parse_str(text).context("invalid interface GUID")?;
+    Ok(GUID::from_u128(uuid.as_u128()))
 }
 
 fn interface_guids(ty: u32, bytes: &[u8]) -> Vec<GUID> {

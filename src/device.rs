@@ -84,18 +84,11 @@ fn field<'a>(s: &'a str, key: &str) -> Option<&'a str> {
 }
 
 pub fn decode_hex(s: &str) -> Result<Vec<u8>> {
-    ensure!(
-        s.len().is_multiple_of(2) && s.bytes().all(|b| b.is_ascii_hexdigit()),
-        "expected an even number of hexadecimal digits"
-    );
-    s.as_bytes()
-        .chunks_exact(2)
-        .map(|c| Ok(u8::from_str_radix(std::str::from_utf8(c)?, 16)?))
-        .collect()
+    hex::decode(s).context("expected an even number of hexadecimal digits")
 }
 
 pub fn encode_hex(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{b:02x}")).collect()
+    hex::encode(data)
 }
 
 pub fn parse_ecid(s: &str) -> std::result::Result<u64, String> {
