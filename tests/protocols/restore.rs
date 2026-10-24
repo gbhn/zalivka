@@ -1571,7 +1571,7 @@ fn diagnostic_query_uses_the_existing_stream_and_does_not_start_a_restore() {
         wire::dict([
             ("Request", "QueryValue".into()),
             ("QueryKey", "HardwareInfo".into()),
-            ("Label", "zalivka-diagnostics".into()),
+            ("Label", "zalivka".into()),
         ])
     );
     assert_eq!(request.position(), request.get_ref().len() as u64);

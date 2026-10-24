@@ -195,63 +195,7 @@ impl Router {
                         destination: ip.dst_addr(),
                         destination_port: packet.dst_port(),
                     };
-                    if !self.tcp.contains_key(&key)
-                        && self.tcp.len() < MAX_FLOWS
-                        && (key.destination_port == 53 || permitted(key.destination))
-                    {
-                        let mut socket = tcp::Socket::new(
-                            tcp::SocketBuffer::new(vec![0; BUFFER]),
-                            tcp::SocketBuffer::new(vec![0; BUFFER]),
-                        );
-                        socket.set_timeout(Some(smoltcp::time::Duration::from_secs(120)));
-                        socket
-                            .listen(IpEndpoint::new(
-                                key.destination.into(),
-                                key.destination_port,
-                            ))
-                            .unwrap();
-                        let handle = self.sockets.add(socket);
-                        let connection = if key.destination_port == 53 {
-                            Some((None, Some(Stream::Dns(dns::Tcp::new(self.dns.clone())))))
-                        } else {
-                            let host = self
-                                .dns
-                                .lock()
-                                .unwrap()
-                                .host(key.destination)
-                                .map(str::to_owned);
-                            if dns::synthetic(key.destination) && host.is_none() {
-                                self.sockets.remove(handle);
-                                return;
-                            }
-                            let host = host.unwrap_or_else(|| key.destination.to_string());
-                            let (tx, rx) = mpsc::sync_channel(1);
-                            let spawn = std::thread::Builder::new()
-                                .name("usb-internet-connect".into())
-                                .spawn(move || {
-                                    let result =
-                                        crate::proxy::socket::connect(&host, key.destination_port)
-                                            .map(Stream::Network)
-                                            .map_err(|e| std::io::Error::other(format!("{e:#}")));
-                                    let _ = tx.send(result);
-                                });
-                            spawn.is_ok().then_some((Some(rx), None))
-                        };
-                        if let Some((connecting, stream)) = connection {
-                            self.tcp.insert(
-                                key,
-                                Tcp {
-                                    handle,
-                                    connecting,
-                                    stream,
-                                    write_closed: false,
-                                    last: Clock::now(),
-                                },
-                            );
-                        } else {
-                            self.sockets.remove(handle);
-                        }
-                    }
+                    self.connect_tcp(key);
                 }
                 if ip.next_header() == IpProtocol::Udp
                     && ip.verify_checksum()
@@ -275,6 +219,66 @@ impl Router {
         self.interface
             .poll(now, &mut self.ethernet, &mut self.sockets);
     }
+
+    fn connect_tcp(&mut self, key: Flow) {
+        if key.destination_port == 0
+            || self.tcp.contains_key(&key)
+            || self.tcp.len() >= MAX_FLOWS
+            || (key.destination_port != 53 && !permitted(key.destination))
+        {
+            return;
+        }
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; BUFFER]),
+            tcp::SocketBuffer::new(vec![0; BUFFER]),
+        );
+        socket.set_timeout(Some(smoltcp::time::Duration::from_secs(120)));
+        if socket
+            .listen((key.destination, key.destination_port))
+            .is_err()
+        {
+            return;
+        }
+        let (connecting, stream) = if key.destination_port == 53 {
+            (None, Some(Stream::Dns(dns::Tcp::new(self.dns.clone()))))
+        } else {
+            let host = self
+                .dns
+                .lock()
+                .unwrap()
+                .host(key.destination)
+                .map(str::to_owned);
+            if dns::synthetic(key.destination) && host.is_none() {
+                return;
+            }
+            let host = host.unwrap_or_else(|| key.destination.to_string());
+            let (tx, rx) = mpsc::sync_channel(1);
+            if let Err(error) = std::thread::Builder::new()
+                .name("usb-internet-connect".into())
+                .spawn(move || {
+                    let result = crate::proxy::socket::connect(&host, key.destination_port)
+                        .map(Stream::Network)
+                        .map_err(|e| std::io::Error::other(format!("{e:#}")));
+                    let _ = tx.send(result);
+                })
+            {
+                eprintln!("USB internet: could not start connection worker: {error}");
+                return;
+            }
+            (Some(rx), None)
+        };
+        self.tcp.insert(
+            key,
+            Tcp {
+                handle: self.sockets.add(socket),
+                connecting,
+                stream,
+                write_closed: false,
+                last: Clock::now(),
+            },
+        );
+    }
+
     fn receive_udp(&mut self, key: Flow, mac: EthernetAddress, bytes: &[u8]) {
         if key.destination_port == 67 && key.source_port == 68 {
             if let Some(reply) = dhcp_reply(bytes) {

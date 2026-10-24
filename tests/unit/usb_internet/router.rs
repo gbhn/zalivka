@@ -20,6 +20,39 @@ fn frame_udp(
     )
     .remove(0)
 }
+
+#[test]
+fn tcp_syn_to_port_zero_is_rejected_without_allocating_a_flow() {
+    let destination = Ipv4Addr::new(203, 0, 113, 1);
+    let mut frame = vec![0; 14 + 20 + 20];
+    let mut ethernet = EthernetFrame::new_unchecked(&mut frame);
+    ethernet.set_src_addr(PEER);
+    ethernet.set_dst_addr(MAC);
+    ethernet.set_ethertype(EthernetProtocol::Ipv4);
+    let mut ip = Ipv4Packet::new_unchecked(ethernet.payload_mut());
+    ip.set_version(4);
+    ip.set_header_len(20);
+    ip.set_total_len(40);
+    ip.set_hop_limit(64);
+    ip.set_next_header(IpProtocol::Tcp);
+    ip.set_src_addr(CLIENT);
+    ip.set_dst_addr(destination);
+    let mut tcp = TcpPacket::new_unchecked(ip.payload_mut());
+    tcp.set_src_port(50000);
+    tcp.set_dst_port(0);
+    tcp.set_header_len(20);
+    tcp.set_syn(true);
+    tcp.fill_checksum(&CLIENT.into(), &destination.into());
+    ip.fill_checksum();
+
+    let mut router = Router::new();
+    router.receive(frame);
+    router.poll();
+    router.transmit();
+    assert!(router.tcp.is_empty());
+    assert_eq!(router.sockets.iter().count(), 0);
+}
+
 #[test]
 fn dhcp_assigns_address_and_does_not_answer_clients_arp_probe() {
     let mut request = vec![0; 244];

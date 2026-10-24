@@ -53,15 +53,7 @@ pub(super) fn wait_restored(device: &DeviceInfo) -> Result<(Session, MuxStream, 
                     "not the restored service"
                 );
                 let version = wire::number(wire::get(&query, &["RestoreProtocolVersion"])?)?;
-                wire::send(
-                    &mut stream,
-                    &wire::dict([
-                        ("Request", "QueryValue".into()),
-                        ("QueryKey", "HardwareInfo".into()),
-                        ("Label", "zalivka".into()),
-                    ]),
-                )?;
-                let hardware = wire::receive(&mut stream)?;
+                let hardware = super::query_value(&mut stream, "HardwareInfo")?;
                 let hw = wire::get(&hardware, &["HardwareInfo"])?;
                 ensure!(
                     wire::number(wire::get(hw, &["UniqueChipID"])?)? == device.ecid,

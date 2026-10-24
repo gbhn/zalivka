@@ -194,3 +194,43 @@ fn interface_guid_roundtrip_and_invalid_values() {
         assert!(parse_guid(invalid).is_err());
     }
 }
+
+#[test]
+fn registry_guid_lists_check_every_entry_and_respect_the_value_type() {
+    let original = "{88BAE032-5A81-49F0-BC3D-A4FF138216D6}";
+    let bytes: Vec<_> = wide(original)
+        .into_iter()
+        .chain(wide(GUID_TEXT))
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let names = |guids: Vec<GUID>| {
+        guids
+            .into_iter()
+            .map(install::guid_string)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(interface_guids(REG_MULTI_SZ, &bytes)),
+        [original, GUID_TEXT]
+    );
+    assert_eq!(names(interface_guids(REG_SZ, &bytes)), [original]);
+    assert!(interface_guids(REG_BINARY, &bytes).is_empty());
+    assert!(interface_guids(REG_MULTI_SZ, &bytes[..bytes.len() - 1]).is_empty());
+
+    let bytes: Vec<_> = wide("invalid GUID")
+        .into_iter()
+        .chain([0xd800, 0])
+        .chain(wide(GUID_TEXT))
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    assert_eq!(names(interface_guids(REG_MULTI_SZ, &bytes)), [GUID_TEXT]);
+
+    let bytes: Vec<_> = [0]
+        .into_iter()
+        .chain(wide(GUID_TEXT))
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    assert!(interface_guids(REG_MULTI_SZ, &bytes).is_empty());
+}

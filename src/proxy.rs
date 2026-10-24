@@ -132,7 +132,7 @@ fn connect_via(uri: &Uri, proxy: Option<Proxy>) -> Result<Tunnel> {
     // Reuse ureq's HTTP(S) CONNECT and SOCKS implementations. The target TLS
     // session belongs to restoreOS: only TLS to an HTTPS proxy is terminated here.
     let config = ureq::Agent::config_builder()
-        .tls_config(crate::net::agent().config().tls_config().clone())
+        .tls_config(crate::net::tls_config(ureq::tls::RootCerts::WebPki))
         .proxy(proxy)
         .build();
     let resolver = DefaultResolver::default();

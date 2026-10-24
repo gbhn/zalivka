@@ -37,7 +37,7 @@ pub fn query_value(stream: &mut (impl Read + Write), key: &str) -> Result<Value>
         &wire::dict([
             ("Request", "QueryValue".into()),
             ("QueryKey", key.into()),
-            ("Label", "zalivka-diagnostics".into()),
+            ("Label", "zalivka".into()),
         ]),
     )?;
     wire::receive(stream).with_context(|| format!("reading {key}"))

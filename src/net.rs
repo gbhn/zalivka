@@ -23,7 +23,7 @@ pub(crate) fn tss_agent() -> ureq::Agent {
         ureq::tls::RootCerts::new_with_certs(&[root]),
     );
     let proxy_config = ureq::Agent::config_builder()
-        .tls_config(agent().config().tls_config().clone())
+        .tls_config(tls_config(ureq::tls::RootCerts::WebPki))
         .proxy(None)
         .build();
     ureq::Agent::with_parts(
@@ -33,19 +33,19 @@ pub(crate) fn tss_agent() -> ureq::Agent {
     )
 }
 
+pub(crate) fn tls_config(roots: ureq::tls::RootCerts) -> ureq::tls::TlsConfig {
+    ureq::tls::TlsConfig::builder()
+        .root_certs(roots)
+        .unversioned_rustls_crypto_provider(Arc::new(oxitls_rustcrypto_provider::provider()))
+        .build()
+}
+
 fn agent_with_body_timeout(
     body_timeout: Option<Duration>,
     roots: ureq::tls::RootCerts,
 ) -> ureq::Agent {
     ureq::Agent::config_builder()
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .root_certs(roots)
-                .unversioned_rustls_crypto_provider(
-                    Arc::new(oxitls_rustcrypto_provider::provider()),
-                )
-                .build(),
-        )
+        .tls_config(tls_config(roots))
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_recv_response(Some(Duration::from_secs(120)))
         .timeout_recv_body(body_timeout)

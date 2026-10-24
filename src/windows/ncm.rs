@@ -87,6 +87,23 @@ fn parse_guid(text: &str) -> Result<GUID> {
     ensure!(hex.len() == 32, "invalid interface GUID");
     Ok(GUID::from_u128(u128::from_str_radix(&hex, 16)?))
 }
+
+fn interface_guids(ty: u32, bytes: &[u8]) -> Vec<GUID> {
+    if !matches!(ty, REG_MULTI_SZ | REG_SZ) || !bytes.len().is_multiple_of(2) {
+        return vec![];
+    }
+    let value: Vec<_> = bytes
+        .chunks_exact(2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .collect();
+    value
+        .split(|c| *c == 0)
+        .take_while(|part| !part.is_empty())
+        .take(if ty == REG_SZ { 1 } else { usize::MAX })
+        .filter_map(|part| parse_guid(&String::from_utf16(part).ok()?).ok())
+        .collect()
+}
+
 fn binding_state(service: &str, flags: u32, problem: u32, registered: bool) -> Result<()> {
     ensure!(
         service.eq_ignore_ascii_case("winusb"),
@@ -147,18 +164,12 @@ fn ready(instance: &str) -> Result<()> {
     let key = Key(key);
     for name in ["DeviceInterfaceGUIDs", "DeviceInterfaceGUID"] {
         if let Some((ty, bytes)) = read_value(&key, name)? {
-            if !matches!(ty, REG_MULTI_SZ | REG_SZ) {
-                continue;
-            }
-            let value: Vec<_> = bytes
-                .chunks_exact(2)
-                .map(|b| u16::from_le_bytes([b[0], b[1]]))
-                .collect();
-            if let Ok(guid) = parse_guid(&text(&value))
-                && !super::interface_paths(&guid, Some(std::ffi::OsStr::new(instance)), 65536)?
+            for guid in interface_guids(ty, &bytes) {
+                if !super::interface_paths(&guid, Some(std::ffi::OsStr::new(instance)), 65536)?
                     .is_empty()
-            {
-                return Ok(());
+                {
+                    return Ok(());
+                }
             }
         }
     }

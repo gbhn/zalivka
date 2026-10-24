@@ -155,11 +155,7 @@ impl Read for Tcp {
         if self.output.is_empty() && !self.closed {
             return Err(io::ErrorKind::WouldBlock.into());
         }
-        let n = out.len().min(self.output.len());
-        for byte in &mut out[..n] {
-            *byte = self.output.pop_front().unwrap();
-        }
-        Ok(n)
+        self.output.read(out)
     }
 }
 impl Write for Tcp {
