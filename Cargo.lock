@@ -1124,6 +1124,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix 1.1.5",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2280,6 +2290,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
 dependencies = [
  "ttf-parser",
+]
+
+[[package]]
+name = "oxiri"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6bd0ef560f078e41ce2ebf370cce217e7fb2c3695ffa87541151c9de94e83a"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -4152,11 +4171,13 @@ dependencies = [
  "anyhow",
  "base64",
  "clap",
+ "crc32fast",
  "eframe",
+ "fs4",
  "hkdf",
  "hmac",
- "libc",
  "nusb",
+ "oxiri",
  "oxitls-rustcrypto-provider",
  "p256",
  "plist",

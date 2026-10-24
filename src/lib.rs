@@ -14,7 +14,6 @@ pub mod net;
 pub mod progress;
 mod proxy;
 pub mod restore;
-#[allow(unsafe_code)]
 pub mod storage;
 pub mod tss;
 pub mod usb;

@@ -192,62 +192,14 @@ fn redirect_request(
 /// Resolve the Location forms used by HTTP redirects without decoding escaped
 /// path segments. Validate every destination before a second request is made.
 fn redirect_url(base: &str, location: &str) -> Result<Uri> {
-    let base = apple_url(base)?;
-    let location = location.split('#').next().unwrap_or("");
-    let next = if location.starts_with("//") {
-        format!("https:{location}")
-    } else if location
-        .split(['/', '?'])
-        .next()
-        .unwrap_or("")
-        .contains(':')
-    {
-        location.to_owned()
-    } else if location.is_empty() {
-        return Ok(base);
-    } else {
-        let (path, query) = location
-            .split_once('?')
-            .map_or((location, None), |(p, q)| (p, Some(q)));
-        let path = if path.is_empty() {
-            base.path().to_owned()
-        } else if path.starts_with('/') {
-            path.to_owned()
-        } else {
-            let directory = base.path().rsplit_once('/').map_or("", |(dir, _)| dir);
-            format!("{directory}/{path}")
-        };
-        let mut segments = Vec::new();
-        let mut parts = path.split('/').peekable();
-        while let Some(part) = parts.next() {
-            match part {
-                "." => {}
-                ".." => {
-                    if segments.len() > 1 {
-                        segments.pop();
-                    }
-                }
-                part => {
-                    segments.push(part);
-                    continue;
-                }
-            }
-            if parts.peek().is_none() {
-                segments.push("");
-            }
-        }
-        let mut next = format!(
-            "https://{}{}",
-            base.authority().context("URL has no authority")?,
-            segments.join("/")
-        );
-        if let Some(query) = query {
-            next.push('?');
-            next.push_str(query);
-        }
-        next
-    };
-    apple_url(&next)
+    apple_url(base)?;
+    let base = oxiri::Iri::parse(base).context("invalid redirect base URI")?;
+    let reference = oxiri::IriRef::parse(location.split('#').next().unwrap_or(""))
+        .context("invalid redirect Location")?;
+    let resolved = base
+        .resolve(&reference)
+        .context("resolving redirect Location")?;
+    apple_url(resolved.as_str())
 }
 
 #[cfg(test)]

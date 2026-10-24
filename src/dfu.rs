@@ -21,21 +21,7 @@ impl std::fmt::Display for ResetFailure {
 
 /// DFU CRC is the uncomplemented IEEE CRC32 register, including the suffix.
 pub fn crc32(data: &[u8]) -> u32 {
-    crc32_bytes(data.iter())
-}
-
-fn crc32_bytes<'a>(data: impl Iterator<Item = &'a u8>) -> u32 {
-    data.fold(u32::MAX, |mut crc, b| {
-        crc ^= u32::from(*b);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xedb88320
-            } else {
-                crc >> 1
-            };
-        }
-        crc
-    })
+    !crc32fast::hash(data)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -100,7 +86,10 @@ fn packet_iter(data: &[u8]) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>
     );
     let mut suffix = [0; 16];
     suffix[..SUFFIX.len()].copy_from_slice(&SUFFIX);
-    suffix[SUFFIX.len()..].copy_from_slice(&crc32_bytes(data.iter().chain(&SUFFIX)).to_le_bytes());
+    let mut checksum = crc32fast::Hasher::new();
+    checksum.update(data);
+    checksum.update(&SUFFIX);
+    suffix[SUFFIX.len()..].copy_from_slice(&(!checksum.finalize()).to_le_bytes());
     let index = (blocks - 1) as u16;
     let (prefix, last) = data.split_at(usize::from(index) * BLOCK_SIZE);
     let (last, continuation) = if last.len() + suffix.len() <= BLOCK_SIZE {

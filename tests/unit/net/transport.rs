@@ -262,6 +262,15 @@ fn redirects_resolve_relative_paths_queries_and_only_allow_apple_https() {
             "%2e%2e/next",
             "https://updates.cdn-apple.com/a/b/%2e%2e/next",
         ),
+        (
+            ".%2E/next?x=%2f",
+            "https://updates.cdn-apple.com/a/b/.%2E/next?x=%2f",
+        ),
+        ("%2E./next", "https://updates.cdn-apple.com/a/b/%2E./next"),
+        (
+            "https://gs.apple.com/a/../key?x=%23",
+            "https://gs.apple.com/key?x=%23",
+        ),
     ] {
         assert_eq!(
             redirect_url(base, location).unwrap(),
@@ -274,6 +283,9 @@ fn redirects_resolve_relative_paths_queries_and_only_allow_apple_https() {
         "//evil.invalid/key",
         "https://apple.com.evil.invalid/key",
         "https://gs.apple.com:8443/key",
+        "https://user:password@gs.apple.com/key",
+        "/invalid%zz/key",
+        "\\\\gs.apple.com/key",
         "file:///tmp/firmware",
     ] {
         assert!(redirect_url(base, location).is_err(), "{location}");
