@@ -1,0 +1,27 @@
+{
+  "OperationWeights": {
+    "operation_weights": {
+      "id_12": 300,
+      "id_18": 200,
+      "id_55": 1000,
+      "id_13": 1800,
+      "id_14": 10,
+      "id_15": 100,
+      "id_81": 225
+    },
+    "weight_count": 98,
+    "operation_ids": {
+      "id_12": 12,
+      "id_18": 18,
+      "id_55": 55,
+      "id_13": 13,
+      "id_14": 14,
+      "id_15": 15,
+      "id_81": 81
+    },
+    "operation_progresses": {}
+  },
+  "Progress": -1,
+  "Operation": 28,
+  "MsgType": "ProgressMsg"
+}

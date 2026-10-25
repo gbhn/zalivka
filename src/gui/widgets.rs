@@ -63,6 +63,52 @@ pub(super) fn metric(ui: &mut egui::Ui, label: &str, value: &str) {
     caption(ui, label);
     ui.label(RichText::new(value).size(20.0).strong());
 }
+pub(super) fn progress_bar(ui: &mut egui::Ui, fraction: Option<f32>) {
+    let bar = egui::ProgressBar::new(fraction.unwrap_or_default())
+        .fill(super::theme::BLUE)
+        .animate(fraction.is_none())
+        .desired_height(10.0);
+    ui.add(bar);
+    if let Some(value) = fraction {
+        ui.label(
+            RichText::new(format!("{:.0}%", value * 100.0))
+                .small()
+                .strong(),
+        );
+    } else {
+        caption(ui, "Процент выполнения недоступен");
+    }
+}
+
+pub(super) fn operation_title(operation: u64) -> String {
+    // Restored operation IDs: libimobiledevice/idevicerestore, src/restore.c.
+    let title = match operation {
+        11 => "Создание разделов",
+        12 => "Форматирование файловой системы",
+        13 => "Восстановление образа системы",
+        14 => "Проверка восстановленного образа",
+        15 => "Проверка файловых систем",
+        16 => "Подключение файловых систем",
+        17 => "Подготовка раздела данных",
+        18 => "Запись прошивки",
+        25 => "Настройка параметров загрузки",
+        28 => "Проверка накопителя",
+        29 => "Отключение файловых систем",
+        36 => "Получение данных прошивки",
+        46 => "Очистка NVRAM",
+        55 => "Обновление Stockholm",
+        58 => "Обновление прошивки NAND",
+        59 => "Обновление прошивки Secure Element",
+        66 => "Обновление Veridian",
+        67 => "Создание защищённого тома",
+        71 => "Установка образа recoveryOS",
+        74 => "Получение данных EAN",
+        77 => "Проверка системного тома",
+        _ => return format!("Операция {operation}"),
+    };
+    title.into()
+}
+
 pub(super) fn laptop(ui: &mut egui::Ui, connected: bool) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(62.0, 54.0), egui::Sense::hover());
     let color = if connected {

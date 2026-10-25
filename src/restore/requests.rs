@@ -58,16 +58,19 @@ impl AsyncRequests {
         let session = self.session.clone();
         let sender = self.sender.clone();
         let kind = kind.to_owned();
+        let operation = crate::progress::current_operation();
         let worker = thread::Builder::new()
             .name(format!("zalivka-{kind}"))
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut stream = session.connect_retry(port, Duration::from_secs(60))?;
-                    if let Some(state) = &mut state {
-                        state.serve_on(&session, &mut stream, &request, data_type)
-                    } else {
-                        serve_asset(&assets, &mut stream, &request)
-                    }
+                    crate::progress::with_operation(operation, || {
+                        let mut stream = session.connect_retry(port, Duration::from_secs(60))?;
+                        if let Some(state) = &mut state {
+                            state.serve_on(&session, &mut stream, &request, data_type)
+                        } else {
+                            serve_asset(&assets, &mut stream, &request)
+                        }
+                    })
                 }))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("async worker panicked")))
                 .with_context(|| format!("asynchronous {kind} on DataPort {port} failed"));

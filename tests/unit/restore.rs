@@ -3,8 +3,8 @@ use super::connection::confirm_restore_service;
 use super::file_data::{FILE_DATA_BATCH, FileDataWriter, send_file_data};
 use super::keys::{ImagePrefix, key_exchange};
 use super::session::{
-    acknowledge_final_status, finish_final_status, log_checkpoint, log_progress,
-    wait_for_restore_close,
+    ProgressOperations, acknowledge_final_status, finish_final_status, log_checkpoint,
+    log_progress, operation_weights, wait_for_restore_close,
 };
 use super::*;
 use crate::mux::Session;
@@ -306,6 +306,138 @@ fn malformed_progress_reports_the_field_without_inventing_a_percentage() {
 }
 
 #[test]
+fn transfer_requests_follow_their_operation_without_inheriting_background_progress() {
+    let mut operations = ProgressOperations::default();
+    let request = |kind, asynchronous| {
+        wire::dict([
+            (
+                "MsgType",
+                if asynchronous {
+                    "AsyncDataRequestMsg"
+                } else {
+                    "DataRequestMsg"
+                }
+                .into(),
+            ),
+            ("DataType", Value::String(kind)),
+        ])
+    };
+    for operation in [80, 36, 59, 79, 96] {
+        let message = wire::dict([
+            ("MsgType", "ProgressMsg".into()),
+            ("Operation", operation.into()),
+            ("Progress", 0i64.into()),
+        ]);
+        operations.observe(&message, &log_progress(&message, |_| {}).unwrap());
+        assert_eq!(
+            operations.for_request(&request("SourceBootObjectV4".into(), false)),
+            Some(operation)
+        );
+        // Image progress arrives on the control pipe while synchronous firmware
+        // requests continue. Its asynchronous context must not steal those files.
+        let image = wire::dict([
+            ("Operation", 13u64.into()),
+            ("Progress", 50i64.into()),
+            ("AsyncContextUUID", "image-context".into()),
+        ]);
+        operations.observe(&image, &log_progress(&image, |_| {}).unwrap());
+        assert_eq!(
+            operations.for_request(&request("PersonalizedBootObjectV3".into(), false)),
+            Some(operation)
+        );
+    }
+    // SE continues after unrelated firmware operations report completion.
+    for operation in [96u64, 79] {
+        let message = wire::dict([("Operation", operation.into()), ("Progress", 100i64.into())]);
+        operations.observe(&message, &log_progress(&message, |_| {}).unwrap());
+    }
+    assert_eq!(
+        operations.for_request(&request("SourceBootObjectV4".into(), false)),
+        Some(59)
+    );
+    let checkpoint = wire::dict([
+        ("CHECKPOINT_ID", 0x132fu64.into()),
+        ("CHECKPOINT_NAME", "await_update_se".into()),
+        ("CHECKPOINT_COMPLETE", true.into()),
+        ("CHECKPOINT_RESULT", 0i64.into()),
+    ]);
+    operations.observe(&checkpoint, &log_checkpoint(&checkpoint, |_| {}).unwrap());
+    assert_eq!(
+        operations.for_request(&request("SourceBootObjectV4".into(), false)),
+        Some(36)
+    );
+    for kind in ["SystemImageData", "RecoveryOSASRImage"] {
+        assert_eq!(
+            operations.for_request(&request(kind.into(), true)),
+            Some(13)
+        );
+    }
+    assert_eq!(
+        operations.for_request(&request("RecoveryOSImage".into(), false)),
+        Some(71)
+    );
+    assert_eq!(
+        operations.for_request(&request("SourceBootObjectV4".into(), true)),
+        None
+    );
+    assert_eq!(
+        operations.for_request(&request("URLAsset".into(), true)),
+        None
+    );
+}
+
+#[test]
+fn optional_operation_weights_preserve_the_device_ids_without_blocking_restore() {
+    let message: Value =
+        serde_json::from_str(include_str!("../fixtures/restored-operation-weights.json")).unwrap();
+    for binary in [false, true] {
+        let mut framed = Vec::new();
+        if binary {
+            wire::send_binary(&mut framed, &message).unwrap();
+        } else {
+            wire::send(&mut framed, &message).unwrap();
+        }
+        let received = wire::receive(&mut std::io::Cursor::new(framed)).unwrap();
+        assert_eq!(
+            operation_weights(&received).unwrap(),
+            vec![
+                (12, 300),
+                (13, 1800),
+                (14, 10),
+                (15, 100),
+                (18, 200),
+                (55, 1000),
+                (81, 225),
+            ]
+        );
+    }
+    let mut missing = message.clone();
+    missing
+        .as_dictionary_mut()
+        .unwrap()
+        .remove("OperationWeights");
+    assert!(operation_weights(&missing).is_none());
+    assert!(log_progress(&missing, |_| {}).is_ok());
+    for invalid in [true.into(), (-1i64).into(), "invalid".into()] {
+        let mut malformed = message.clone();
+        malformed
+            .as_dictionary_mut()
+            .unwrap()
+            .get_mut("OperationWeights")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .get_mut("operation_weights")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("id_13".into(), invalid);
+        assert!(operation_weights(&malformed).is_none());
+        assert!(log_progress(&malformed, |_| {}).is_ok());
+    }
+}
+
+#[test]
 fn checkpoint_results_do_not_replace_final_restore_status() {
     for complete in [false, true] {
         for result in [0i64, 10, -1] {
@@ -316,7 +448,14 @@ fn checkpoint_results_do_not_replace_final_restore_status() {
                 ("CHECKPOINT_COMPLETE", complete.into()),
             ]);
             let mut output = Vec::new();
-            log_checkpoint(&checkpoint, |record| output.push(record)).unwrap();
+            let event = log_checkpoint(&checkpoint, |record| output.push(record)).unwrap();
+            assert_eq!(
+                event,
+                crate::progress::Event::Checkpoint {
+                    name: "unknown".into(),
+                    complete,
+                }
+            );
             let output = output
                 .iter()
                 .map(ToString::to_string)

@@ -1,3 +1,4 @@
+use super::worker::ActivityId;
 use super::*;
 use std::{ffi::OsString, fs::File, path::Path};
 
@@ -256,6 +257,8 @@ fn structured_journal_filters_details_and_saves_each_record_once() {
     send_worker(
         &mut app,
         progress::Event::Transfer(progress::Update {
+            id: 1,
+            operation: None,
             stage: "ASR".into(),
             completed: 0,
             total: Some(100),
@@ -412,7 +415,10 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
             progress: 50,
         },
     );
-    assert_eq!(app.job.as_ref().unwrap().fraction, Some(0.5));
+    assert_eq!(
+        app.job.as_ref().unwrap().activities[&ActivityId::Operation(28)].fraction(),
+        Some(0.5)
+    );
     send_worker(
         &mut app,
         progress::Event::OperationProgress {
@@ -420,11 +426,15 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
             progress: -1,
         },
     );
-    assert_eq!(app.job.as_ref().unwrap().fraction, None);
+    assert_eq!(
+        app.job.as_ref().unwrap().activities[&ActivityId::Operation(28)].fraction(),
+        None
+    );
     send_worker(
         &mut app,
         progress::Event::Checkpoint {
             name: "update_firmware".into(),
+            complete: false,
         },
     );
     assert_eq!(app.job.as_ref().unwrap().phase, "Обновление прошивки");
@@ -468,6 +478,8 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
     let mut app = App::new();
     app.job = Some(job(Action::Restore));
     let update = progress::Update {
+        id: 1,
+        operation: None,
         stage: "ASR".into(),
         completed: 100,
         total: Some(100),
@@ -476,17 +488,7 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
         finished: true,
     };
     send_worker(&mut app, progress::Event::Transfer(update.clone()));
-    assert_eq!(
-        app.job
-            .as_ref()
-            .unwrap()
-            .transfer
-            .as_ref()
-            .unwrap()
-            .update
-            .fraction(),
-        Some(1.0)
-    );
+    assert!(app.job.as_ref().unwrap().activities.is_empty());
     send_worker(
         &mut app,
         progress::Event::OperationProgress {
@@ -494,8 +496,17 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
             progress: 50,
         },
     );
-    assert!(app.job.as_ref().unwrap().transfer.is_none());
-    assert_eq!(app.job.as_ref().unwrap().fraction, Some(0.5));
+    assert!(
+        !app.job
+            .as_ref()
+            .unwrap()
+            .activities
+            .contains_key(&ActivityId::Transfer(1))
+    );
+    assert_eq!(
+        app.job.as_ref().unwrap().activities[&ActivityId::Operation(28)].fraction(),
+        Some(0.5)
+    );
     send_worker(&mut app, progress::Event::RestoreCompleted);
     send_worker(&mut app, progress::Event::InternetWaiting);
     send_worker(&mut app, progress::Event::InternetReady);
@@ -504,14 +515,356 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
         .send(Event::Worker(7, Output::parse(line.clone(), false)))
         .unwrap();
     app.poll(&egui::Context::default());
-    assert!(app.job.as_ref().unwrap().transfer.is_none());
-    assert!(app.job.as_ref().unwrap().fraction.is_none());
+    assert!(app.job.as_ref().unwrap().activities.is_empty());
     assert!(app.job.as_ref().unwrap().can_stop());
     assert_eq!(
         app.job.as_ref().unwrap().phase,
         "Интернет по USB, оставьте Zalivka открытой"
     );
     assert_eq!(app.logs.back().unwrap().message, line);
+}
+
+fn active_job_labels(app: &mut App, theme: egui::Theme) -> (Vec<String>, usize) {
+    let ctx = egui::Context::default();
+    configure(&ctx);
+    ctx.set_theme(theme);
+    let output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 2000.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.active_job(ui));
+        },
+    );
+    let labels = output
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect();
+    let cards = output
+        .shapes
+        .iter()
+        .filter(|shape| {
+            matches!(&shape.shape,
+                egui::Shape::Rect(rect) if rect.rect.width() > 500.0 && rect.rect.height() > 50.0
+                    && rect.fill == ctx.style().visuals.window_fill
+            )
+        })
+        .count();
+    (labels, cards)
+}
+
+fn transfer(id: u64, operation: Option<u64>, stage: &str) -> progress::Update {
+    progress::Update {
+        id,
+        operation,
+        stage: stage.into(),
+        completed: 60,
+        total: Some(100),
+        bytes_per_second: 10.0,
+        elapsed_seconds: 6.0,
+        finished: false,
+    }
+}
+
+#[test]
+fn transfers_and_device_progress_share_one_card_for_every_operation_and_event_order() {
+    // Names deliberately do not identify the operation; the worker's metadata does.
+    for operation in [13, 36, 59, 71, 80, 999] {
+        for transfer_first in [false, true] {
+            let mut app = App::new();
+            app.job = Some(job(Action::Restore));
+            let mut update = transfer(1, Some(operation), "Компонент прошивки");
+            let mut events = vec![
+                progress::Event::Transfer(update.clone()),
+                progress::Event::OperationProgress {
+                    operation,
+                    progress: 40,
+                },
+            ];
+            if !transfer_first {
+                events.reverse();
+            }
+            for event in events {
+                send_worker(&mut app, event);
+            }
+            let activity = &app.job.as_ref().unwrap().activities[&ActivityId::Operation(operation)];
+            assert_eq!(activity.fraction(), Some(0.4));
+            assert_eq!(activity.transfers.len(), 1);
+            for theme in [egui::Theme::Dark, egui::Theme::Light] {
+                let (labels, cards) = active_job_labels(&mut app, theme);
+                assert_eq!(
+                    cards, 2,
+                    "summary plus one operation: {operation}, {theme:?}"
+                );
+                assert_eq!(
+                    labels
+                        .iter()
+                        .filter(|label| **label == widgets::operation_title(operation))
+                        .count(),
+                    1
+                );
+                assert_eq!(labels.iter().filter(|label| *label == "40%").count(), 1);
+                assert!(labels.iter().any(|label| label == "Компонент прошивки"));
+                assert!(labels.iter().any(|label| label == "Скорость"));
+            }
+            send_worker(
+                &mut app,
+                progress::Event::OperationProgress {
+                    operation,
+                    progress: -1,
+                },
+            );
+            assert_eq!(
+                app.job.as_ref().unwrap().activities[&ActivityId::Operation(operation)].fraction(),
+                Some(0.6)
+            );
+            send_worker(
+                &mut app,
+                progress::Event::OperationProgress {
+                    operation,
+                    progress: 40,
+                },
+            );
+            // Either the Mac or the transfer can finish first. The other stays visible.
+            update.completed = 100;
+            update.finished = true;
+            if transfer_first {
+                send_worker(&mut app, progress::Event::Transfer(update.clone()));
+            } else {
+                send_worker(
+                    &mut app,
+                    progress::Event::OperationProgress {
+                        operation,
+                        progress: 100,
+                    },
+                );
+            }
+            assert_eq!(app.job.as_ref().unwrap().activities.len(), 1);
+            for theme in [egui::Theme::Dark, egui::Theme::Light] {
+                assert_eq!(active_job_labels(&mut app, theme).1, 2);
+            }
+            if transfer_first {
+                send_worker(
+                    &mut app,
+                    progress::Event::OperationProgress {
+                        operation,
+                        progress: 100,
+                    },
+                );
+            } else {
+                send_worker(&mut app, progress::Event::Transfer(update));
+            }
+            assert!(app.job.as_ref().unwrap().activities.is_empty());
+        }
+    }
+}
+
+#[test]
+fn identical_names_do_not_merge_independent_transfers_or_lose_parallel_files() {
+    let mut app = App::new();
+    app.job = Some(job(Action::Restore));
+    let mut updates = vec![
+        transfer(1, Some(13), "Одинаковое имя"),
+        transfer(2, Some(59), "Одинаковое имя"),
+        transfer(13, None, "Одинаковое имя"),
+        transfer(59, None, "Одинаковое имя"),
+    ];
+    for update in &updates {
+        send_worker(&mut app, progress::Event::Transfer(update.clone()));
+    }
+    assert_eq!(app.job.as_ref().unwrap().activities.len(), 4);
+    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+        assert_eq!(active_job_labels(&mut app, theme).1, 5);
+    }
+    updates[0].finished = true;
+    send_worker(&mut app, progress::Event::Transfer(updates[0].clone()));
+    let activities = &app.job.as_ref().unwrap().activities;
+    assert_eq!(activities.len(), 3);
+    assert!(!activities.contains_key(&ActivityId::Operation(13)));
+    assert_eq!(
+        activities[&ActivityId::Operation(59)].transfers[&2].update,
+        updates[1]
+    );
+    assert!(activities.contains_key(&ActivityId::Transfer(13)));
+    assert!(activities.contains_key(&ActivityId::Transfer(59)));
+    let retry = transfer(6, Some(13), "Одинаковое имя");
+    send_worker(&mut app, progress::Event::Transfer(retry.clone()));
+    send_worker(&mut app, progress::Event::Transfer(updates[0].clone()));
+    assert_eq!(
+        app.job.as_ref().unwrap().activities[&ActivityId::Operation(13)].transfers[&6].update,
+        retry
+    );
+
+    let mut second_file = transfer(5, Some(59), "Одинаковое имя");
+    send_worker(&mut app, progress::Event::Transfer(second_file.clone()));
+    assert_eq!(app.job.as_ref().unwrap().activities.len(), 4);
+    assert_eq!(
+        app.job.as_ref().unwrap().activities[&ActivityId::Operation(59)]
+            .transfers
+            .len(),
+        2
+    );
+    second_file.finished = true;
+    send_worker(&mut app, progress::Event::Transfer(second_file));
+    assert_eq!(
+        app.job.as_ref().unwrap().activities[&ActivityId::Operation(59)]
+            .transfers
+            .len(),
+        1
+    );
+    send_worker(&mut app, progress::Event::RestoreCompleted);
+    assert!(app.job.as_ref().unwrap().activities.is_empty());
+}
+
+#[test]
+fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
+    let mut app = App::new();
+    app.job = Some(job(Action::Restore));
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, None);
+    send_worker(
+        &mut app,
+        progress::Event::OperationWeights {
+            weights: vec![(12, 1), (13, 8), (55, 1)],
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.0));
+    send_worker(
+        &mut app,
+        progress::Event::OperationProgress {
+            operation: 13,
+            progress: 25,
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.2));
+    send_worker(
+        &mut app,
+        progress::Event::OperationProgress {
+            operation: 55,
+            progress: 100,
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.3));
+    assert!(
+        !app.job
+            .as_ref()
+            .unwrap()
+            .activities
+            .contains_key(&ActivityId::Operation(55))
+    );
+    // New, indeterminate and restarted subtasks cannot make the total regress.
+    for (operation, progress) in [(79, 0), (13, -1), (13, 5), (55, 0)] {
+        send_worker(
+            &mut app,
+            progress::Event::OperationProgress {
+                operation,
+                progress,
+            },
+        );
+        assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.3));
+    }
+    send_worker(
+        &mut app,
+        progress::Event::Checkpoint {
+            name: "format_media".into(),
+            complete: true,
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.4));
+    send_worker(
+        &mut app,
+        progress::Event::OperationProgress {
+            operation: 13,
+            progress: 100,
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.99));
+    // A finished checkpoint or a human-readable line is not final confirmation.
+    send_worker(
+        &mut app,
+        progress::Event::Checkpoint {
+            name: "cleanup_send_final_status".into(),
+            complete: true,
+        },
+    );
+    send_worker(
+        &mut app,
+        progress::Event::Log(Record::new(
+            Level::Info,
+            "restore",
+            "Восстановление завершено",
+        )),
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.99));
+    send_worker(&mut app, progress::Event::RestoreCompleted);
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(1.0));
+    for event in [
+        progress::Event::InternetWaiting,
+        progress::Event::InternetPreparing,
+        progress::Event::InternetReady,
+    ] {
+        send_worker(&mut app, event);
+        assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(1.0));
+    }
+}
+
+#[test]
+fn completed_checkpoints_remove_only_their_operation_when_no_final_percentage_arrives() {
+    let mut app = App::new();
+    app.job = Some(job(Action::Restore));
+    for (operation, progress) in [(13, 5), (28, -1), (36, 50), (59, 0)] {
+        send_worker(
+            &mut app,
+            progress::Event::OperationProgress {
+                operation,
+                progress,
+            },
+        );
+    }
+    for (name, operation) in [
+        ("wait_for_storage", 28),
+        ("update_aht", 36),
+        ("await_update_se", 59),
+    ] {
+        send_worker(
+            &mut app,
+            progress::Event::Checkpoint {
+                name: name.into(),
+                complete: false,
+            },
+        );
+        assert!(
+            app.job
+                .as_ref()
+                .unwrap()
+                .activities
+                .contains_key(&ActivityId::Operation(operation))
+        );
+        send_worker(
+            &mut app,
+            progress::Event::Checkpoint {
+                name: name.into(),
+                complete: true,
+            },
+        );
+        let job = app.job.as_ref().unwrap();
+        assert!(
+            !job.activities
+                .contains_key(&ActivityId::Operation(operation))
+        );
+        assert_eq!(
+            job.activities[&ActivityId::Operation(13)].fraction(),
+            Some(0.05)
+        );
+    }
+    assert_eq!(app.job.as_ref().unwrap().activities.len(), 1);
 }
 
 #[test]
@@ -592,8 +945,7 @@ fn failed_network_preparation_releases_stop_and_clears_stale_progress() {
     let operation = app.job.as_ref().unwrap();
     assert!(operation.can_stop());
     assert_eq!(operation.phase, "Интернет по USB недоступен");
-    assert!(operation.transfer.is_none());
-    assert!(operation.fraction.is_none());
+    assert!(operation.activities.is_empty());
     assert_eq!(
         operation.completion_notice(true, false).detail,
         "UAC cancelled"
@@ -665,6 +1017,8 @@ fn stalled_transfer_hides_speed_and_eta() {
     let now = Instant::now();
     let mut t = worker::Transfer {
         update: progress::Update {
+            id: 1,
+            operation: None,
             stage: "BaseSystem".into(),
             completed: 1048576,
             total: Some(3145728),

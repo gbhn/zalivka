@@ -4,6 +4,7 @@ use super::{Action, Event, Level, Notice, Record, Setup, Tone, progress};
 use anyhow::{Context, Result};
 use eframe::egui;
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -23,10 +24,53 @@ pub(super) struct Job {
     pub(super) cancelled: bool,
     pub(super) restore_completed: bool,
     internet: Internet,
-    pub(super) transfer: Option<Transfer>,
-    pub(super) fraction: Option<f32>,
+    pub(super) activities: BTreeMap<ActivityId, Activity>,
+    // Weights advertised by restored and each operation's highest known fraction.
+    overall_operations: BTreeMap<u64, (u64, f32)>,
+    pub(super) overall_fraction: Option<f32>,
     pub(super) phase: String,
     pub(super) last_activity: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) enum ActivityId {
+    Operation(u64),
+    Transfer(u64),
+}
+
+#[derive(Default)]
+pub(super) struct Activity {
+    progress: Option<i64>,
+    pub(super) transfers: BTreeMap<u64, Transfer>,
+}
+
+impl Activity {
+    pub(super) fn fraction(&self) -> Option<f32> {
+        if let Some(progress) = self.progress.filter(|progress| *progress >= 0) {
+            return Some((progress as f32 / 100.0).clamp(0.0, 1.0));
+        }
+        if self.transfers.is_empty() {
+            return None;
+        }
+        let (completed, total) =
+            self.transfers
+                .values()
+                .try_fold((0u64, 0u64), |(completed, total), transfer| {
+                    Some((
+                        completed.checked_add(transfer.update.completed)?,
+                        total.checked_add(transfer.update.total?)?,
+                    ))
+                })?;
+        Some(if total == 0 {
+            1.0
+        } else {
+            completed as f32 / total as f32
+        })
+    }
+
+    fn active(&self) -> bool {
+        !self.transfers.is_empty() || self.progress.is_some_and(|progress| progress < 100)
+    }
 }
 
 pub(super) struct Transfer {
@@ -91,8 +135,9 @@ impl Job {
             cancelled: false,
             restore_completed: false,
             internet: Internet::Idle,
-            transfer: None,
-            fraction: None,
+            activities: BTreeMap::new(),
+            overall_operations: BTreeMap::new(),
+            overall_fraction: None,
             phase: if action == Action::PrepareWindows {
                 "Подтвердите запрос прав администратора Windows".into()
             } else {
@@ -161,27 +206,32 @@ impl Job {
         if let progress::Event::Log(record) = event {
             return Some(self.record(record));
         }
-        if matches!(
-            &event,
-            progress::Event::Checkpoint { .. } | progress::Event::OperationProgress { .. }
-        ) && self
-            .transfer
-            .as_ref()
-            .is_some_and(|transfer| transfer.update.finished)
-        {
-            self.transfer = None;
-        }
         match event {
             progress::Event::Log(_) => unreachable!(),
             progress::Event::Transfer(update) => {
-                self.transfer = Some(Transfer {
-                    update,
-                    received: Instant::now(),
-                });
-                self.fraction = None;
+                let id = update
+                    .operation
+                    .map(ActivityId::Operation)
+                    .unwrap_or(ActivityId::Transfer(update.id));
+                let activity = self.activities.entry(id).or_default();
+                if update.finished {
+                    activity.transfers.remove(&update.id);
+                } else {
+                    activity.transfers.insert(
+                        update.id,
+                        Transfer {
+                            update,
+                            received: Instant::now(),
+                        },
+                    );
+                }
+                if !activity.active() {
+                    self.activities.remove(&id);
+                }
             }
             progress::Event::RestoreCompleted => {
                 self.restore_completed = true;
+                self.overall_fraction = Some(1.0);
                 self.set_phase("Восстановление завершено");
             }
             progress::Event::RebootRequired => {}
@@ -217,21 +267,79 @@ impl Job {
                 self.internet = Internet::Unavailable(error);
                 self.set_phase("Интернет по USB недоступен");
             }
-            progress::Event::Checkpoint { name } => {
-                self.phase = friendly_phase(&name).into();
-                self.fraction = None;
+            progress::Event::Checkpoint { name, complete } => {
+                if complete {
+                    if let Some(operation) = progress::checkpoint_operation(&name) {
+                        self.operation_progress(operation, 100);
+                    }
+                } else {
+                    self.phase = friendly_phase(&name).into();
+                }
             }
-            progress::Event::OperationProgress { progress, .. } => {
-                self.fraction = (progress >= 0).then(|| (progress as f32 / 100.0).clamp(0.0, 1.0));
+            progress::Event::OperationWeights { weights } => {
+                self.overall_operations = weights
+                    .into_iter()
+                    .map(|(operation, weight)| {
+                        let fraction = self
+                            .overall_operations
+                            .get(&operation)
+                            .map_or(0.0, |(_, fraction)| *fraction);
+                        (operation, (weight, fraction))
+                    })
+                    .collect();
+                self.update_overall();
+            }
+            progress::Event::OperationProgress {
+                operation,
+                progress,
+            } => {
+                self.operation_progress(operation, progress);
             }
         }
         None
     }
 
+    fn operation_progress(&mut self, operation: u64, progress: i64) {
+        if progress >= 0 {
+            self.advance_overall(operation, (progress as f32 / 100.0).min(1.0));
+        }
+        let id = ActivityId::Operation(operation);
+        let activity = self.activities.entry(id).or_default();
+        activity.progress = Some(progress);
+        if !activity.active() {
+            self.activities.remove(&id);
+        }
+    }
+
+    fn advance_overall(&mut self, operation: u64, fraction: f32) {
+        if let Some((_, previous)) = self.overall_operations.get_mut(&operation) {
+            *previous = previous.max(fraction);
+            self.update_overall();
+        }
+    }
+
+    fn update_overall(&mut self) {
+        let total: f64 = self
+            .overall_operations
+            .values()
+            .map(|(weight, _)| *weight as f64)
+            .sum();
+        if total > 0.0 && !self.restore_completed {
+            let completed: f64 = self
+                .overall_operations
+                .values()
+                .map(|(weight, fraction)| *weight as f64 * f64::from(*fraction))
+                .sum();
+            // The device advertises weights for selected operations only. Keep
+            // this estimate monotonic and reserve 100% for RestoreCompleted.
+            let fraction = ((completed / total) as f32).min(0.99);
+            self.overall_fraction = Some(self.overall_fraction.unwrap_or_default().max(fraction));
+        }
+    }
+
     fn set_phase(&mut self, phase: &str) {
         self.phase = phase.into();
-        self.transfer = None;
-        self.fraction = None;
+        self.activities.clear();
     }
 
     // The exit code can arrive before the final stdout/stderr lines.

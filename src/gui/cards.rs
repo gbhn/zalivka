@@ -1,7 +1,10 @@
 //! Device, firmware, operation and Windows preparation cards.
 use super::theme::{BLUE, Tone};
-use super::widgets::{caption, card, elapsed_text, human_bytes, laptop, metric, pill, section};
-use super::{App, Confirmation, Picker, setup::Action};
+use super::widgets::{
+    caption, card, elapsed_text, human_bytes, laptop, metric, operation_title, pill, progress_bar,
+    section,
+};
+use super::{App, Confirmation, Picker, setup::Action, worker::ActivityId};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::{
     path::Path,
@@ -250,42 +253,13 @@ impl App {
             });
             let now = Instant::now();
             let internet_speed = job.internet_speed(now);
-            if internet_speed.is_none() {
-                ui.add_space(12.0);
-                let stage = job
-                    .transfer
-                    .as_ref()
-                    .map(|t| t.update.stage.as_str())
-                    .unwrap_or(&job.phase);
-                ui.label(RichText::new(stage).size(16.0));
-                let fraction = job
-                    .transfer
-                    .as_ref()
-                    .and_then(|t| t.update.fraction())
-                    .or(job.fraction);
-                if let Some(value) = fraction {
-                    ui.add(
-                        egui::ProgressBar::new(value)
-                            .fill(BLUE)
-                            .desired_height(10.0),
-                    );
-                } else {
-                    ui.add(
-                        egui::ProgressBar::new(0.0)
-                            .animate(true)
-                            .desired_height(10.0),
-                    );
-                }
-                ui.horizontal(|ui| {
-                    caption(ui, "Текущий этап");
-                    if let Some(value) = fraction {
-                        ui.label(
-                            RichText::new(format!("{:.0}%", value * 100.0))
-                                .small()
-                                .strong(),
-                        );
-                    }
-                });
+            ui.add_space(12.0);
+            ui.label(RichText::new(&job.phase).size(16.0));
+            if job.action.writes_device() {
+                caption(ui, "Общий прогресс восстановления (оценка)");
+                progress_bar(ui, job.overall_fraction);
+            } else if internet_speed.is_none() && job.activities.is_empty() {
+                progress_bar(ui, None);
             }
             ui.add_space(14.0);
             ui.columns(3, |columns| {
@@ -305,33 +279,8 @@ impl App {
                         "↓ Down",
                         &format!("{}/с", human_bytes(download as u64)),
                     );
-                } else if let Some(t) = &job.transfer {
-                    metric(
-                        &mut columns[1],
-                        "Скорость",
-                        &format!("{:.1} МиБ/с", t.speed(now) / 1048576.0),
-                    );
-                    let value = t
-                        .remaining(now)
-                        .map(elapsed_text)
-                        .unwrap_or_else(|| "—".into());
-                    metric(&mut columns[2], "Осталось на этапе", &value);
                 }
             });
-            if let Some(t) = &job.transfer {
-                ui.add_space(8.0);
-                caption(
-                    ui,
-                    format!(
-                        "{}{}",
-                        human_bytes(t.update.completed),
-                        t.update
-                            .total
-                            .map(|n| format!(" из {}", human_bytes(n)))
-                            .unwrap_or_default()
-                    ),
-                );
-            }
             ui.add_space(14.0);
             let idle = job.last_activity.elapsed();
             if !job.can_stop() && !job.action.writes_device() {
@@ -352,6 +301,57 @@ impl App {
                 );
             }
         });
+        let Some(job) = &self.job else { return };
+        let now = Instant::now();
+        for (id, activity) in &job.activities {
+            ui.add_space(12.0);
+            ui.push_id(id, |ui| {
+                card(ui.ctx()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let title = match id {
+                        ActivityId::Operation(operation) => operation_title(*operation),
+                        ActivityId::Transfer(_) => activity
+                            .transfers
+                            .values()
+                            .next()
+                            .map(|transfer| transfer.update.stage.clone())
+                            .unwrap_or_default(),
+                    };
+                    ui.label(RichText::new(&title).size(16.0).strong());
+                    progress_bar(ui, activity.fraction());
+                    for transfer in activity.transfers.values() {
+                        if transfer.update.stage != title {
+                            caption(ui, &transfer.update.stage);
+                        }
+                        caption(
+                            ui,
+                            format!(
+                                "Передано: {}{}",
+                                human_bytes(transfer.update.completed),
+                                transfer
+                                    .update
+                                    .total
+                                    .map(|total| format!(" из {}", human_bytes(total)))
+                                    .unwrap_or_default()
+                            ),
+                        );
+                        ui.add_space(8.0);
+                        ui.columns(2, |columns| {
+                            metric(
+                                &mut columns[0],
+                                "Скорость",
+                                &format!("{:.1} МиБ/с", transfer.speed(now) / 1048576.0),
+                            );
+                            let remaining = transfer
+                                .remaining(now)
+                                .map(elapsed_text)
+                                .unwrap_or_else(|| "—".into());
+                            metric(&mut columns[1], "До конца передачи", &remaining);
+                        });
+                    }
+                });
+            });
+        }
     }
     pub(super) fn windows_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let host = match &self.host {

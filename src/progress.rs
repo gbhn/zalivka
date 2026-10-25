@@ -1,13 +1,60 @@
-//! Byte counters shared by CLI workers and the desktop interface.
+//! Transfer identities, byte counters and operation progress shared with the GUI.
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::Cell,
     io::{self, Write},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
 pub const EVENT_PREFIX: &str = "ZALIVKA_EVENT ";
 pub const WORKER_EVENTS_ENV: &str = "ZALIVKA_WORKER_EVENTS";
 const INTERVAL: Duration = Duration::from_millis(500);
+static NEXT_TRANSFER: AtomicU64 = AtomicU64::new(1);
+thread_local! {
+    static OPERATION: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+pub(crate) fn current_operation() -> Option<u64> {
+    OPERATION.get()
+}
+
+/// A request's transfers keep its operation even while other threads advance.
+pub(crate) fn with_operation<T>(operation: Option<u64>, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<u64>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OPERATION.set(self.0);
+        }
+    }
+    let _reset = Reset(OPERATION.replace(operation));
+    run()
+}
+
+/// Completion notifications for operations which may never report 100%.
+pub fn checkpoint_operation(name: &str) -> Option<u64> {
+    match name {
+        "create_filesystem_partitions" => Some(11),
+        "format_media" => Some(12),
+        "perform_restore_installing" => Some(13),
+        "fsck_filesystems" | "fsck_recovery_volume" => Some(15),
+        "mount_filesystem" | "mount_recovery_os_filesystem" => Some(16),
+        "fixup_var" => Some(17),
+        "update_iBoot" => Some(18),
+        "persistent_boot_args" => Some(25),
+        "wait_for_storage" => Some(28),
+        "unmount_unconditionally" | "unmount_filesystems" => Some(29),
+        "update_aht" => Some(36),
+        "clear_nvram" => Some(46),
+        "await_update_stockholm" => Some(55),
+        "update_NAND_firmware" => Some(58),
+        "await_update_se" => Some(59),
+        "create_protected_filesystems" => Some(67),
+        "update_fdr_ean" => Some(74),
+        "seal_system_volume" => Some(77),
+        _ => None,
+    }
+}
 
 /// Worker state is independent of human-readable logs and their retained history.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -29,6 +76,10 @@ pub enum Event {
     },
     Checkpoint {
         name: String,
+        complete: bool,
+    },
+    OperationWeights {
+        weights: Vec<(u64, u64)>,
     },
     OperationProgress {
         operation: u64,
@@ -44,6 +95,11 @@ impl Event {
         }
         match &event {
             Self::Transfer(update) if !update.valid() => None,
+            Self::OperationWeights { weights }
+                if weights.iter().all(|(_, weight)| *weight == 0) =>
+            {
+                None
+            }
             Self::InternetSpeed {
                 upload_bytes_per_second,
                 download_bytes_per_second,
@@ -123,11 +179,14 @@ impl Drop for TransferProfile {
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Update {
+    pub id: u64,
+    pub operation: Option<u64>,
     pub stage: String,
     pub completed: u64,
     pub total: Option<u64>,
     pub bytes_per_second: f64,
     pub elapsed_seconds: f64,
+    /// This stream ended; its job result determines success, including retries.
     pub finished: bool,
 }
 
@@ -152,6 +211,8 @@ impl Update {
 }
 
 pub struct Progress {
+    id: u64,
+    operation: Option<u64>,
     stage: String,
     total: Option<u64>,
     completed: u64,
@@ -160,12 +221,15 @@ pub struct Progress {
     sampled_at: Instant,
     sampled_bytes: u64,
     logged_at: Instant,
+    finished: bool,
 }
 
 impl Progress {
     pub fn new(stage: impl Into<String>, total: Option<u64>, completed: u64) -> Self {
         let now = Instant::now();
         let progress = Self {
+            id: NEXT_TRANSFER.fetch_add(1, Ordering::Relaxed),
+            operation: current_operation(),
             stage: stage.into(),
             total,
             completed,
@@ -174,6 +238,7 @@ impl Progress {
             sampled_at: now,
             sampled_bytes: completed,
             logged_at: now,
+            finished: false,
         };
         Event::Transfer(progress.update(now, false)).emit();
         crate::logging::emit(
@@ -211,6 +276,7 @@ impl Progress {
     }
 
     pub fn finish(&mut self) {
+        self.finished = true;
         let update = self.update(Instant::now(), true);
         crate::logging::emit(
             self.level(),
@@ -245,6 +311,8 @@ impl Progress {
             )
         };
         Update {
+            id: self.id,
+            operation: self.operation,
             stage: self.stage.clone(),
             completed: self.completed,
             total: self.total,
@@ -255,6 +323,16 @@ impl Progress {
             },
             elapsed_seconds: now.duration_since(self.started).as_secs_f64(),
             finished,
+        }
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        // Interrupted requests and partial HTTP ranges also end their stream.
+        // A retry gets a new identity; do not leave the previous card behind.
+        if !self.finished {
+            Event::Transfer(self.update(Instant::now(), true)).emit();
         }
     }
 }

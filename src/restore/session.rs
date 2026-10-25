@@ -13,6 +13,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::{Read, Write},
     time::{Duration, Instant},
@@ -123,10 +124,73 @@ pub(super) fn log_progress(
     })
 }
 
+/// These optional weights are progress hints, not a condition for restoring.
+pub(super) fn operation_weights(message: &Value) -> Option<Vec<(u64, u64)>> {
+    let weights =
+        wire::dictionary(wire::get(message, &["OperationWeights", "operation_weights"]).ok()?)
+            .ok()?;
+    let ids =
+        wire::dictionary(wire::get(message, &["OperationWeights", "operation_ids"]).ok()?).ok()?;
+    let mut operations = BTreeMap::new();
+    for (key, value) in weights {
+        let operation = wire::number(ids.get(key)?).ok()?;
+        let weight = wire::number(value).ok()?;
+        if operations.insert(operation, weight).is_some() {
+            return None;
+        }
+    }
+    operations
+        .values()
+        .any(|weight| *weight > 0)
+        .then(|| operations.into_iter().collect())
+}
+
+#[derive(Default)]
+pub(super) struct ProgressOperations {
+    active: Vec<u64>,
+}
+
+impl ProgressOperations {
+    pub(super) fn observe(&mut self, message: &Value, event: &crate::progress::Event) {
+        use crate::progress::{Event, checkpoint_operation};
+        match event {
+            Event::OperationProgress {
+                operation,
+                progress,
+            } => {
+                self.active.retain(|id| id != operation);
+                if *progress < 100 && wire::get(message, &["AsyncContextUUID"]).is_err() {
+                    self.active.push(*operation);
+                }
+            }
+            Event::Checkpoint {
+                name,
+                complete: true,
+            } => {
+                if let Some(operation) = checkpoint_operation(name) {
+                    self.active.retain(|id| *id != operation);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn for_request(&self, message: &Value) -> Option<u64> {
+        match wire::data_type(message).ok()? {
+            "SystemImageData" | "RecoveryOSASRImage" => Some(13),
+            "RecoveryOSImage" => Some(71),
+            // A background request without an operation must not inherit an
+            // unrelated foreground operation just because they overlap in time.
+            _ if wire::string(message, &["MsgType"]).ok() == Some("AsyncDataRequestMsg") => None,
+            _ => self.active.last().copied(),
+        }
+    }
+}
+
 pub(super) fn log_checkpoint(
     message: &Value,
     mut output: impl FnMut(Record),
-) -> Result<Option<crate::progress::Event>> {
+) -> Result<crate::progress::Event> {
     let id = wire::number(wire::get(message, &["CHECKPOINT_ID"])?)?;
     let name = wire::string(message, &["CHECKPOINT_NAME"]).unwrap_or("unknown");
     let result = wire::get(message, &["CHECKPOINT_RESULT"])?
@@ -191,8 +255,10 @@ pub(super) fn log_checkpoint(
             output(Record::new(Level::Info, "restore", stage));
         }
     }
-    Ok((!wire::boolean(message, &["CHECKPOINT_COMPLETE"]))
-        .then(|| crate::progress::Event::Checkpoint { name: name.into() }))
+    Ok(crate::progress::Event::Checkpoint {
+        name: name.into(),
+        complete: wire::boolean(message, &["CHECKPOINT_COMPLETE"]),
+    })
 }
 
 pub(super) fn run(
@@ -205,6 +271,7 @@ pub(super) fn run(
     let mut started = false;
     let mut final_received = false;
     let mut protocol = None;
+    let mut progress_operations = ProgressOperations::default();
     for attempt in 0..=3 {
         let (session, mut main, version) =
             confirm_restore_service(bootx_error.take(), || wait_restored(&state.device))?;
@@ -245,8 +312,14 @@ pub(super) fn run(
                     log.flush()?;
                 }
                 match wire::string(&message, &["MsgType"])? {
-                    "DataRequestMsg" => state.serve(&session, &mut main, &message)?,
-                    "AsyncDataRequestMsg" => requests.spawn(state, message)?,
+                    "DataRequestMsg" => crate::progress::with_operation(
+                        progress_operations.for_request(&message),
+                        || state.serve(&session, &mut main, &message),
+                    )?,
+                    "AsyncDataRequestMsg" => crate::progress::with_operation(
+                        progress_operations.for_request(&message),
+                        || requests.spawn(state, message),
+                    )?,
                     "StatusMsg" => {
                         final_received = true;
                         fdr.stop();
@@ -272,11 +345,18 @@ pub(super) fn run(
                         );
                         return Ok(());
                     }
-                    "ProgressMsg" => log_progress(&message, crate::logging::publish)?.emit(),
-                    "CheckpointMsg" => {
-                        if let Some(event) = log_checkpoint(&message, crate::logging::publish)? {
-                            event.emit();
+                    "ProgressMsg" => {
+                        if let Some(weights) = operation_weights(&message) {
+                            crate::progress::Event::OperationWeights { weights }.emit();
                         }
+                        let event = log_progress(&message, crate::logging::publish)?;
+                        progress_operations.observe(&message, &event);
+                        event.emit();
+                    }
+                    "CheckpointMsg" => {
+                        let event = log_checkpoint(&message, crate::logging::publish)?;
+                        progress_operations.observe(&message, &event);
+                        event.emit();
                     }
                     "AsyncWait" => {}
                     "RestoreProtocol" => ensure!(
