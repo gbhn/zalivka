@@ -53,7 +53,10 @@ fn executable_version_identifies_the_exact_build() {
         format!("zalivka {}", zalivka::VERSION)
     );
     assert!(zalivka::VERSION.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")));
-    let fingerprint = zalivka::VERSION.rsplit('.').next().unwrap();
+    let mut parts = zalivka::VERSION.rsplit('.');
+    let built_at = parts.next().unwrap().parse::<u128>().unwrap();
+    assert!(built_at > 0);
+    let fingerprint = parts.next().unwrap();
     assert_eq!(fingerprint.len(), 12);
     assert!(fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()));
 }

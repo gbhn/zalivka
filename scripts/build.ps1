@@ -83,7 +83,7 @@ try {
     } else {
         Copy-Item -LiteralPath $artifact -Destination $destination
     }
-    [pscustomobject]@{ version = $version; sha256 = $hash; target = $buildInfo.ZALIVKA_TARGET; compiler = $buildInfo.ZALIVKA_COMPILER; profile = $buildInfo.ZALIVKA_PROFILE; features = $features; executable = [IO.Path]::GetFileName($destination) } |
+    [pscustomobject]@{ version = $version; sha256 = $hash; source_fingerprint = $buildInfo.ZALIVKA_SOURCE_FINGERPRINT; built_at_unix_nanos = $buildInfo.ZALIVKA_BUILT_AT; target = $buildInfo.ZALIVKA_TARGET; compiler = $buildInfo.ZALIVKA_COMPILER; profile = $buildInfo.ZALIVKA_PROFILE; features = $features; executable = [IO.Path]::GetFileName($destination) } |
         ConvertTo-Json | Set-Content -LiteralPath ($destination + '.json') -Encoding UTF8
     Write-Output $destination
 } finally {

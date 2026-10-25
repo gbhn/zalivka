@@ -1,5 +1,10 @@
 use sha2::{Digest, Sha256};
-use std::{env, fs, path::Path, process::Command};
+use std::{
+    env, fs,
+    path::Path,
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 fn git(arguments: &[&str]) -> Option<String> {
     let output = Command::new("git").args(arguments).output().ok()?;
@@ -72,10 +77,10 @@ fn main() {
     for input in inputs {
         hash_path(Path::new(input), &mut hash);
     }
-    for file in ["HEAD", "index"] {
-        if let Some(path) = git(&["rev-parse", "--git-path", file]) {
-            println!("cargo:rerun-if-changed={path}");
-        }
+    // Source paths and HEAD cover source changes, staging and commits. Merely
+    // refreshing Git's stat cache must not rebuild the executable.
+    if let Some(path) = git(&["rev-parse", "--git-path", "HEAD"]) {
+        println!("cargo:rerun-if-changed={path}");
     }
     if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"])
         && let Some(path) = git(&["rev-parse", "--git-path", &reference])
@@ -87,11 +92,17 @@ fn main() {
     status.extend(inputs);
     let dirty = git(&status).is_some_and(|status| !status.is_empty());
     let fingerprint = format!("{:x}", hash.finalize());
+    let built_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("build time before Unix epoch")
+        .as_nanos();
     let id = format!(
-        "{revision}{}.{}",
+        "{revision}{}.{}.{built_at}",
         if dirty { ".dirty" } else { "" },
         &fingerprint[..12]
     );
+    println!("cargo:rustc-env=ZALIVKA_SOURCE_FINGERPRINT={fingerprint}");
+    println!("cargo:rustc-env=ZALIVKA_BUILT_AT={built_at}");
     println!("cargo:rustc-env=ZALIVKA_BUILD_ID={id}");
     println!(
         "cargo:rustc-env=ZALIVKA_VERSION={}+{id}",
