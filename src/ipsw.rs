@@ -19,7 +19,7 @@ use zip::ZipArchive;
 pub const MAX_COMPONENT: u64 = 1024 * 1024 * 1024;
 
 /// Signing-only entries may omit a path; present metadata must still be valid.
-fn component_path(entry: &Value) -> Result<Option<&str>> {
+pub(crate) fn component_path(entry: &Value) -> Result<Option<&str>> {
     let Some(info) = wire::dictionary(entry)?.get("Info") else {
         return Ok(None);
     };
@@ -92,10 +92,11 @@ impl Ipsw {
             .as_array()
             .context("invalid product types")?;
         ensure!(
-            products
-                .iter()
-                .any(|v| v.as_string().is_some_and(crate::device::is_mac_product)),
-            "this archive does not advertise any Mac or T2 product"
+            !products.is_empty()
+                && products
+                    .iter()
+                    .all(|value| value.as_string().is_some_and(|value| !value.is_empty())),
+            "IPSW must declare nonempty SupportedProductTypes"
         );
         Ok(Self {
             path: path.into(),
@@ -126,22 +127,33 @@ impl Ipsw {
     }
 
     pub fn component(&mut self, id: &Identity, name: &str) -> Result<Vec<u8>> {
+        let entry = wire::get(&id.value, &["Manifest", name])?;
+        let tag = id.payload_type(name)?;
+        let trusted = wire::optional_boolean(entry, &["Trusted"])?.unwrap_or(false);
+        let digest = wire::optional(entry, &["Digest"])?
+            .map(|value| {
+                value
+                    .as_data()
+                    .with_context(|| format!("invalid {name} Digest"))
+            })
+            .transpose()?
+            .filter(|digest| !digest.is_empty());
+        ensure!(
+            !trusted || digest.is_some(),
+            "strict restore requires nonempty {name} Digest"
+        );
         let data = self.read(id.path(name)?)?;
-        if let Ok(digest) = wire::get(&id.value, &["Manifest", name, "Digest"]) {
-            let expected = digest.as_data().context("invalid component digest")?;
-            if !expected.is_empty() {
-                let inputs = digest::DigestInput::variants(
-                    &data,
-                    data.len() as u64,
-                    img4::restore_tag(name),
-                )?;
-                digest::verify_component_digest(
-                    inputs,
-                    expected,
-                    |input| input.matches(&data, expected),
-                    (name == "Baobab,TCON").then_some(data.as_slice()),
-                )
-                .with_context(|| format!("component {name} digest mismatch"))?;
+        if let Some(expected) = digest {
+            let inputs = digest::DigestInput::variants(&data, data.len() as u64, tag)?;
+            if let Err(error) =
+                digest::verify_component_digest(inputs, |input| input.matches(&data, expected))
+            {
+                ensure!(
+                    crate::firmware::verify_plist_bundle(&data, expected)
+                        .with_context(|| format!("checking component {name} payload bundle"))?
+                        .manifest_digest,
+                    "component {name} digest mismatch: {error}"
+                );
             }
         }
         Ok(data)
@@ -156,12 +168,16 @@ impl Ipsw {
         // Trusted is a signing attribute, not the IMG4 transport container.
         // InputDevice is an untrusted IM4P but still needs the IMG4 wrapper.
         if name != "Ap,LocalPolicy"
-            && !wire::boolean(&id.value, &["Manifest", name, "Trusted"])
+            && !wire::optional_boolean(&id.value, &["Manifest", name, "Trusted"])?.unwrap_or(false)
             && img4::type_offset(&bytes).is_none()
         {
             return Ok(bytes);
         }
-        img4::personalize_with_metadata(name, &bytes, ticket, &id.value)
+        if name == "Ap,LocalPolicy" {
+            img4::personalize(&bytes, crate::tss::ticket(ticket)?)
+        } else {
+            img4::personalize_with_metadata(name, &bytes, ticket, &id.value)
+        }
     }
 
     /// Stream even multi-gigabyte images without keeping them in memory.
@@ -207,34 +223,132 @@ impl Ipsw {
         }))
     }
 
-    pub fn preflight(&mut self, id: &Identity) -> Result<()> {
+    pub fn preflight(&mut self, id: &mut Identity) -> Result<()> {
+        self.resolve_types(id)?;
         self.preflight_paths(id)?;
         id.path("OS")?;
-        for name in [
-            "iBSS",
-            "iBEC",
-            "RestoreRamDisk",
-            "RestoreDeviceTree",
-            "RestoreKernelCache",
-        ] {
-            self.component(id, name)?;
+        for tag in [b"ibss", b"ibec", b"rdsk", b"rdtr", b"rkrn"] {
+            let name = id.require_component_type(tag)?;
+            self.verify_boot_component(id, name)?;
         }
         Ok(())
     }
 
-    pub fn preflight_recovery(&self, id: &Identity) -> Result<()> {
+    pub fn preflight_recovery(&mut self, id: &mut Identity) -> Result<()> {
+        self.resolve_types(id)?;
         id.path("OS")?;
         self.preflight_paths(id)
     }
 
+    pub(crate) fn verify_boot_component(&mut self, id: &Identity, name: &str) -> Result<()> {
+        ensure!(
+            wire::get(&id.value, &["Manifest", name, "Digest"])?
+                .as_data()
+                .is_some_and(|digest| !digest.is_empty()),
+            "strict restore requires a nonempty boot component Digest for {name}"
+        );
+        let bytes = self.component(id, name)?;
+        let (_, rest) =
+            img4::parse(&bytes).with_context(|| format!("invalid boot component {name}"))?;
+        ensure!(
+            rest.is_empty() && img4::payload_type(&bytes).is_some(),
+            "boot component {name} is not a complete IM4P payload"
+        );
+        Ok(())
+    }
+
     fn preflight_paths(&self, id: &Identity) -> Result<()> {
+        wire::optional_boolean(&id.value, &["Info", "RequiresUIDMode"])?;
+        wire::optional_boolean(&id.value, &["Info", "RequiresNonceSlot"])?;
         for (name, entry) in id.manifest()? {
+            let tag = id.payload_type(name)?;
+            img4::nonce_slot(&id.value, tag)?;
+            if let Some(info) = wire::dictionary(entry)?.get("Info") {
+                let info = wire::dictionary(info)?;
+                for key in [
+                    "Personalize",
+                    "IsLoadedByiBoot",
+                    "IsLoadedByiBootStage1",
+                    "IsFirmwarePayload",
+                    "IsSecondaryFirmwarePayload",
+                    "IsFUDFirmware",
+                    "IsEarlyAccessFirmware",
+                    "IsiBootEANFirmware",
+                    "IsiBootNonEssentialFirmware",
+                ] {
+                    if let Some(value) = info.get(key) {
+                        ensure!(
+                            value.as_boolean().is_some(),
+                            "invalid {name} Info.{key}: expected boolean"
+                        );
+                    }
+                }
+                let loaded = info.get("IsLoadedByiBoot").and_then(Value::as_boolean) == Some(true);
+                let stage1 = info
+                    .get("IsLoadedByiBootStage1")
+                    .and_then(Value::as_boolean);
+                ensure!(
+                    !loaded || stage1.is_some(),
+                    "strict restore requires {name} Info.IsLoadedByiBootStage1"
+                );
+                ensure!(
+                    !(loaded || stage1 == Some(true)) || tag.is_some(),
+                    "cannot resolve iBoot firmware payload type for {name}: no manifest override or valid IM4P header"
+                );
+            }
             if let Some(path) = component_path(entry)
                 .with_context(|| format!("invalid manifest component {name}"))?
             {
+                let digest = wire::optional(entry, &["Digest"])?
+                    .map(|value| {
+                        value
+                            .as_data()
+                            .with_context(|| format!("invalid {name} Digest"))
+                    })
+                    .transpose()?;
+                if wire::optional_boolean(entry, &["Trusted"])?.unwrap_or(false) {
+                    ensure!(
+                        digest.is_some_and(|digest| !digest.is_empty()),
+                        "strict restore requires nonempty {name} Digest"
+                    );
+                }
+                if let Some(digest) = digest.filter(|digest| !digest.is_empty()) {
+                    ensure!(
+                        [20, 32, 48].contains(&digest.len()),
+                        "unsupported {name} Digest size {}",
+                        digest.len()
+                    );
+                }
                 ensure!(self.contains(path), "IPSW is missing {name}: {path}");
             }
         }
+        Ok(())
+    }
+
+    /// Read only IM4P headers, retaining the original manifest for TSS and restored.
+    pub(crate) fn resolve_types(&mut self, id: &mut Identity) -> Result<()> {
+        let mut types = std::collections::HashMap::new();
+        for (name, entry) in id.manifest()? {
+            if img4::component_tag(name, Some(entry))?.is_some() {
+                continue;
+            }
+            let Some(path) = component_path(entry)? else {
+                continue;
+            };
+            if types.contains_key(path) {
+                continue;
+            }
+            let entry = self
+                .archive
+                .by_name(path)
+                .with_context(|| format!("missing IPSW component {name}: {path}"))?;
+            // A canonical DER sequence header plus the IM4P magic and four-byte
+            // type fit in 32 bytes, independently of the image body length.
+            let mut prefix = Vec::new();
+            entry.take(32).read_to_end(&mut prefix)?;
+            types.insert(path.to_owned(), img4::payload_type(&prefix));
+        }
+        id.file_types = types;
         Ok(())
     }
 }

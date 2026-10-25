@@ -1,5 +1,5 @@
 //! Child-process lifetime, progress and completion for one GUI operation.
-use super::widgets::{elapsed_text, friendly_phase};
+use super::widgets::elapsed_text;
 use super::{Action, Event, Level, Notice, Record, Setup, Tone, progress};
 use anyhow::{Context, Result};
 use eframe::egui;
@@ -24,53 +24,12 @@ pub(super) struct Job {
     pub(super) cancelled: bool,
     pub(super) restore_completed: bool,
     internet: Internet,
-    pub(super) activities: BTreeMap<ActivityId, Activity>,
+    pub(super) transfers: BTreeMap<u64, Transfer>,
     // Weights advertised by restored and each operation's highest known fraction.
     overall_operations: BTreeMap<u64, (u64, f32)>,
     pub(super) overall_fraction: Option<f32>,
     pub(super) phase: String,
     pub(super) last_activity: Instant,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) enum ActivityId {
-    Operation(u64),
-    Transfer(u64),
-}
-
-#[derive(Default)]
-pub(super) struct Activity {
-    progress: Option<i64>,
-    pub(super) transfers: BTreeMap<u64, Transfer>,
-}
-
-impl Activity {
-    pub(super) fn fraction(&self) -> Option<f32> {
-        if let Some(progress) = self.progress.filter(|progress| *progress >= 0) {
-            return Some((progress as f32 / 100.0).clamp(0.0, 1.0));
-        }
-        if self.transfers.is_empty() {
-            return None;
-        }
-        let (completed, total) =
-            self.transfers
-                .values()
-                .try_fold((0u64, 0u64), |(completed, total), transfer| {
-                    Some((
-                        completed.checked_add(transfer.update.completed)?,
-                        total.checked_add(transfer.update.total?)?,
-                    ))
-                })?;
-        Some(if total == 0 {
-            1.0
-        } else {
-            completed as f32 / total as f32
-        })
-    }
-
-    fn active(&self) -> bool {
-        !self.transfers.is_empty() || self.progress.is_some_and(|progress| progress < 100)
-    }
 }
 
 pub(super) struct Transfer {
@@ -135,7 +94,7 @@ impl Job {
             cancelled: false,
             restore_completed: false,
             internet: Internet::Idle,
-            activities: BTreeMap::new(),
+            transfers: BTreeMap::new(),
             overall_operations: BTreeMap::new(),
             overall_fraction: None,
             phase: if action == Action::PrepareWindows {
@@ -209,24 +168,16 @@ impl Job {
         match event {
             progress::Event::Log(_) => unreachable!(),
             progress::Event::Transfer(update) => {
-                let id = update
-                    .operation
-                    .map(ActivityId::Operation)
-                    .unwrap_or(ActivityId::Transfer(update.id));
-                let activity = self.activities.entry(id).or_default();
                 if update.finished {
-                    activity.transfers.remove(&update.id);
+                    self.transfers.remove(&update.id);
                 } else {
-                    activity.transfers.insert(
+                    self.transfers.insert(
                         update.id,
                         Transfer {
                             update,
                             received: Instant::now(),
                         },
                     );
-                }
-                if !activity.active() {
-                    self.activities.remove(&id);
                 }
             }
             progress::Event::RestoreCompleted => {
@@ -268,12 +219,8 @@ impl Job {
                 self.set_phase("Интернет по USB недоступен");
             }
             progress::Event::Checkpoint { name, complete } => {
-                if complete {
-                    if let Some(operation) = progress::checkpoint_operation(&name) {
-                        self.operation_progress(operation, 100);
-                    }
-                } else {
-                    self.phase = friendly_phase(&name).into();
+                if !complete {
+                    self.phase = format!("Этап: {}", name.replace('_', " "));
                 }
             }
             progress::Event::OperationWeights { weights } => {
@@ -289,26 +236,18 @@ impl Job {
                     .collect();
                 self.update_overall();
             }
+            progress::Event::OperationName { .. } => {}
             progress::Event::OperationProgress {
                 operation,
                 progress,
+                ..
             } => {
-                self.operation_progress(operation, progress);
+                if progress >= 0 {
+                    self.advance_overall(operation, (progress as f32 / 100.0).min(1.0));
+                }
             }
         }
         None
-    }
-
-    fn operation_progress(&mut self, operation: u64, progress: i64) {
-        if progress >= 0 {
-            self.advance_overall(operation, (progress as f32 / 100.0).min(1.0));
-        }
-        let id = ActivityId::Operation(operation);
-        let activity = self.activities.entry(id).or_default();
-        activity.progress = Some(progress);
-        if !activity.active() {
-            self.activities.remove(&id);
-        }
     }
 
     fn advance_overall(&mut self, operation: u64, fraction: f32) {
@@ -339,7 +278,7 @@ impl Job {
 
     fn set_phase(&mut self, phase: &str) {
         self.phase = phase.into();
-        self.activities.clear();
+        self.transfers.clear();
     }
 
     // The exit code can arrive before the final stdout/stderr lines.

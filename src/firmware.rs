@@ -1,60 +1,86 @@
 //! Firmware updater personalization for the auxiliary controllers in Macs.
 mod canary;
 mod containers;
-mod legacy;
-mod payload;
 mod request;
-use crate::{
-    ipsw::{Identity, Ipsw},
-    wire,
-};
+use crate::{device::DeviceInfo, ipsw::Identity, wire};
 use anyhow::{Context, Result};
 pub use canary::canary_response;
-pub use containers::{Ftab, payload_ranges, verify_tcon_digest};
-use payload::payload;
+pub use containers::{Ftab, payload_ranges};
+pub(crate) use containers::{MAX_PLIST_BUNDLE, plist_prefix, verify_plist_bundle};
 use plist::Value;
 use std::io::Write;
 
 pub struct Update {
     pub request: Value,
     pub response_tags: Vec<String>,
-    pub firmware: Option<Value>,
+    payload: Option<Vec<u8>>,
 }
 
 impl Update {
     pub fn finish(self, mut response: Value) -> Result<Value> {
-        if let Some(bytes) = self.firmware {
+        for tag in &self.response_tags {
+            wire::get(&response, &[tag])
+                .with_context(|| format!("Apple returned no requested firmware tag {tag}"))?;
+        }
+        if let Some(payload) = self.payload {
+            let ticket = self
+                .response_tags
+                .first()
+                .context("missing namespace ticket tag")?;
+            anyhow::ensure!(
+                wire::get(&response, &[ticket])?
+                    .as_data()
+                    .is_some_and(|data| !data.is_empty()),
+                "Apple returned an invalid namespace ticket"
+            );
             let fields = response
                 .as_dictionary_mut()
-                .context("invalid updater TSS response")?;
-            if !fields.contains_key("FirmwareData") {
-                fields.insert("FirmwareData".into(), bytes);
-            }
-        }
-        for tag in self.response_tags {
-            wire::get(&response, &[&tag])
-                .with_context(|| format!("Apple returned no requested firmware tag {tag}"))?;
+                .context("invalid updater response")?;
+            anyhow::ensure!(
+                !fields.contains_key("FirmwareData"),
+                "namespace response unexpectedly contains FirmwareData"
+            );
+            fields.insert("FirmwareData".into(), Value::Data(payload));
         }
         Ok(response)
     }
 }
 
-pub fn prepare(ipsw: &mut Ipsw, id: &Identity, arguments: &Value) -> Result<Update> {
-    let updater = request::Request::parse(arguments)?;
-    let request = updater.signing_request(id)?;
-    let firmware = if updater
-        .response_tags
-        .iter()
-        .any(|tag| tag == "FirmwareData")
+/// Prefer explicit device-generated requests; simple namespace requests can use
+/// one verified plist payload bundle. Updater names never select behavior.
+pub fn prepare(
+    ipsw: &mut crate::ipsw::Ipsw,
+    id: &Identity,
+    device: &DeviceInfo,
+    arguments: &Value,
+) -> Result<Update> {
+    if wire::optional(arguments, &["DeviceGeneratedRequest"])?.is_none()
+        && wire::optional(arguments, &["DeviceGeneratedTags"])?.is_none()
     {
-        payload(ipsw, id, &updater)?
-    } else {
-        None
-    };
+        let inferred = request::namespace_request(id, arguments)?;
+        let digest = wire::get(&id.value, &["Manifest", &inferred.component, "Digest"])?
+            .as_data()
+            .context("invalid bundle Digest")?;
+        anyhow::ensure!(
+            [20, 32, 48].contains(&digest.len()),
+            "namespace updater requires a nonempty supported manifest Digest"
+        );
+        let payload = ipsw.component(id, &inferred.component)?;
+        anyhow::ensure!(
+            verify_plist_bundle(&payload, digest)?.payloads > 0,
+            "namespace updater requires a verified plist payload bundle; payload layout is not described"
+        );
+        return Ok(Update {
+            request: inferred.request,
+            response_tags: vec![inferred.ticket],
+            payload: Some(payload),
+        });
+    }
+    let updater = request::Request::parse(arguments)?;
     Ok(Update {
-        request,
-        firmware,
+        request: updater.signing_request(id, device)?,
         response_tags: updater.response_tags,
+        payload: None,
     })
 }
 

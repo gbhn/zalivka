@@ -71,7 +71,7 @@ fn im4p_prefix_uses_canonical_headers_and_stays_inside_the_declared_sequence() {
     ] {
         let malformed = [header, fields.to_vec()].concat();
         assert_eq!(img4::type_offset(&malformed), None, "{malformed:?}");
-        assert!(img4::personalize("iBSS", &malformed, &ticket()).is_err());
+        assert!(img4::personalize(&malformed, &ticket()).is_err());
     }
     // A large image can expose its type before the body has arrived.
     let prefix = [vec![0x30, 0x84, 0x40, 0, 0, 0], fields[..12].to_vec()].concat();
@@ -86,22 +86,22 @@ fn im4p_prefix_uses_canonical_headers_and_stays_inside_the_declared_sequence() {
 }
 
 #[test]
-fn img4_preserves_payload_and_uses_restore_tag() {
+fn img4_without_manifest_metadata_preserves_the_embedded_payload_type() {
     let payload = im4p(b"krnl");
-    let image = img4::personalize("RestoreKernelCache", &payload, &ticket()).unwrap();
+    let image = img4::personalize(&payload, &ticket()).unwrap();
     let (sequence, _) = img4::parse(&image).unwrap();
     let (magic, rest) = img4::parse(sequence.content).unwrap();
     assert_eq!(magic.content, b"IMG4");
     let (p, rest) = img4::parse(rest).unwrap();
     let (_, fields) = img4::parse(p.content).unwrap();
     let (kind, _) = img4::parse(fields).unwrap();
-    assert_eq!(kind.content, b"rkrn");
+    assert_eq!(kind.content, b"krnl");
     let (manifest, rest) = img4::parse(rest).unwrap();
     assert_eq!(manifest.tag, 0xa0);
     assert_eq!(manifest.content, ticket());
     assert!(rest.is_empty());
-    assert!(img4::personalize("iBSS", b"garbage", &ticket()).is_err());
-    assert!(img4::personalize("iBSS", &payload, b"invalid ticket").is_err());
+    assert!(img4::personalize(b"garbage", &ticket()).is_err());
+    assert!(img4::personalize(&payload, b"invalid ticket").is_err());
 }
 
 #[test]
@@ -115,6 +115,10 @@ fn img4_metadata_matches_the_existing_envelope_at_der_length_boundaries() {
         let payload = img4::element(0x30, &fields);
         for metadata in [false, true] {
             let mut id = identity();
+            manifest_mut(&mut id).insert(
+                "SEP".into(),
+                wire::dict([("Info", wire::dict([("Img4PayloadType", "sepi".into())]))]),
+            );
             let info = id
                 .value
                 .as_dictionary_mut()
@@ -140,10 +144,11 @@ fn img4_metadata_matches_the_existing_envelope_at_der_length_boundaries() {
             expected.extend_from_slice(&payload);
             expected.extend(img4::element(0xa0, &ticket()));
             assert_eq!(
-                img4::personalize("SEP", &payload, &ticket()).unwrap(),
+                img4::personalize(&payload, &ticket()).unwrap(),
                 img4::element(0x30, &expected)
             );
-            if let Some(info) = img4::restore_info(&tss, "SEP", &id.value).unwrap() {
+            if let Some(info) = img4::restore_info(&tss, "SEP", &id.value, Some(*b"sepi")).unwrap()
+            {
                 expected.extend(info);
             }
             let actual = img4::personalize_with_metadata("SEP", &payload, &tss, &id.value).unwrap();
@@ -166,7 +171,7 @@ fn nonce_slots_use_positive_der_integers_and_apple_private_tags() {
         (256, b"\x02\x02\x01\x00"),
         (u64::MAX, b"\x02\x09\x00\xff\xff\xff\xff\xff\xff\xff\xff"),
     ] {
-        let identity = wire::dict([(
+        let base_identity = wire::dict([(
             "Info",
             wire::dict([
                 ("RequiresNonceSlot", true.into()),
@@ -179,10 +184,32 @@ fn nonce_slots_use_positive_der_integers_and_apple_private_tags() {
             ("SepStage1", b"\xff\x87\x9b\xb9\xd2\x64", b"snid"),
             ("LLB", b"\xff\x86\x8b\xb9\xd2\x64", b"anid"),
         ] {
-            let info =
-                img4::restore_info(&wire::dict([] as [(&str, Value); 0]), component, &identity)
-                    .unwrap()
-                    .unwrap();
+            let mut identity = base_identity.clone();
+            identity.as_dictionary_mut().unwrap().insert(
+                "Manifest".into(),
+                wire::dict([(
+                    component,
+                    wire::dict([(
+                        "Info",
+                        wire::dict([(
+                            "Img4PayloadType",
+                            if component == "LLB" { "illb" } else { "sepi" }.into(),
+                        )]),
+                    )]),
+                )]),
+            );
+            let info = img4::restore_info(
+                &wire::dict([] as [(&str, Value); 0]),
+                component,
+                &identity,
+                Some(if component == "LLB" {
+                    *b"illb"
+                } else {
+                    *b"sepi"
+                }),
+            )
+            .unwrap()
+            .unwrap();
             let (outer, _) = img4::parse(&info).unwrap();
             let (sequence, _) = img4::parse(outer.content).unwrap();
             let (_, fields) = img4::parse(sequence.content).unwrap();
@@ -206,6 +233,18 @@ fn local_policy_and_im4r_nonce_slot_tbm_are_encoded() {
         "30141604494d345016046c706f6c1603312e30040100"
     );
     let mut id = identity();
+    manifest_mut(&mut id).insert(
+        "SEP".into(),
+        wire::dict([("Info", wire::dict([("Img4PayloadType", "sepi".into())]))]),
+    );
+    id.value
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("Info")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("SepNonceSlotID".into(), 2u64.into());
     id.value
         .as_dictionary_mut()
         .unwrap()
@@ -224,7 +263,9 @@ fn local_policy_and_im4r_nonce_slot_tbm_are_encoded() {
             ]),
         ),
     ]);
-    let info = img4::restore_info(&tss, "SEP", &id.value).unwrap().unwrap();
+    let info = img4::restore_info(&tss, "SEP", &id.value, Some(*b"sepi"))
+        .unwrap()
+        .unwrap();
     let (outer, _) = img4::parse(&info).unwrap();
     assert_eq!(outer.tag, 0xa1);
     let (inner, _) = img4::parse(outer.content).unwrap();

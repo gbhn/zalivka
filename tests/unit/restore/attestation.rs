@@ -8,10 +8,10 @@ const SYNTHETIC_INTERMEDIATE: &[u8] =
 const SYNTHETIC_LEAF: &[u8] = include_bytes!("../../fixtures/attestation/synthetic-leaf.cer");
 
 fn attestation(mode: u64) -> Attestation {
-    let mut id = Identity {
-        index: 3,
-        value: serde_json::from_str(include_str!("../../fixtures/j313-26A434-iboot.json")).unwrap(),
-    };
+    let mut id = Identity::new(
+        3,
+        serde_json::from_str(include_str!("../../fixtures/j313-26A434-iboot.json")).unwrap(),
+    );
     id.value
         .as_dictionary_mut()
         .unwrap()
@@ -75,10 +75,10 @@ fn successful_device_status_does_not_replace_a_missing_attestation_and_is_still_
 
 #[test]
 fn update_restore_declines_dfu_attestation_and_unknown_levels_fail_before_boot() {
-    let mut id = Identity {
-        index: 3,
-        value: serde_json::from_str(include_str!("../../fixtures/j313-26A434-iboot.json")).unwrap(),
-    };
+    let mut id = Identity::new(
+        3,
+        serde_json::from_str(include_str!("../../fixtures/j313-26A434-iboot.json")).unwrap(),
+    );
     let info = id
         .value
         .as_dictionary_mut()

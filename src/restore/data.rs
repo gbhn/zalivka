@@ -12,6 +12,23 @@ use anyhow::{Context, Result, ensure};
 use plist::{Dictionary, Value};
 use std::time::Duration;
 
+pub(super) fn request_name(message: &Value) -> Result<String> {
+    let kind = wire::data_type(message)?;
+    let detail = [
+        "ImageName",
+        "MessageArgUpdaterName",
+        "UpdaterName",
+        "ImageType",
+    ]
+    .into_iter()
+    .find_map(|key| {
+        wire::string(message, &["Arguments", key])
+            .ok()
+            .filter(|name| !name.is_empty())
+    });
+    Ok(detail.unwrap_or(kind).into())
+}
+
 impl ContextState {
     pub fn serve(
         &mut self,
@@ -53,14 +70,21 @@ impl ContextState {
         data_type: DataType,
     ) -> Result<()> {
         let kind = wire::data_type(message)?;
+        if let Some(operation) = crate::progress::current_operation() {
+            crate::progress::Event::OperationName {
+                operation,
+                name: request_name(message)?,
+            }
+            .emit();
+        }
         // Resolve firmware identity only for handlers that consume it. Network,
         // preflight and optional RecoveryOS probes do not depend on an identity.
         let restore = &self.restore.identity;
         let recovery = self.recovery.as_ref();
         let identity = || -> Result<&Identity> {
-            if data_type == DataType::RecoveryAsr
-                || wire::boolean(message, &["Arguments", "IsRecoveryOS"])
-            {
+            let is_recovery =
+                wire::optional_boolean(message, &["Arguments", "IsRecoveryOS"])?.unwrap_or(false);
+            if data_type == DataType::RecoveryAsr || is_recovery {
                 Ok(&recovery
                     .context("device requested a recoveryOS identity absent from this IPSW")?
                     .identity)
@@ -78,9 +102,14 @@ impl ContextState {
                 ("BuildIdentityDict", identity()?.value.clone()),
                 (
                     "Variant",
-                    wire::get(message, &["Arguments", "Variant"])
-                        .cloned()
-                        .unwrap_or("Erase".into()),
+                    match wire::optional(message, &["Arguments", "Variant"])? {
+                        Some(value) => value
+                            .as_string()
+                            .filter(|value| !value.is_empty())
+                            .context("invalid Arguments.Variant")?
+                            .into(),
+                        None => identity()?.behavior()?.name().into(),
+                    },
                 ),
             ]),
             DataType::ReceiptManifest => wire::dict([(
@@ -102,7 +131,8 @@ impl ContextState {
                 )])
             }
             DataType::Empty => Value::Dictionary(Dictionary::new()),
-            DataType::Component(component) => {
+            DataType::Component(tag) => {
+                let component = identity()?.require_component_type(tag)?;
                 let bytes = self
                     .ipsw
                     .personalized(identity()?, component, &self.restore.ticket)?;
@@ -111,16 +141,27 @@ impl ContextState {
             DataType::PersonalizedBootObject | DataType::SourceBootObject => {
                 let id = identity()?;
                 let name = wire::string(message, &["Arguments", "ImageName"])?;
+                let global_optional = if name == "__GlobalManifest__" {
+                    wire::optional_boolean(message, &["Arguments", "GlobalManifestOptional"])?
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
                 let path = boot_object_path(id, name, message)?;
-                crate::ipsw::validate_path(&path)?;
                 if data_type == DataType::SourceBootObject
                     && name == "__GlobalManifest__"
                     && !self.ipsw.contains(&path)
                 {
                     ensure!(
-                        id.info("VariantSupportsGlobalSigning").is_err()
-                            || wire::boolean(message, &["Arguments", "GlobalManifestOptional"]),
+                        wire::optional(&id.value, &["Info", "VariantSupportsGlobalSigning"])?
+                            .is_none()
+                            || global_optional,
                         "IPSW is missing required global manifest {path}"
+                    );
+                    crate::log!(
+                        Debug,
+                        "restored",
+                        "В IPSW нет необязательного GlobalManifest: {path}; завершение без файла"
                     );
                     wire::send(out, &wire::dict([("FileDataDone", true.into())]))?;
                     return Ok(());
@@ -172,7 +213,8 @@ impl ContextState {
                 let response = if let Some(response) = crate::firmware::canary_response(args)? {
                     response
                 } else {
-                    let update = crate::firmware::prepare(&mut self.ipsw, identity()?, args)?;
+                    let update =
+                        crate::firmware::prepare(&mut self.ipsw, identity()?, &self.device, args)?;
                     let response = tss::send_raw(&update.request)?;
                     update.finish(response)?
                 };

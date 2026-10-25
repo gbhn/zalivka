@@ -119,6 +119,10 @@ pub(super) fn log_progress(
         },
     ));
     Ok(crate::progress::Event::OperationProgress {
+        async_context: wire::string(message, &["AsyncContextUUID"])
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
         operation,
         progress,
     })
@@ -147,43 +151,41 @@ pub(super) fn operation_weights(message: &Value) -> Option<Vec<(u64, u64)>> {
 
 #[derive(Default)]
 pub(super) struct ProgressOperations {
-    active: Vec<u64>,
+    contexts: BTreeMap<String, u64>,
 }
 
 impl ProgressOperations {
     pub(super) fn observe(&mut self, message: &Value, event: &crate::progress::Event) {
-        use crate::progress::{Event, checkpoint_operation};
-        match event {
-            Event::OperationProgress {
-                operation,
-                progress,
-            } => {
-                self.active.retain(|id| id != operation);
-                if *progress < 100 && wire::get(message, &["AsyncContextUUID"]).is_err() {
-                    self.active.push(*operation);
-                }
+        use crate::progress::Event;
+        if let Event::OperationProgress {
+            operation,
+            progress,
+            ..
+        } = event
+            && let Ok(context) = wire::string(message, &["AsyncContextUUID"])
+            && !context.is_empty()
+        {
+            if *progress < 100 {
+                self.contexts.insert(context.into(), *operation);
+            } else {
+                self.contexts.remove(context);
             }
-            Event::Checkpoint {
-                name,
-                complete: true,
-            } => {
-                if let Some(operation) = checkpoint_operation(name) {
-                    self.active.retain(|id| *id != operation);
-                }
-            }
-            _ => {}
         }
     }
 
     pub(super) fn for_request(&self, message: &Value) -> Option<u64> {
-        match wire::data_type(message).ok()? {
-            "SystemImageData" | "RecoveryOSASRImage" => Some(13),
-            "RecoveryOSImage" => Some(71),
-            // A background request without an operation must not inherit an
-            // unrelated foreground operation just because they overlap in time.
-            _ if wire::string(message, &["MsgType"]).ok() == Some("AsyncDataRequestMsg") => None,
-            _ => self.active.last().copied(),
+        if let Ok(operation) = wire::get(message, &["Operation"]) {
+            return wire::number(operation).ok();
         }
+        if let Ok(context) = wire::get(message, &["AsyncContextUUID"]) {
+            // An explicit context must never inherit a different foreground job
+            // or a legacy operation ID inferred from the requested data type.
+            return context
+                .as_string()
+                .and_then(|context| self.contexts.get(context))
+                .copied();
+        }
+        None
     }
 }
 
@@ -196,11 +198,8 @@ pub(super) fn log_checkpoint(
     let result = wire::get(message, &["CHECKPOINT_RESULT"])?
         .as_signed_integer()
         .context("invalid checkpoint result")?;
-    let phase = if wire::boolean(message, &["CHECKPOINT_COMPLETE"]) {
-        "completed"
-    } else {
-        "started"
-    };
+    let complete = wire::optional_boolean(message, &["CHECKPOINT_COMPLETE"])?.unwrap_or(false);
+    let phase = if complete { "completed" } else { "started" };
     // Checkpoints describe individual steps; only StatusMsg decides the final result.
     output(Record::new(
         if result == 0 {
@@ -216,48 +215,23 @@ pub(super) fn log_checkpoint(
         ("CHECKPOINT_ERROR", Level::Error),
     ] {
         if let Ok(text) = wire::string(message, &[key]) {
-            // eCfg is device-generated data, not an IPSW firmware component.
-            // Preserve the device's warning; a successful checkpoint alone
-            // does not establish why this particular Mac has no eCfg record.
-            let missing_ecfg = key == "CHECKPOINT_WARNING"
-                && id == 0x1504
-                && name == "update_fdr_ean"
-                && result == 0
-                && wire::boolean(message, &["CHECKPOINT_COMPLETE"])
-                && wire::dictionary(message)?.get("CHECKPOINT_ERROR").is_none()
-                && text == "update_fdr_ean missing data for eCfg.";
             output(Record::new(
                 level,
                 "restored",
-                if missing_ecfg {
-                    format!(
-                        "{name} (0x{id:x}): {text} Mac не вернул данные класса eCfg при переносе FDR в EAN; этап завершён с result=0"
-                    )
-                } else {
-                    format!("{name} (0x{id:x}): {text}")
-                },
+                format!("{name} (0x{id:x}): {text}"),
             ));
         }
     }
-    if !wire::boolean(message, &["CHECKPOINT_COMPLETE"]) {
-        let stage = match name {
-            "wait_for_storage" => Some("Проверка накопителя"),
-            "perform_main_os_prepare" => Some("Подготовка macOS"),
-            "perform_restore_installing" => Some("Установка macOS"),
-            "update_device_firmware" => Some("Обновление прошивки Mac"),
-            "recovery_os_restore" => Some("Установка recoveryOS"),
-            "populate_isc_preboot_volume" => Some("Подготовка загрузочных файлов"),
-            "seal_system_volume" => Some("Проверка системного тома"),
-            "cleanup_send_final_status" => Some("Завершение восстановления"),
-            _ => None,
-        };
-        if let Some(stage) = stage {
-            output(Record::new(Level::Info, "restore", stage));
-        }
+    if !complete {
+        output(Record::new(
+            Level::Info,
+            "restore",
+            format!("Этап Mac: {}", name.replace('_', " ")),
+        ));
     }
     Ok(crate::progress::Event::Checkpoint {
         name: name.into(),
-        complete: wire::boolean(message, &["CHECKPOINT_COMPLETE"]),
+        complete,
     })
 }
 
@@ -314,10 +288,18 @@ pub(super) fn run(
                 match wire::string(&message, &["MsgType"])? {
                     "DataRequestMsg" => crate::progress::with_operation(
                         progress_operations.for_request(&message),
+                        wire::string(&message, &["AsyncContextUUID"])
+                            .ok()
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned),
                         || state.serve(&session, &mut main, &message),
                     )?,
                     "AsyncDataRequestMsg" => crate::progress::with_operation(
                         progress_operations.for_request(&message),
+                        wire::string(&message, &["AsyncContextUUID"])
+                            .ok()
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned),
                         || requests.spawn(state, message),
                     )?,
                     "StatusMsg" => {

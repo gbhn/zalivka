@@ -14,133 +14,171 @@
       "Info": {
         "Path": "Firmware/ane/h13_ane_fw_styx_j5x.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "test",
+        "Personalize": false
       }
     },
     "AOP": {
       "Info": {
         "Path": "Firmware/AOP/aopfw-mac13gaop.RELEASE.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "test",
+        "Personalize": false
       }
     },
     "AVE": {
       "Info": {
         "Path": "Firmware/ave/AppleAVE2FW_H13G.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "test",
+        "Personalize": false
       }
     },
     "Ap,RestoreCIO": {
       "Info": {
         "Path": "Firmware/t8103ciofw.im4p",
         "IsLoadedByiBootStage1": true,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "rcio",
+        "Personalize": false
       }
     },
     "Ap,RestoreDCP2": {
       "Info": {
         "Path": "Firmware/dcp/ipad13dcp_restore.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "test",
+        "Personalize": false
       }
     },
     "Ap,RestoreSecurePageTableMonitor": {
       "Info": {
         "Path": "Firmware/sptm.t8103.release.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "test",
+        "Personalize": false
       }
     },
     "Ap,RestoreTMU": {
       "Info": {
         "Path": "Firmware/t8103tmufw.im4p",
         "IsLoadedByiBootStage1": true,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "rtmu",
+        "Personalize": false
       }
     },
     "Ap,RestoreTrustedExecutionMonitor": {
       "Info": {
         "Path": "Firmware/txm.macosx.release.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "test",
+        "Personalize": false
       }
     },
     "GFX": {
       "Info": {
         "Path": "Firmware/agx/armfw_g13g.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "test",
+        "Personalize": false
       }
     },
     "ISP": {
       "Info": {
         "Path": "Firmware/isp_bni/adc-pallas-j129.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "test",
+        "Personalize": false
       }
     },
     "PMP": {
       "Info": {
         "Path": "Firmware/pmp/t8103pmp.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "test",
+        "Personalize": false
       }
     },
     "RestoreANS": {
       "Info": {
         "Path": "Firmware/rans.t8103.release.im4p",
         "IsLoadedByiBootStage1": true,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "rans",
+        "Personalize": false
       }
     },
     "RestoreDCP": {
       "Info": {
         "Path": "Firmware/dcp/ipad13dcp_restore.im4p",
         "IsLoadedByiBootStage1": true,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "rdcp",
+        "Personalize": false
       }
     },
     "RestoreKernelCache": {
       "Info": {
         "Path": "kernelcache.release.mac13g",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": false
+        "IsLoadedByiBoot": false,
+        "Img4PayloadType": "rkrn",
+        "Personalize": false
       }
     },
     "RestoreLogo": {
       "Info": {
         "Path": "Firmware/all_flash/applelogo@2x~mac-USBc.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": false
+        "IsLoadedByiBoot": false,
+        "Img4PayloadType": "rlgo",
+        "Personalize": false
       }
     },
     "RestoreTrustCache": {
       "Info": {
         "Path": "Firmware/043-70833-687.dmg.trustcache",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "test",
+        "Personalize": false
       }
     },
     "SIO": {
       "Info": {
         "Path": "Firmware/SmartIOFirmware_ASCv4.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "test",
+        "Personalize": false
       }
     },
     "iBEC": {
       "Info": {
         "Path": "Firmware/dfu/iBEC.j313.RELEASE.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": false
+        "IsLoadedByiBoot": false,
+        "Img4PayloadType": "ibec",
+        "Personalize": false
       }
     },
     "iBootData": {
       "Info": {
         "Path": "Firmware/all_flash/iBootData.j313.RELEASE.im4p",
         "IsLoadedByiBootStage1": false,
-        "IsLoadedByiBoot": true
+        "IsLoadedByiBoot": true,
+        "Img4PayloadType": "ibdt",
+        "Personalize": false
       }
     }
   }

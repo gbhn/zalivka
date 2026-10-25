@@ -50,7 +50,7 @@ fn apple_catalog_resolves_mac_and_t2_hardware_and_uses_current_universal_release
             &"ab".repeat(20),
             "https://updates.cdn-apple.com/restore.ipsw",
         );
-        assert_eq!(catalog::catalog_url(&device), url);
+        assert!([catalog::MACOS_CATALOG, catalog::BRIDGEOS_CATALOG].contains(&url));
         for mode in [Mode::Dfu, Mode::Recovery] {
             device.mode = mode;
             let release = catalog::resolve(&data, &device).unwrap();
@@ -61,6 +61,43 @@ fn apple_catalog_resolves_mac_and_t2_hardware_and_uses_current_universal_release
             assert!(release.url.ends_with("/restore.ipsw"));
         }
     }
+}
+
+#[test]
+fn catalog_selection_uses_advertised_hardware_without_chip_or_product_name_tables() {
+    let mut device = device_info();
+    device.chip_id = 0xabcd;
+    device.board_id = 0x42;
+    let key = ((u64::from(device.board_id) << 24) | u64::from(device.chip_id)).to_string();
+    let matching = catalog_fixture(
+        &key,
+        "FutureProduct9,2",
+        &"ab".repeat(20),
+        "https://updates.cdn-apple.com/future.ipsw",
+    );
+    let other = catalog_fixture(
+        "1",
+        "AnotherProduct",
+        &"ab".repeat(20),
+        "https://updates.cdn-apple.com/other.ipsw",
+    );
+    let expected = catalog::resolve(&matching, &device).unwrap();
+    assert_eq!(
+        catalog::resolve_catalogs(&[other.clone(), matching.clone()], &device).unwrap(),
+        expected
+    );
+    assert_eq!(
+        catalog::resolve_catalogs(&[matching.clone(), matching.clone()], &device).unwrap(),
+        expected
+    );
+    assert!(catalog::resolve_catalogs(&[other], &device).is_err());
+    let conflicting = catalog_fixture(
+        &key,
+        "FutureProduct9,2",
+        &"cd".repeat(20),
+        "https://updates.cdn-apple.com/different.ipsw",
+    );
+    assert!(catalog::resolve_catalogs(&[matching, conflicting], &device).is_err());
 }
 
 #[test]
@@ -136,7 +173,7 @@ fn apple_catalog_rejects_unknown_hardware_invalid_hashes_and_untrusted_urls() {
             "ab".repeat(20),
             "https://updates.cdn-apple.com/restore.zip",
         ),
-        ("iPhone99,1", "ab".repeat(20), good_url),
+        ("", "ab".repeat(20), good_url),
     ] {
         let data = catalog_fixture("637567235", product, &checksum, url);
         assert!(catalog::resolve(&data, &device).is_err());

@@ -13,24 +13,30 @@ impl ContextState {
         let id = &recovery.identity;
         let ticket = &recovery.ticket;
         let images = if let Some(name) = component {
-            if !id.has(name) {
+            if !id.manifest()?.contains_key(name) {
                 return Ok(no_asset());
             }
             Value::Data(self.ipsw.personalized(id, name, ticket)?)
         } else {
-            let mut names = id
-                .manifest()?
-                .iter()
-                .filter(|(_, entry)| {
-                    wire::boolean(entry, &["Info", "IsLoadedByiBoot"])
-                        || wire::boolean(entry, &["Info", "IsLoadedByiBootStage1"])
-                })
-                .map(|(name, _)| name.as_str())
-                .peekable();
-            if names.peek().is_none() {
+            let mut names = Vec::new();
+            for (name, entry) in id.manifest()? {
+                let loaded =
+                    wire::optional_boolean(entry, &["Info", "IsLoadedByiBoot"])?.unwrap_or(false);
+                let stage1 = wire::optional_boolean(entry, &["Info", "IsLoadedByiBootStage1"])?
+                    .unwrap_or(false);
+                if loaded || stage1 {
+                    names.push(name.as_str());
+                }
+            }
+            if names.is_empty() {
                 return Ok(no_asset());
             }
-            Value::Dictionary(personalized_images(&mut self.ipsw, id, ticket, names)?)
+            Value::Dictionary(personalized_images(
+                &mut self.ipsw,
+                id,
+                ticket,
+                names.into_iter(),
+            )?)
         };
         Ok(wire::dict([("AdditionalBootImages", images)]))
     }
@@ -67,11 +73,7 @@ impl ContextState {
             Some(args),
         )?)
         .context("personalizing RecoveryOS Ap,LocalPolicy")?;
-        let bytes = img4::personalize(
-            "Ap,LocalPolicy",
-            &img4::empty_local_policy(),
-            tss::ticket(&local)?,
-        )?;
+        let bytes = img4::personalize(&img4::empty_local_policy(), tss::ticket(&local)?)?;
         Ok(wire::dict([("Ap,LocalPolicy", Value::Data(bytes))]))
     }
 }

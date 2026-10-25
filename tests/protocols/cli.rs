@@ -30,6 +30,49 @@ fn cli_inspection_and_offline_plan_run_without_usb() {
     let output: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
     assert_eq!(output["hardware_checked"], false);
     assert_eq!(output["boot_components_verified"], true);
+    assert_eq!(output["runtime_operations_known"], false);
+    assert!(output.get("stages").is_none());
+}
+
+#[test]
+fn offline_plan_uses_the_manifest_component_names_and_stage_flags() {
+    let bytes = im4p(b"nx26");
+    let mut id = identity();
+    for (name, first) in [("FutureFirst", true), ("FutureSecond", false)] {
+        let mut entry = component_entry("Firmware/future", &bytes);
+        let info = entry.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap();
+        info.remove("Img4PayloadType");
+        info.insert("IsLoadedByiBoot".into(), true.into());
+        info.insert("IsLoadedByiBootStage1".into(), first.into());
+        manifest_mut(&mut id).insert(name.into(), entry);
+    }
+    let file = fixture_files(Some(id), false, &[("Firmware/future", &bytes)]);
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
+        .arg("plan")
+        .arg(file.path())
+        .args(["--identity", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    for (stage, expected) in [(0, "FutureFirst"), (1, "FutureSecond")] {
+        let components = plan["iboot_firmware_stages"][stage]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|step| step["kind"] == "component")
+            .map(|step| step["value"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(components, [expected]);
+    }
+    assert_eq!(plan["runtime_operations_known"], false);
+    assert!(plan.get("stages").is_none());
 }
 
 #[test]

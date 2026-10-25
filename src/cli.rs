@@ -493,7 +493,7 @@ pub(super) fn run() -> Result<()> {
                 Behavior::Erase
             };
             let mut ipsw = Ipsw::open(&ipsw)?;
-            let identity = if let Some(index) = identity {
+            let mut identity = if let Some(index) = identity {
                 ipsw.identity(index)?
             } else {
                 let device = usb::detect()?
@@ -504,13 +504,14 @@ pub(super) fn run() -> Result<()> {
             };
             let summary = identity.summary()?;
             identity.validate_behavior(behavior)?;
-            ipsw.preflight(&identity)?;
+            let stages = restore::preflight(&mut ipsw, &mut identity)?;
             print_json(&json!({
                     "ecid": ecid.map(|n| format!("{n:016x}")), "hardware_checked": ecid.is_some(),
                     "identity": summary, "filesystem_bytes": ipsw.size(identity.path("OS")?)?,
                     "boot_components_verified": true, "hardware_restore_validated": false,
-                    "limitations": ["no physical Mac restore has been validated", "unknown firmware updaters may require additional payload assembly", "reconnection requires restored to continue and issue fresh data requests; no byte-offset replay"],
-                    "stages": ["Apple TSS", "iBSS", "local policy and stage 1 firmware", "iBEC", "restore ramdisk and kernel", "restored", "ASR filesystem transfer", "final status"]
+                    "limitations": ["no physical Mac restore has been validated", "firmware updaters require explicit device requests or an unambiguous namespace with a verified plist payload bundle", "reconnection requires restored to continue and issue fresh data requests; no byte-offset replay"],
+                    "iboot_firmware_stages": stages,
+                    "runtime_operations_known": false
             }))?;
         }
         Command::TssRequest {

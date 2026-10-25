@@ -26,6 +26,30 @@ pub fn get<'a>(v: &'a Value, path: &[&str]) -> Result<&'a Value> {
     })
 }
 
+/// Missing keys are optional; a present value with the wrong shape is an error.
+pub fn optional<'a>(mut value: &'a Value, path: &[&str]) -> Result<Option<&'a Value>> {
+    for key in path {
+        let fields = value.as_dictionary().with_context(|| {
+            format!("expected plist dictionary while reading {}", path.join("."))
+        })?;
+        let Some(next) = fields.get(key) else {
+            return Ok(None);
+        };
+        value = next;
+    }
+    Ok(Some(value))
+}
+
+pub fn optional_boolean(value: &Value, path: &[&str]) -> Result<Option<bool>> {
+    optional(value, path)?
+        .map(|value| {
+            value
+                .as_boolean()
+                .with_context(|| format!("expected plist boolean at {}", path.join(".")))
+        })
+        .transpose()
+}
+
 pub fn string<'a>(v: &'a Value, path: &[&str]) -> Result<&'a str> {
     get(v, path)?.as_string().context("expected plist string")
 }

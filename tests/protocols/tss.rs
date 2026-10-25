@@ -36,47 +36,243 @@ fn tss_requests_bind_hardware_nonce_and_component_digests() {
 }
 
 #[test]
-fn shared_component_preparation_keeps_default_flags_specific_to_restore_requests() {
+fn signing_requires_device_security_metadata_and_never_defaults_to_production() {
+    let mut device = device_info();
+    for (fuse, production, security) in [
+        (0, false, false),
+        (1, false, true),
+        (2, true, false),
+        (3, true, true),
+    ] {
+        device.chip_fuse_mode = Some(fuse);
+        let request = tss::request(&device, &identity()).unwrap();
+        assert_eq!(
+            wire::get(&request, &["ApProductionMode"]).unwrap(),
+            &Value::Boolean(production)
+        );
+        assert_eq!(
+            wire::get(&request, &["ApSecurityMode"]).unwrap(),
+            &Value::Boolean(security)
+        );
+    }
+    device.chip_fuse_mode = None;
+    assert!(tss::request(&device, &identity()).is_err());
+    device.chip_fuse_mode = Some(3);
+    device.security_domain = None;
+    assert!(tss::request(&device, &identity()).is_err());
+    let mut id = identity();
+    manifest_mut(&mut id)
+        .get_mut("iBSS")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("Info")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .remove("Personalize");
+    assert!(wire::get(&tss::request(&device_info(), &id).unwrap(), &["iBSS"]).is_ok());
+}
+
+#[test]
+fn component_signing_uses_declared_trust_rules_and_actions() {
     for rules in [
-        None,
-        Some(Value::Array(vec![])),
-        Some(Value::Array(vec![wire::dict([
+        Value::Array(vec![]),
+        Value::Array(vec![wire::dict([
             ("Conditions", wire::dict([] as [(&str, Value); 0])),
-            ("Actions", wire::dict([("ESEC", false.into())])),
-        ])])),
+            (
+                "Actions",
+                wire::dict([
+                    ("ESEC", false.into()),
+                    ("FutureAction", Value::Data(vec![1, 2])),
+                ]),
+            ),
+        ])]),
     ] {
         let mut id = identity();
-        let mut info = wire::dict([("Path", "Firmware/extra".into())]);
-        if let Some(rules) = &rules {
-            info.as_dictionary_mut()
-                .unwrap()
-                .insert("RestoreRequestRules".into(), rules.clone());
+        let entry = wire::dict([
+            ("Trusted", true.into()),
+            ("Digest", Value::Data(vec![])),
+            (
+                "Info",
+                wire::dict([
+                    ("Personalize", true.into()),
+                    ("RestoreRequestRules", rules.clone()),
+                ]),
+            ),
+        ]);
+        manifest_mut(&mut id).insert("NewComponent".into(), entry);
+        for build in [tss::request, tss::recovery_request] {
+            let request = build(&device_info(), &id).unwrap();
+            assert!(wire::get(&request, &["NewComponent", "Info"]).is_err());
+            assert!(wire::get(&request, &["NewComponent", "EPRO"]).is_err());
+            assert_eq!(
+                wire::get(&request, &["NewComponent", "ESEC"]).is_ok(),
+                !rules.as_array().unwrap().is_empty()
+            );
         }
-        manifest_mut(&mut id).insert(
-            "Extra".into(),
-            wire::dict([("Trusted", true.into()), ("Info", info)]),
+        manifest_mut(&mut id)["NewComponent"]
+            .as_dictionary_mut()
+            .unwrap()
+            .remove("Digest");
+        assert_eq!(
+            wire::get(
+                &tss::request(&device_info(), &id).unwrap(),
+                &["NewComponent", "Digest"]
+            )
+            .unwrap(),
+            &Value::Data(vec![])
         );
-        let restore = tss::request(&device_info(), &id).unwrap();
-        let recovery = tss::recovery_request(&device_info(), &id).unwrap();
-        for request in [&restore, &recovery] {
-            assert!(wire::get(request, &["Extra", "Info"]).is_err());
-            assert_eq!(
-                wire::get(request, &["Extra", "Digest"]).unwrap().as_data(),
-                Some(&[][..])
-            );
+    }
+}
+
+#[test]
+fn fileless_measurements_are_signed_even_with_personalize_false() {
+    let manifest: Value =
+        serde_json::from_str(include_str!("../fixtures/j313-26A434-fdr.json")).unwrap();
+    for renamed in [false, true] {
+        let mut id = identity();
+        for (index, (name, value)) in manifest.as_dictionary().unwrap().iter().enumerate() {
+            let name = if renamed {
+                format!("new{index}")
+            } else {
+                name.clone()
+            };
+            manifest_mut(&mut id).insert(name, value.clone());
         }
-        if rules.is_none() {
-            assert!(wire::boolean(&restore, &["Extra", "EPRO"]));
-            assert!(wire::boolean(&restore, &["Extra", "ESEC"]));
-            assert!(wire::get(&recovery, &["Extra", "EPRO"]).is_err());
-            assert!(wire::get(&recovery, &["Extra", "ESEC"]).is_err());
-        } else {
-            assert_eq!(
-                wire::get(&restore, &["Extra"]).unwrap(),
-                wire::get(&recovery, &["Extra"]).unwrap()
-            );
-            assert!(wire::get(&restore, &["Extra", "EPRO"]).is_err());
+        let original = id.value.clone();
+        for build in [tss::request, tss::recovery_request] {
+            let request = build(&device_info(), &id).unwrap();
+            for (index, (name, _)) in manifest.as_dictionary().unwrap().iter().enumerate() {
+                let name = if renamed {
+                    format!("new{index}")
+                } else {
+                    name.clone()
+                };
+                assert_eq!(
+                    wire::get(&request, &[&name]).unwrap(),
+                    &wire::dict([
+                        ("Trusted", true.into()),
+                        ("EPRO", true.into()),
+                        ("ESEC", true.into()),
+                        ("Digest", Value::Data(vec![])),
+                    ])
+                );
+            }
         }
+        assert_eq!(id.value, original);
+    }
+}
+
+#[test]
+fn trusted_file_hashes_are_never_replaced_with_server_measurement_markers() {
+    for digest in [None, Some(Value::Data(vec![])), Some("invalid".into())] {
+        let mut id = identity();
+        let entry = manifest_mut(&mut id)["iBSS"].as_dictionary_mut().unwrap();
+        entry.remove("Digest");
+        if let Some(digest) = digest {
+            entry.insert("Digest".into(), digest);
+        }
+        entry["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("Personalize".into(), false.into());
+        for build in [tss::request, tss::recovery_request] {
+            let error = build(&device_info(), &id).unwrap_err();
+            assert!(format!("{error:#}").contains("iBSS"), "{error:#}");
+        }
+    }
+    let mut id = identity();
+    manifest_mut(&mut id).insert(
+        "newa".into(),
+        wire::dict([
+            ("Trusted", true.into()),
+            ("Info", wire::dict([("Personalize", false.into())])),
+        ]),
+    );
+    assert!(tss::request(&device_info(), &id).is_err());
+}
+
+fn measurement_property(name: &[u8; 4], value: &[u8]) -> Vec<u8> {
+    use asn1_rs::{Class, Header, Length, Tag, ToDer};
+    let mut body = img4::element(0x16, name);
+    body.extend_from_slice(value);
+    let body = img4::element(0x30, &body);
+    let header = Header::new(
+        Class::Private,
+        true,
+        Tag(u32::from_be_bytes(*name)),
+        Length::Definite(body.len()),
+    );
+    let mut encoded = Vec::new();
+    header.write_der_header(&mut encoded).unwrap();
+    encoded.extend(body);
+    encoded
+}
+
+fn measurement_ticket(objects: &[u8]) -> Value {
+    let mut fields = img4::element(0x16, b"IM4M");
+    fields.extend(img4::element(0x02, &[0]));
+    fields.extend(img4::element(
+        0x31,
+        &measurement_property(b"MANB", &img4::element(0x31, objects)),
+    ));
+    fields.extend(img4::element(0x04, b"synthetic-signature"));
+    fields.extend(img4::element(0x30, &[]));
+    wire::dict([("ApImg4Ticket", Value::Data(img4::element(0x30, &fields)))])
+}
+
+#[test]
+fn server_generated_measurements_must_be_present_and_nonempty_in_the_returned_ticket() {
+    let request = wire::dict([(
+        "newa",
+        wire::dict([("Trusted", true.into()), ("Digest", Value::Data(vec![]))]),
+    )]);
+    let digest = measurement_property(b"DGST", &img4::element(0x04, &[0xab; 32]));
+    let object = measurement_property(b"newa", &img4::element(0x31, &digest));
+    let valid = measurement_ticket(&object);
+    assert_eq!(
+        tss::validate_ticket(&request, &valid).unwrap(),
+        tss::ticket(&valid).unwrap()
+    );
+    for objects in [
+        vec![],
+        measurement_property(b"newb", &img4::element(0x31, &digest)),
+        measurement_property(b"newa", &img4::element(0x31, &[])),
+        measurement_property(
+            b"newa",
+            &img4::element(
+                0x31,
+                &measurement_property(b"DGST", &img4::element(0x04, &[])),
+            ),
+        ),
+        measurement_property(
+            b"newa",
+            &img4::element(
+                0x31,
+                &measurement_property(b"DGST", &img4::element(0x01, &[0xff])),
+            ),
+        ),
+        measurement_property(
+            b"newa",
+            &img4::element(0x31, &[digest.clone(), digest].concat()),
+        ),
+        [object.clone(), object].concat(),
+    ] {
+        let error = tss::validate_ticket(&request, &measurement_ticket(&objects)).unwrap_err();
+        assert!(format!("{error:#}").contains("newa"), "{error:#}");
+    }
+    for malformed in [
+        b"invalid".to_vec(),
+        tss::ticket(&valid).unwrap()[..12].to_vec(),
+    ] {
+        assert!(
+            tss::validate_ticket(
+                &request,
+                &wire::dict([("ApImg4Ticket", Value::Data(malformed))])
+            )
+            .is_err()
+        );
     }
 }
 
@@ -112,7 +308,8 @@ fn signing_rejects_malformed_metadata_instead_of_skipping_components() {
 fn component_rules_use_device_parameters_independently_of_manifest_order() {
     let first = wire::dict([
         ("Trusted", true.into()),
-        ("Info", wire::dict([] as [(&str, Value); 0])),
+        ("Info", wire::dict([("Personalize", true.into())])),
+        ("Digest", Value::Data(vec![])),
     ]);
     for build in [tss::request, tss::recovery_request] {
         let mut id = identity();
@@ -133,6 +330,19 @@ fn component_rules_use_device_parameters_independently_of_manifest_order() {
                 )]),
             ),
         ]);
+        let mut second = second;
+        second
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("Digest".into(), Value::Data(vec![]));
+        second
+            .as_dictionary_mut()
+            .unwrap()
+            .get_mut("Info")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("Personalize".into(), true.into());
         manifest_mut(&mut id).insert("Second".into(), second.clone());
         let forward = build(&device_info(), &id).unwrap();
         let entries = manifest_mut(&mut id);
@@ -218,6 +428,14 @@ fn local_policy_omits_firmware_metadata_without_changing_firmware_requests() {
         .as_dictionary_mut()
         .unwrap()
         .insert("RequiresUIDMode".into(), true.into());
+    id.value
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("UID_MODE".into(), false.into());
+    id.value
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("Ap,SikaFuse".into(), 0u64.into());
     let device = device_info();
     let firmware = tss::request(&device, &id).unwrap();
     let recovery = tss::recovery_request(&device, &id).unwrap();

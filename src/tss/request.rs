@@ -10,8 +10,26 @@ pub(crate) fn host_fields() -> Dictionary {
             "@HostPlatformInfo",
             Value::from(if cfg!(windows) { "windows" } else { "mac" }),
         ),
-        ("@VersionInfo", "libauthinstall-973.0.1".into()),
+        (
+            "@VersionInfo",
+            concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION")).into(),
+        ),
     ])
+}
+
+/// Coprocessor tickets also carry the AP hardware and actual fuse modes.
+pub(crate) fn updater_fields(device: &DeviceInfo) -> Result<Dictionary> {
+    let fuse = device
+        .chip_fuse_mode
+        .context("strict restore requires device CPFM")?;
+    let mut d = host_fields();
+    d.extend([
+        ("ApChipID".into(), u64::from(device.chip_id).into()),
+        ("ApBoardID".into(), u64::from(device.board_id).into()),
+        ("ApProductionMode".into(), (fuse & 2 != 0).into()),
+        ("ApSecurityMode".into(), (fuse & 1 != 0).into()),
+    ]);
+    Ok(d)
 }
 
 fn device_fields(device: &DeviceInfo) -> Result<Dictionary> {
@@ -19,18 +37,14 @@ fn device_fields(device: &DeviceInfo) -> Result<Dictionary> {
         !device.ap_nonce.is_empty(),
         "ApNonce is unavailable; cannot request a device-bound Apple ticket"
     );
-    let mut d = host_fields();
+    let domain = device
+        .security_domain
+        .context("strict restore requires device SDOM")?;
+    let mut d = updater_fields(device)?;
     d.extend([
         ("@ApImg4Ticket".into(), true.into()),
         ("ApECID".into(), device.ecid.into()),
-        ("ApChipID".into(), u64::from(device.chip_id).into()),
-        ("ApBoardID".into(), u64::from(device.board_id).into()),
-        (
-            "ApSecurityDomain".into(),
-            u64::from(device.security_domain).into(),
-        ),
-        ("ApProductionMode".into(), true.into()),
-        ("ApSecurityMode".into(), true.into()),
+        ("ApSecurityDomain".into(), u64::from(domain).into()),
         ("ApNonce".into(), Value::Data(device.ap_nonce.clone())),
     ]);
     Ok(d)
@@ -59,9 +73,19 @@ fn base(device: &DeviceInfo, id: &Identity) -> Result<Dictionary> {
             ],
         );
     }
-    if wire::boolean(&id.value, &["Info", "RequiresUIDMode"]) {
-        d.insert("UID_MODE".into(), false.into());
-        d.insert("Ap,SikaFuse".into(), 0u64.into());
+    if wire::optional_boolean(&id.value, &["Info", "RequiresUIDMode"])?.unwrap_or(false) {
+        let uid = wire::get(&id.value, &["UID_MODE"])
+            .context("strict restore requires explicit UID_MODE")?;
+        ensure!(uid.as_boolean().is_some(), "invalid UID_MODE");
+        d.insert("UID_MODE".into(), uid.clone());
+        d.insert(
+            "Ap,SikaFuse".into(),
+            wire::number(
+                wire::get(&id.value, &["Ap,SikaFuse"])
+                    .context("strict restore requires explicit Ap,SikaFuse")?,
+            )?
+            .into(),
+        );
     }
     if !device.sep_nonce.is_empty() {
         d.insert("SepNonce".into(), Value::Data(device.sep_nonce.clone()));
@@ -74,42 +98,6 @@ enum BootChain {
     Restore,
     Recovery,
 }
-
-const EXCLUDED: &[&str] = &[
-    "BasebandFirmware",
-    "SE,UpdatePayload",
-    "BaseSystem",
-    "Diags",
-];
-
-const RECOVERY_EXCLUDED: &[&str] = &[
-    "ANS",
-    "Ap,AudioBootChime",
-    "Ap,CIO",
-    "Ap,RestoreCIO",
-    "Ap,RestoreTMU",
-    "Ap,TMU",
-    "Ap,rOSLogo1",
-    "Ap,rOSLogo2",
-    "AppleLogo",
-    "DCP",
-    "LLB",
-    "RecoveryMode",
-    "RestoreANS",
-    "RestoreDCP",
-    "RestoreDeviceTree",
-    "RestoreKernelCache",
-    "RestoreLogo",
-    "RestoreRamDisk",
-    "RestoreSEP",
-    "SEP",
-    "ftap",
-    "ftsp",
-    "iBEC",
-    "iBSS",
-    "rfta",
-    "rfts",
-];
 
 pub fn request(device: &DeviceInfo, id: &Identity) -> Result<Value> {
     firmware_request(device, id, BootChain::Restore)
@@ -127,32 +115,28 @@ fn firmware_request(device: &DeviceInfo, id: &Identity, chain: BootChain) -> Res
     }
     let mut components = Dictionary::new();
     for (name, value) in id.manifest()? {
-        if EXCLUDED.contains(&name.as_str())
-            || match chain {
-                BootChain::Restore => name == "Ap,ExclaveOS",
-                BootChain::Recovery => RECOVERY_EXCLUDED.contains(&name.as_str()),
-            }
-        {
-            continue;
-        }
         let component =
             Component::parse(value).with_context(|| format!("invalid signing component {name}"))?;
         let Some(info) = component.info else {
             continue;
         };
-        let rules = info.contains_key("RestoreRequestRules");
-        if chain == BootChain::Restore
-            && ((!component.trusted && !rules) || wire::boolean(value, &["Info", "IsFTAB"]))
+        let selected = info
+            .get("Personalize")
+            .map(|value| {
+                value
+                    .as_boolean()
+                    .with_context(|| format!("invalid {name} Info.Personalize"))
+            })
+            .transpose()?;
+        // Personalize controls file packaging. Trusted measurements and explicit
+        // signing rules also belong in the ticket, even with Personalize=false.
+        if selected != Some(true) && !component.trusted && !info.contains_key("RestoreRequestRules")
         {
             continue;
         }
-        let mut entry = component
+        let entry = component
             .request(&parameters)
             .with_context(|| format!("preparing signing component {name}"))?;
-        if chain == BootChain::Restore && !rules {
-            entry.insert("EPRO".into(), true.into());
-            entry.insert("ESEC".into(), true.into());
-        }
         components.insert(name.clone(), Value::Dictionary(entry));
     }
     // Every component sees the same device parameters. A previously prepared
@@ -167,6 +151,7 @@ struct Component<'a> {
     fields: &'a Dictionary,
     info: Option<&'a Dictionary>,
     trusted: bool,
+    path: Option<&'a str>,
 }
 
 impl<'a> Component<'a> {
@@ -182,6 +167,7 @@ impl<'a> Component<'a> {
             fields,
             info,
             trusted,
+            path: crate::ipsw::component_path(value)?,
         })
     }
 
@@ -191,7 +177,23 @@ impl<'a> Component<'a> {
         if let Some(rules) = self.info.and_then(|info| info.get("RestoreRequestRules")) {
             apply_rules(&mut entry, rules, parameters)?;
         }
-        if self.trusted && !entry.contains_key("Digest") {
+        let digest = entry
+            .get("Digest")
+            .map(|value| value.as_data().context("invalid signing Digest"))
+            .transpose()?;
+        if self.trusted && self.path.is_some() {
+            ensure!(
+                digest.is_some_and(|digest| !digest.is_empty()),
+                "strict restore requires a nonempty Digest for a trusted file"
+            );
+        } else if self.trusted && digest.is_none() {
+            ensure!(
+                self.info
+                    .is_some_and(|info| info.contains_key("RestoreRequestRules")),
+                "strict restore requires a Digest or signing rules for a fileless trusted measurement"
+            );
+            // TSS's wire marker requests the server's measurement (e.g. a trust
+            // object). It is never used as a substitute for a file's hash.
             entry.insert("Digest".into(), Value::Data(vec![]));
         }
         Ok(entry)
@@ -220,20 +222,11 @@ pub fn apply_rules(entry: &mut Dictionary, rules: &Value, parameters: &Dictionar
         });
         if matches {
             for (key, value) in wire::dictionary(wire::get(rule, &["Actions"])?)? {
-                ensure!(
-                    value.as_boolean().is_some(),
-                    "unsupported non-boolean TSS rule action {key}"
-                );
                 entry.insert(key.clone(), value.clone());
             }
         }
     }
     Ok(())
-}
-
-/// RecoveryOS and auxiliary firmware share the manifest component schema.
-pub(crate) fn component_request(value: &Value, parameters: &Dictionary) -> Result<Dictionary> {
-    Component::parse(value)?.request(parameters)
 }
 
 pub fn local_policy_request(

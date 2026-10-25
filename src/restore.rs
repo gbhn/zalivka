@@ -12,7 +12,7 @@ mod recovery;
 mod requests;
 mod session;
 
-pub use boot::probe_boot_state;
+pub use boot::{IBootStep, probe_boot_state};
 pub use connection::query_value;
 pub use images::cpio_header;
 pub use options::{boot_arguments, options, supported_data_types};
@@ -60,6 +60,33 @@ impl ContextState {
     }
 }
 
+/// Validate the available IPSW metadata and build the exact iBoot firmware stages.
+/// This is shared by the offline plan and the restore path, before any upload.
+pub fn preflight(ipsw: &mut Ipsw, identity: &mut Identity) -> Result<[Vec<IBootStep>; 2]> {
+    ipsw.preflight(identity)?;
+    options(identity)?;
+    let stage1 = if identity.is_macos()? {
+        boot::iboot_stage(identity, true)?
+    } else {
+        Vec::new()
+    };
+    let stage2 = boot::iboot_stage(identity, false)?;
+    let stages = [stage1, stage2];
+    let mut components = std::collections::BTreeSet::new();
+    for step in stages.iter().flatten() {
+        if let IBootStep::Component(name) = step {
+            components.insert(name.as_str());
+        }
+    }
+    if let Some(name) = identity.component_by_type(b"rsep")? {
+        components.insert(name);
+    }
+    for name in components {
+        ipsw.verify_boot_component(identity, name)?;
+    }
+    Ok(stages)
+}
+
 pub fn run(
     path: &Path,
     ecid: u64,
@@ -74,11 +101,18 @@ pub fn run(
     usb.check_reset_access()?;
     crate::log!(Info, "ipsw", "Подготовка прошивки: {}", path.display());
     let mut ipsw = Ipsw::open(path)?;
-    let identity = ipsw.select_behavior(&usb.info, identity_index, behavior)?;
-    ipsw.preflight(&identity)?;
-    let recovery = ipsw.recovery_identity(&usb.info, &identity)?;
-    if let Some(id) = &recovery {
+    let mut identity = ipsw.select_behavior(&usb.info, identity_index, behavior)?;
+    let stages = preflight(&mut ipsw, &mut identity)?;
+    let mut recovery = ipsw.recovery_identity(&usb.info, &identity)?;
+    if let Some(id) = &mut recovery {
         ipsw.preflight_recovery(id)?;
+        // Validate fields known now before iBSS; signing still uses fresh nonces
+        // after boot, when the device may have replaced them.
+        if identity.is_macos()? {
+            tss::recovery_request(&usb.info, id)?;
+        } else {
+            tss::request(&usb.info, id)?;
+        }
     }
     crate::log!(
         Info,
@@ -93,7 +127,7 @@ pub fn run(
     let attestation = attestation::Attestation::new(&identity, &usb.info, &ticket)?;
     // Validate personalization metadata before sending the first byte of firmware.
     for name in identity.manifest()?.keys() {
-        img4::restore_info(&ticket, name, &identity.value)?;
+        img4::restore_info(&ticket, name, &identity.value, identity.payload_type(name)?)?;
     }
     let log = transcript
         .map(|p| File::options().write(true).create_new(true).open(p))
@@ -105,10 +139,10 @@ pub fn run(
         device: usb.info.clone(),
         assets,
     };
-    let bootx_error = state.boot(usb)?;
+    let bootx_error = state.boot(usb, &stages)?;
     if let Some(identity) = recovery {
-        let request = if state.restore.identity.is_macos() {
-            tss::recovery_request(&state.device, &state.restore.identity)?
+        let request = if state.restore.identity.is_macos()? {
+            tss::recovery_request(&state.device, &identity)?
         } else {
             tss::request(&state.device, &identity)?
         };

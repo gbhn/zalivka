@@ -11,7 +11,7 @@ pub(super) enum DataType {
     RootTicket,
     RecoveryRootTicket,
     Empty,
-    Component(&'static str),
+    Component(&'static [u8; 4]),
     PersonalizedBootObject,
     SourceBootObject,
     Asr,
@@ -38,18 +38,12 @@ impl DataType {
         ("FDRTrustData", Self::Empty),
         ("FirmwareUpdaterPreflight", Self::Empty),
         ("DeviceRestoreInfoPreflight", Self::Empty),
-        ("KernelCache", Self::Component("KernelCache")),
-        ("DeviceTree", Self::Component("DeviceTree")),
-        ("SystemVolumeData", Self::Component("SystemVolume")),
-        ("SystemImageRootHash", Self::Component("SystemVolume")),
-        (
-            "SystemVolumeCanonicalMetadata",
-            Self::Component("Ap,SystemVolumeCanonicalMetadata"),
-        ),
-        (
-            "SystemImageCanonicalMetadata",
-            Self::Component("Ap,SystemVolumeCanonicalMetadata"),
-        ),
+        ("KernelCache", Self::Component(b"krnl")),
+        ("DeviceTree", Self::Component(b"dtre")),
+        ("SystemVolumeData", Self::Component(b"isys")),
+        ("SystemImageRootHash", Self::Component(b"isys")),
+        ("SystemVolumeCanonicalMetadata", Self::Component(b"msys")),
+        ("SystemImageCanonicalMetadata", Self::Component(b"msys")),
         ("PersonalizedBootObjectV3", Self::PersonalizedBootObject),
         ("SourceBootObjectV3", Self::SourceBootObject),
         ("SourceBootObjectV4", Self::SourceBootObject),
@@ -93,12 +87,11 @@ impl DataType {
     }
 
     pub(super) fn data_port(self, message: &Value, asynchronous: bool) -> Result<u16> {
-        let default = if !asynchronous && matches!(self, Self::Asr | Self::RecoveryAsr) {
-            12345
-        } else {
-            0
-        };
-        let port = wire::data_port(message, default).context("invalid DataPort")?;
+        let port = wire::data_port(message, 0).context("invalid DataPort")?;
+        ensure!(
+            !matches!(self, Self::Asr | Self::RecoveryAsr) || port != 0,
+            "strict restore requires an explicit ASR DataPort"
+        );
         ensure!(
             !asynchronous || (port != 0 && port != RESTORED_PORT),
             "async request requires a separate DataPort"

@@ -21,7 +21,7 @@ use std::{
 };
 
 #[test]
-fn synchronous_and_async_data_ports_share_bounds_but_only_sync_asr_has_a_default() {
+fn data_ports_require_explicit_asr_ports_and_keep_all_bounds() {
     use super::data_type::DataType;
     for kind in [
         DataType::Asr,
@@ -29,33 +29,28 @@ fn synchronous_and_async_data_ports_share_bounds_but_only_sync_asr_has_a_default
         DataType::Asset,
         DataType::BuildIdentity,
     ] {
-        let default = if matches!(kind, DataType::Asr | DataType::RecoveryAsr) {
-            12345
-        } else {
-            0
-        };
-        for value in [
+        for port in [
             None,
             Some(0u64.into()),
             Some(23456u64.into()),
             Some(65535u64.into()),
         ] {
             let mut message = wire::dict([] as [(&str, Value); 0]);
-            if let Some(value) = value {
+            if let Some(port) = port {
                 message
                     .as_dictionary_mut()
                     .unwrap()
-                    .insert("DataPort".into(), value);
+                    .insert("DataPort".into(), port);
             }
             let explicit = asr::data_port(&message, 0).unwrap();
-            assert_eq!(
-                kind.data_port(&message, false).unwrap(),
-                if explicit == 0 { default } else { explicit }
-            );
+            let required = matches!(kind, DataType::Asr | DataType::RecoveryAsr);
+            if required && explicit == 0 {
+                assert!(kind.data_port(&message, false).is_err());
+            } else {
+                assert_eq!(kind.data_port(&message, false).unwrap(), explicit);
+            }
             assert_eq!(kind.data_port(&message, true).is_ok(), explicit != 0);
         }
-        let control = wire::dict([("DataPort", u64::from(RESTORED_PORT).into())]);
-        assert!(kind.data_port(&control, true).is_err());
         for port in [
             (-1i64).into(),
             65536u64.into(),
@@ -65,21 +60,26 @@ fn synchronous_and_async_data_ports_share_bounds_but_only_sync_asr_has_a_default
             let message = wire::dict([("DataPort", port)]);
             for asynchronous in [false, true] {
                 assert!(
-                    kind.data_port(&message, asynchronous)
-                        .unwrap_err()
-                        .to_string()
+                    format!("{:#}", kind.data_port(&message, asynchronous).unwrap_err())
                         .contains("DataPort")
                 );
             }
         }
+        assert!(
+            kind.data_port(
+                &wire::dict([("DataPort", u64::from(RESTORED_PORT).into())]),
+                true
+            )
+            .is_err()
+        );
     }
 }
 
 fn j313_identity() -> Identity {
-    Identity {
-        index: 3,
-        value: serde_json::from_str(include_str!("../fixtures/j313-26A434-iboot.json")).unwrap(),
-    }
+    Identity::new(
+        3,
+        serde_json::from_str(include_str!("../fixtures/j313-26A434-iboot.json")).unwrap(),
+    )
 }
 
 fn stage_transcript(id: &Identity, stage1: bool) -> Vec<String> {
@@ -91,6 +91,34 @@ fn stage_transcript(id: &Identity, stage1: bool) -> Vec<String> {
             IBootStep::Command(command) => command.into(),
         })
         .collect()
+}
+
+#[test]
+fn global_manifest_paths_preserve_namespaces_from_the_request() {
+    let id = j313_identity();
+    for (args, expected) in [
+        (
+            wire::dict([("Variant", "macOS Customer".into())]),
+            "Firmware/Manifests/restore/macOS Customer/apticket.j313ap.im4m",
+        ),
+        (
+            wire::dict([("Variant", "cryptex1/macOS Customer".into())]),
+            "Firmware/Manifests/restore/cryptex1/macOS Customer/apticket.j313ap.im4m",
+        ),
+        (
+            wire::dict([
+                ("Variant", "macOS Customer".into()),
+                ("GlobalManifestPrefix", "centauri/centauri".into()),
+            ]),
+            "Firmware/Manifests/restore/macOS Customer/centauri/centauri.j313ap.im4m",
+        ),
+    ] {
+        let message = wire::dict([("Arguments", args)]);
+        assert_eq!(
+            images::boot_object_path(&id, "__GlobalManifest__", &message).unwrap(),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -167,6 +195,59 @@ fn j313_bootstrap_order_matches_macos_host_on_both_stages() {
                 .any(|s| s.contains("iBEC") || s.contains("RestoreKernelCache"))
         );
     }
+}
+
+#[test]
+fn iboot_steps_depend_on_declared_types_instead_of_component_names() {
+    let mut id = j313_identity();
+    let before = [stage_transcript(&id, true), stage_transcript(&id, false)];
+    let entries = id
+        .value
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("Manifest")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap();
+    let names = entries.keys().cloned().collect::<Vec<_>>();
+    let mut renamed = std::collections::BTreeMap::new();
+    for (index, name) in names.into_iter().enumerate() {
+        let value = entries.remove(&name).unwrap();
+        let new = format!("UnlistedComponent{index:02}");
+        entries.insert(new.clone(), value);
+        renamed.insert(name, new);
+    }
+    for (stage1, expected) in [true, false].into_iter().zip(before) {
+        let expected = expected
+            .into_iter()
+            .map(|step| {
+                step.strip_prefix("upload ")
+                    .map(|name| format!("upload {}", renamed[name]))
+                    .unwrap_or(step)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stage_transcript(&id, stage1), expected);
+    }
+    let entries = id
+        .value
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("Manifest")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap();
+    let dcp = renamed["RestoreDCP"].clone();
+    entries
+        .get_mut(&dcp)
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("Info")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .remove("Img4PayloadType");
+    assert!(iboot_stage(&id, true).is_err());
 }
 
 #[test]
@@ -274,6 +355,7 @@ fn signed_progress_survives_xml_and_binary_plist_framing() {
             assert_eq!(
                 event,
                 crate::progress::Event::OperationProgress {
+                    async_context: None,
                     operation: 28,
                     progress
                 }
@@ -306,84 +388,165 @@ fn malformed_progress_reports_the_field_without_inventing_a_percentage() {
 }
 
 #[test]
-fn transfer_requests_follow_their_operation_without_inheriting_background_progress() {
+fn requests_never_infer_operation_ids_from_data_types_or_previous_foreground_progress() {
     let mut operations = ProgressOperations::default();
-    let request = |kind, asynchronous| {
-        wire::dict([
-            (
-                "MsgType",
-                if asynchronous {
-                    "AsyncDataRequestMsg"
-                } else {
-                    "DataRequestMsg"
-                }
-                .into(),
-            ),
-            ("DataType", Value::String(kind)),
-        ])
-    };
-    for operation in [80, 36, 59, 79, 96] {
-        let message = wire::dict([
-            ("MsgType", "ProgressMsg".into()),
-            ("Operation", operation.into()),
-            ("Progress", 0i64.into()),
-        ]);
-        operations.observe(&message, &log_progress(&message, |_| {}).unwrap());
-        assert_eq!(
-            operations.for_request(&request("SourceBootObjectV4".into(), false)),
-            Some(operation)
-        );
-        // Image progress arrives on the control pipe while synchronous firmware
-        // requests continue. Its asynchronous context must not steal those files.
-        let image = wire::dict([
-            ("Operation", 13u64.into()),
-            ("Progress", 50i64.into()),
-            ("AsyncContextUUID", "image-context".into()),
-        ]);
-        operations.observe(&image, &log_progress(&image, |_| {}).unwrap());
-        assert_eq!(
-            operations.for_request(&request("PersonalizedBootObjectV3".into(), false)),
-            Some(operation)
-        );
+    let progress = wire::dict([("Operation", 999u64.into()), ("Progress", 0i64.into())]);
+    operations.observe(&progress, &log_progress(&progress, |_| {}).unwrap());
+    for kind in [
+        "SystemImageData",
+        "RecoveryOSASRImage",
+        "RecoveryOSImage",
+        "SourceBootObjectV4",
+        "URLAsset",
+    ] {
+        for message_type in ["DataRequestMsg", "AsyncDataRequestMsg"] {
+            assert_eq!(
+                operations.for_request(&wire::dict([
+                    ("MsgType", message_type.into()),
+                    ("DataType", kind.into())
+                ])),
+                None
+            );
+        }
     }
-    // SE continues after unrelated firmware operations report completion.
-    for operation in [96u64, 79] {
-        let message = wire::dict([("Operation", operation.into()), ("Progress", 100i64.into())]);
+}
+
+#[test]
+fn request_operation_metadata_overrides_legacy_ids_and_foreground_progress() {
+    let mut operations = ProgressOperations::default();
+    for (operation, context) in [
+        (1001u64, None),
+        (1002, Some("image")),
+        (1003, Some("firmware")),
+    ] {
+        let mut message = wire::dict([("Operation", operation.into()), ("Progress", 20i64.into())]);
+        if let Some(context) = context {
+            message
+                .as_dictionary_mut()
+                .unwrap()
+                .insert("AsyncContextUUID".into(), context.into());
+        }
         operations.observe(&message, &log_progress(&message, |_| {}).unwrap());
     }
-    assert_eq!(
-        operations.for_request(&request("SourceBootObjectV4".into(), false)),
-        Some(59)
-    );
-    let checkpoint = wire::dict([
-        ("CHECKPOINT_ID", 0x132fu64.into()),
-        ("CHECKPOINT_NAME", "await_update_se".into()),
-        ("CHECKPOINT_COMPLETE", true.into()),
-        ("CHECKPOINT_RESULT", 0i64.into()),
+    for kind in ["SystemImageData", "RecoveryOSImage", "SourceBootObjectV4"] {
+        for asynchronous in [false, true] {
+            let mut request = wire::dict([
+                (
+                    "MsgType",
+                    if asynchronous {
+                        "AsyncDataRequestMsg"
+                    } else {
+                        "DataRequestMsg"
+                    }
+                    .into(),
+                ),
+                ("DataType", kind.into()),
+                ("AsyncContextUUID", "image".into()),
+            ]);
+            assert_eq!(operations.for_request(&request), Some(1002));
+            request
+                .as_dictionary_mut()
+                .unwrap()
+                .insert("AsyncContextUUID".into(), "firmware".into());
+            assert_eq!(operations.for_request(&request), Some(1003));
+            request
+                .as_dictionary_mut()
+                .unwrap()
+                .insert("AsyncContextUUID".into(), "unknown".into());
+            assert_eq!(operations.for_request(&request), None);
+            request
+                .as_dictionary_mut()
+                .unwrap()
+                .insert("Operation".into(), 1004u64.into());
+            assert_eq!(operations.for_request(&request), Some(1004));
+            for malformed in ["".into(), Value::Boolean(true), (-1i64).into()] {
+                request.as_dictionary_mut().unwrap().remove("Operation");
+                request
+                    .as_dictionary_mut()
+                    .unwrap()
+                    .insert("AsyncContextUUID".into(), malformed.clone());
+                assert_eq!(operations.for_request(&request), None);
+                request
+                    .as_dictionary_mut()
+                    .unwrap()
+                    .insert("AsyncContextUUID".into(), "firmware".into());
+                request
+                    .as_dictionary_mut()
+                    .unwrap()
+                    .insert("Operation".into(), malformed);
+                assert_eq!(operations.for_request(&request), None);
+            }
+        }
+    }
+    let complete = wire::dict([
+        ("Operation", 1002u64.into()),
+        ("Progress", 100i64.into()),
+        ("AsyncContextUUID", "image".into()),
     ]);
-    operations.observe(&checkpoint, &log_checkpoint(&checkpoint, |_| {}).unwrap());
-    assert_eq!(
-        operations.for_request(&request("SourceBootObjectV4".into(), false)),
-        Some(36)
+    operations.observe(&complete, &log_progress(&complete, |_| {}).unwrap());
+    let image = wire::dict([
+        ("Operation", 13u64.into()),
+        ("Progress", 50i64.into()),
+        ("AsyncContextUUID", "checkpoint-image".into()),
+    ]);
+    operations.observe(&image, &log_progress(&image, |_| {}).unwrap());
+    operations.observe(
+        &wire::dict([] as [(&str, Value); 0]),
+        &crate::progress::Event::Checkpoint {
+            name: "perform_restore_installing".into(),
+            complete: true,
+        },
     );
-    for kind in ["SystemImageData", "RecoveryOSASRImage"] {
-        assert_eq!(
-            operations.for_request(&request(kind.into(), true)),
-            Some(13)
-        );
+    assert_eq!(
+        operations.for_request(&wire::dict([
+            ("DataType", "SystemImageData".into()),
+            ("AsyncContextUUID", "checkpoint-image".into()),
+        ])),
+        Some(13)
+    );
+    assert_eq!(
+        operations.for_request(&wire::dict([
+            ("DataType", "SystemImageData".into()),
+            ("AsyncContextUUID", "image".into()),
+        ])),
+        None
+    );
+    assert_eq!(
+        operations.for_request(&wire::dict([
+            ("MsgType", "DataRequestMsg".into()),
+            ("DataType", "SourceBootObjectV4".into()),
+        ])),
+        None
+    );
+}
+
+#[test]
+fn request_names_come_from_device_metadata_for_unlisted_components_and_updaters() {
+    for (kind, arguments, expected) in [
+        (
+            "SourceBootObjectV4",
+            wire::dict([("ImageName", "New,Component".into())]),
+            "New,Component",
+        ),
+        (
+            "FirmwareUpdaterDataV2",
+            wire::dict([("MessageArgUpdaterName", "NewController".into())]),
+            "NewController",
+        ),
+        (
+            "ImageData",
+            wire::dict([("ImageType", "NewImageType".into())]),
+            "NewImageType",
+        ),
+        (
+            "NewDataType",
+            wire::dict([("ImageName", "".into())]),
+            "NewDataType",
+        ),
+    ] {
+        let message = wire::dict([("DataType", kind.into()), ("Arguments", arguments)]);
+        assert_eq!(super::data::request_name(&message).unwrap(), expected);
     }
-    assert_eq!(
-        operations.for_request(&request("RecoveryOSImage".into(), false)),
-        Some(71)
-    );
-    assert_eq!(
-        operations.for_request(&request("SourceBootObjectV4".into(), true)),
-        None
-    );
-    assert_eq!(
-        operations.for_request(&request("URLAsset".into(), true)),
-        None
-    );
 }
 
 #[test]
@@ -435,6 +598,19 @@ fn optional_operation_weights_preserve_the_device_ids_without_blocking_restore()
         assert!(operation_weights(&malformed).is_none());
         assert!(log_progress(&malformed, |_| {}).is_ok());
     }
+}
+
+#[test]
+fn malformed_checkpoint_completion_is_rejected_before_emitting_progress() {
+    let message = wire::dict([
+        ("CHECKPOINT_ID", 1u64.into()),
+        ("CHECKPOINT_RESULT", 0i64.into()),
+        ("CHECKPOINT_COMPLETE", "false".into()),
+    ]);
+    let mut records = Vec::new();
+    let error = log_checkpoint(&message, |record| records.push(record)).unwrap_err();
+    assert!(error.to_string().contains("CHECKPOINT_COMPLETE"));
+    assert!(records.is_empty());
 }
 
 #[test]
@@ -511,7 +687,7 @@ fn checkpoint_log_preserves_step_and_device_diagnostics() {
 }
 
 #[test]
-fn missing_ecfg_keeps_the_device_warning_and_explains_the_failed_data_lookup() {
+fn device_warnings_keep_their_text_and_level_for_every_checkpoint() {
     use crate::logging::Level;
     let checkpoint = wire::dict([
         ("CHECKPOINT_ID", 0x1504u64.into()),
@@ -526,14 +702,10 @@ fn missing_ecfg_keeps_the_device_warning_and_explains_the_failed_data_lookup() {
     let mut output = Vec::new();
     log_checkpoint(&checkpoint, |record| output.push(record)).unwrap();
     assert_eq!(output[1].level, Level::Warning);
-    assert!(
-        output[1]
-            .message
-            .contains("update_fdr_ean missing data for eCfg.")
+    assert_eq!(
+        output[1].message,
+        "update_fdr_ean (0x1504): update_fdr_ean missing data for eCfg."
     );
-    assert!(output[1].message.contains("result=0"));
-    assert!(output[1].message.contains("FDR в EAN"));
-    assert!(!output[1].message.contains("Заводская"));
 
     for (key, value) in [
         ("CHECKPOINT_ID", 0x131au64.into()),
@@ -555,6 +727,15 @@ fn missing_ecfg_keeps_the_device_warning_and_explains_the_failed_data_lookup() {
         let mut output = Vec::new();
         log_checkpoint(&message, |record| output.push(record)).unwrap();
         assert_eq!(output[1].level, Level::Warning, "{message:?}");
+        assert_eq!(
+            output[1].message,
+            format!(
+                "{} (0x{:x}): {}",
+                wire::string(&message, &["CHECKPOINT_NAME"]).unwrap(),
+                wire::number(wire::get(&message, &["CHECKPOINT_ID"]).unwrap()).unwrap(),
+                wire::string(&message, &["CHECKPOINT_WARNING"]).unwrap(),
+            )
+        );
         if key == "CHECKPOINT_ERROR" {
             assert_eq!(output[2].level, Level::Error);
         }

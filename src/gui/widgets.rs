@@ -80,35 +80,6 @@ pub(super) fn progress_bar(ui: &mut egui::Ui, fraction: Option<f32>) {
     }
 }
 
-pub(super) fn operation_title(operation: u64) -> String {
-    // Restored operation IDs: libimobiledevice/idevicerestore, src/restore.c.
-    let title = match operation {
-        11 => "Создание разделов",
-        12 => "Форматирование файловой системы",
-        13 => "Восстановление образа системы",
-        14 => "Проверка восстановленного образа",
-        15 => "Проверка файловых систем",
-        16 => "Подключение файловых систем",
-        17 => "Подготовка раздела данных",
-        18 => "Запись прошивки",
-        25 => "Настройка параметров загрузки",
-        28 => "Проверка накопителя",
-        29 => "Отключение файловых систем",
-        36 => "Получение данных прошивки",
-        46 => "Очистка NVRAM",
-        55 => "Обновление Stockholm",
-        58 => "Обновление прошивки NAND",
-        59 => "Обновление прошивки Secure Element",
-        66 => "Обновление Veridian",
-        67 => "Создание защищённого тома",
-        71 => "Установка образа recoveryOS",
-        74 => "Получение данных EAN",
-        77 => "Проверка системного тома",
-        _ => return format!("Операция {operation}"),
-    };
-    title.into()
-}
-
 pub(super) fn laptop(ui: &mut egui::Ui, connected: bool) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(62.0, 54.0), egui::Sense::hover());
     let color = if connected {
@@ -141,17 +112,4 @@ pub(super) fn elapsed_text(seconds: u64) -> String {
         seconds / 60 % 60,
         seconds % 60
     )
-}
-pub(super) fn friendly_phase(name: &str) -> &'static str {
-    if name.starts_with("cleanup") || name.contains("bootable") || name.contains("autoboot") {
-        "Завершение"
-    } else if name.contains("recovery") {
-        "Обновление recoveryOS"
-    } else if name.contains("firmware") || name.starts_with("update_") || name.contains("ticket") {
-        "Обновление прошивки"
-    } else if name.contains("restore") || name.contains("filesystem") || name.contains("mount") {
-        "Подготовка системы"
-    } else {
-        "Подготовка Mac"
-    }
 }

@@ -1,12 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
-pub(crate) fn is_mac_product(product: &str) -> bool {
-    ["Mac", "iMac", "iBridge"]
-        .iter()
-        .any(|prefix| product.starts_with(prefix))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
@@ -29,8 +23,9 @@ pub struct DeviceInfo {
     pub ecid: u64,
     pub chip_id: u32,
     pub board_id: u32,
-    pub security_domain: u32,
-    pub iboot_flags: u32,
+    pub security_domain: Option<u32>,
+    pub iboot_flags: Option<u32>,
+    pub chip_fuse_mode: Option<u32>,
     pub mode: Mode,
     pub serial: String,
     pub ap_nonce: Vec<u8>,
@@ -55,8 +50,9 @@ impl DeviceInfo {
             ecid,
             chip_id: u32::try_from(required("CPID")?)?,
             board_id: u32::try_from(required("BDID")?)?,
-            security_domain: u32::try_from(hex_field("SDOM")?.unwrap_or(1))?,
-            iboot_flags: u32::try_from(hex_field("IBFL")?.unwrap_or(0))?,
+            security_domain: hex_field("SDOM")?.map(u32::try_from).transpose()?,
+            iboot_flags: hex_field("IBFL")?.map(u32::try_from).transpose()?,
+            chip_fuse_mode: hex_field("CPFM")?.map(u32::try_from).transpose()?,
             mode,
             serial: serial.into(),
             ap_nonce: vec![],

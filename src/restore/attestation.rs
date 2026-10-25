@@ -173,7 +173,7 @@ impl Attestation {
         ensure!(number()? == self.device.ecid, "attestation ECID mismatch");
         let security = number()?;
         ensure!(
-            security <= 255 && security & 3 == u64::from(self.device.security_domain),
+            security <= 255 && Some((security & 3) as u32) == self.device.security_domain,
             "attestation security domain mismatch"
         );
         // Restore TSS requests require ApProductionMode and ApSecurityMode.

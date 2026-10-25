@@ -1,10 +1,9 @@
 //! Device, firmware, operation and Windows preparation cards.
 use super::theme::{BLUE, Tone};
 use super::widgets::{
-    caption, card, elapsed_text, human_bytes, laptop, metric, operation_title, pill, progress_bar,
-    section,
+    caption, card, elapsed_text, human_bytes, laptop, metric, pill, progress_bar, section,
 };
-use super::{App, Confirmation, Picker, setup::Action, worker::ActivityId};
+use super::{App, Confirmation, Picker, setup::Action};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::{
     path::Path,
@@ -21,17 +20,14 @@ impl App {
                 ui.vertical(|ui| {
                     let title = self
                         .target()
-                        .map(|d| {
-                            if d.chip_id == 0x8012 {
-                                "Mac с чипом T2"
+                        .map(|device| format!("Mac · CPID {:04x}", device.chip_id))
+                        .unwrap_or_else(|| {
+                            if self.devices.is_empty() {
+                                "Mac не подключён"
                             } else {
-                                "Mac с Apple Silicon"
+                                "Выберите Mac"
                             }
-                        })
-                        .unwrap_or(if self.devices.is_empty() {
-                            "Mac не подключён"
-                        } else {
-                            "Выберите Mac"
+                            .into()
                         });
                     ui.label(RichText::new(title).size(19.0).strong());
                     if let Some(device) = self.target() {
@@ -258,7 +254,7 @@ impl App {
             if job.action.writes_device() {
                 caption(ui, "Общий прогресс восстановления (оценка)");
                 progress_bar(ui, job.overall_fraction);
-            } else if internet_speed.is_none() && job.activities.is_empty() {
+            } else if internet_speed.is_none() && job.transfers.is_empty() {
                 progress_bar(ui, None);
             }
             ui.add_space(14.0);
@@ -303,52 +299,38 @@ impl App {
         });
         let Some(job) = &self.job else { return };
         let now = Instant::now();
-        for (id, activity) in &job.activities {
+        for (id, transfer) in &job.transfers {
             ui.add_space(12.0);
             ui.push_id(id, |ui| {
                 card(ui.ctx()).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    let title = match id {
-                        ActivityId::Operation(operation) => operation_title(*operation),
-                        ActivityId::Transfer(_) => activity
-                            .transfers
-                            .values()
-                            .next()
-                            .map(|transfer| transfer.update.stage.clone())
-                            .unwrap_or_default(),
-                    };
-                    ui.label(RichText::new(&title).size(16.0).strong());
-                    progress_bar(ui, activity.fraction());
-                    for transfer in activity.transfers.values() {
-                        if transfer.update.stage != title {
-                            caption(ui, &transfer.update.stage);
-                        }
-                        caption(
-                            ui,
-                            format!(
-                                "Передано: {}{}",
-                                human_bytes(transfer.update.completed),
-                                transfer
-                                    .update
-                                    .total
-                                    .map(|total| format!(" из {}", human_bytes(total)))
-                                    .unwrap_or_default()
-                            ),
+                    ui.label(RichText::new(&transfer.update.stage).size(16.0).strong());
+                    progress_bar(ui, transfer.update.fraction());
+                    caption(
+                        ui,
+                        format!(
+                            "Передано: {}{}",
+                            human_bytes(transfer.update.completed),
+                            transfer
+                                .update
+                                .total
+                                .map(|total| format!(" из {}", human_bytes(total)))
+                                .unwrap_or_default()
+                        ),
+                    );
+                    ui.add_space(8.0);
+                    ui.columns(2, |columns| {
+                        metric(
+                            &mut columns[0],
+                            "Скорость",
+                            &format!("{:.1} МиБ/с", transfer.speed(now) / 1048576.0),
                         );
-                        ui.add_space(8.0);
-                        ui.columns(2, |columns| {
-                            metric(
-                                &mut columns[0],
-                                "Скорость",
-                                &format!("{:.1} МиБ/с", transfer.speed(now) / 1048576.0),
-                            );
-                            let remaining = transfer
-                                .remaining(now)
-                                .map(elapsed_text)
-                                .unwrap_or_else(|| "—".into());
-                            metric(&mut columns[1], "До конца передачи", &remaining);
-                        });
-                    }
+                        let remaining = transfer
+                            .remaining(now)
+                            .map(elapsed_text)
+                            .unwrap_or_else(|| "—".into());
+                        metric(&mut columns[1], "До конца передачи", &remaining);
+                    });
                 });
             });
         }

@@ -1,0 +1,255 @@
+{
+  "ftap": {
+    "Info": {
+      "HashMethod": "sha2-256",
+      "IsFTAB": false,
+      "IsLoadedByiBoot": false,
+      "IsLoadedByiBootStage1": false,
+      "IsiBootEANFirmware": false,
+      "IsiBootNonEssentialFirmware": false,
+      "Personalize": false,
+      "RestoreRequestRules": [
+        {
+          "Actions": {
+            "EPRO": false
+          },
+          "Conditions": {
+            "ApRawProductionMode": false,
+            "ApRequiresImage4": true
+          }
+        },
+        {
+          "Actions": {
+            "EPRO": true
+          },
+          "Conditions": {
+            "ApRawProductionMode": true,
+            "ApRequiresImage4": true
+          }
+        },
+        {
+          "Actions": {
+            "EPRO": false
+          },
+          "Conditions": {
+            "ApDemotionPolicyOverride": "Demote",
+            "ApRawProductionMode": true,
+            "ApRequiresImage4": true
+          }
+        },
+        {
+          "Actions": {
+            "ESEC": false
+          },
+          "Conditions": {
+            "ApRawSecurityMode": false,
+            "ApRequiresImage4": true
+          }
+        },
+        {
+          "Actions": {
+            "ESEC": true
+          },
+          "Conditions": {
+            "ApRawSecurityMode": true,
+            "ApRequiresImage4": true
+          }
+        }
+      ]
+    },
+    "Trusted": true
+  },
+  "ftsp": {
+    "Info": {
+      "HashMethod": "sha2-256",
+      "IsFTAB": false,
+      "IsLoadedByiBoot": false,
+      "IsLoadedByiBootStage1": false,
+      "IsiBootEANFirmware": false,
+      "IsiBootNonEssentialFirmware": false,
+      "Personalize": false,
+      "RestoreRequestRules": [
+        {
+          "Actions": {
+            "ESEC": false
+          },
+          "Conditions": {
+            "ApRawSecurityMode": false
+          }
+        },
+        {
+          "Actions": {
+            "ESEC": true
+          },
+          "Conditions": {
+            "ApRawSecurityMode": true
+          }
+        },
+        {
+          "Actions": {
+            "ESEC": false
+          },
+          "Conditions": {
+            "ApDemotionPolicyOverride": "",
+            "ApRawProductionMode": false,
+            "ApRawSecurityMode": true
+          }
+        },
+        {
+          "Actions": {
+            "ESEC": false
+          },
+          "Conditions": {
+            "ApDemotionPolicyOverride": "Demote",
+            "ApRawProductionMode": false,
+            "ApRawSecurityMode": true
+          }
+        },
+        {
+          "Actions": {
+            "EPRO": false
+          },
+          "Conditions": {
+            "ApRawProductionMode": false
+          }
+        },
+        {
+          "Actions": {
+            "EPRO": true
+          },
+          "Conditions": {
+            "ApRawProductionMode": true
+          }
+        }
+      ]
+    },
+    "Trusted": true
+  },
+  "rfta": {
+    "Info": {
+      "HashMethod": "sha2-256",
+      "IsFTAB": false,
+      "IsLoadedByiBoot": false,
+      "IsLoadedByiBootStage1": false,
+      "IsiBootEANFirmware": false,
+      "IsiBootNonEssentialFirmware": false,
+      "Personalize": false,
+      "RestoreRequestRules": [
+        {
+          "Actions": {
+            "EPRO": false
+          },
+          "Conditions": {
+            "ApCurrentProductionMode": false,
+            "ApRequiresImage4": true
+          }
+        },
+        {
+          "Actions": {
+            "EPRO": true
+          },
+          "Conditions": {
+            "ApCurrentProductionMode": true,
+            "ApRequiresImage4": true
+          }
+        },
+        {
+          "Actions": {
+            "EPRO": false
+          },
+          "Conditions": {
+            "ApCurrentProductionMode": true,
+            "ApDemotionPolicyOverride": "Demote",
+            "ApInRomDFU": true,
+            "ApRequiresImage4": true
+          }
+        },
+        {
+          "Actions": {
+            "ESEC": false
+          },
+          "Conditions": {
+            "ApRawSecurityMode": false,
+            "ApRequiresImage4": true
+          }
+        },
+        {
+          "Actions": {
+            "ESEC": true
+          },
+          "Conditions": {
+            "ApRawSecurityMode": true,
+            "ApRequiresImage4": true
+          }
+        }
+      ]
+    },
+    "Trusted": true
+  },
+  "rfts": {
+    "Info": {
+      "HashMethod": "sha2-256",
+      "IsFTAB": false,
+      "IsLoadedByiBoot": false,
+      "IsLoadedByiBootStage1": false,
+      "IsiBootEANFirmware": false,
+      "IsiBootNonEssentialFirmware": false,
+      "Personalize": false,
+      "RestoreRequestRules": [
+        {
+          "Actions": {
+            "ESEC": false
+          },
+          "Conditions": {
+            "ApRawSecurityMode": false
+          }
+        },
+        {
+          "Actions": {
+            "ESEC": true
+          },
+          "Conditions": {
+            "ApRawSecurityMode": true
+          }
+        },
+        {
+          "Actions": {
+            "ESEC": false
+          },
+          "Conditions": {
+            "ApDemotionPolicyOverride": "",
+            "ApRawProductionMode": false,
+            "ApRawSecurityMode": true
+          }
+        },
+        {
+          "Actions": {
+            "ESEC": false
+          },
+          "Conditions": {
+            "ApDemotionPolicyOverride": "Demote",
+            "ApRawProductionMode": false,
+            "ApRawSecurityMode": true
+          }
+        },
+        {
+          "Actions": {
+            "EPRO": false
+          },
+          "Conditions": {
+            "ApRawProductionMode": false
+          }
+        },
+        {
+          "Actions": {
+            "EPRO": true
+          },
+          "Conditions": {
+            "ApRawProductionMode": true
+          }
+        }
+      ]
+    },
+    "Trusted": true
+  }
+}

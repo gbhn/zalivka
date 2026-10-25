@@ -6,7 +6,7 @@ use crate::{
     mux::MuxStream,
     wire,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use plist::{Dictionary, Value};
 use std::io::Write;
 
@@ -87,21 +87,42 @@ pub fn cpio_header(out: &mut impl Write, name: &str, mode: u32, size: u64) -> Re
 }
 
 pub(super) fn boot_object_path(id: &Identity, name: &str, message: &Value) -> Result<String> {
-    Ok(match name {
+    let path = match name {
         "__RestoreVersion__" => "RestoreVersion.plist".into(),
         "__SystemVersion__" => "SystemVersion.plist".into(),
         "__GlobalManifest__" => {
-            let variant = wire::string(message, &["Arguments", "Variant"])
-                .or_else(|_| wire::string(&id.value, &["Info", "MacOSVariant"]))?;
+            let variant = match wire::optional(message, &["Arguments", "Variant"])? {
+                Some(value) => value
+                    .as_string()
+                    .filter(|value| !value.is_empty())
+                    .context("invalid Arguments.Variant")?,
+                None => wire::string(&id.value, &["Info", "MacOSVariant"])?,
+            };
             let class = wire::string(&id.value, &["Info", "DeviceClass"])?;
-            let prefix =
-                wire::string(message, &["Arguments", "GlobalManifestPrefix"]).unwrap_or("apticket");
-            let suffix =
-                wire::string(message, &["Arguments", "GlobalManifestSuffix"]).unwrap_or("");
+            // These optional fields select an AP ticket without a suffix when
+            // omitted. A present value with the wrong type is still an error.
+            let prefix = wire::optional(message, &["Arguments", "GlobalManifestPrefix"])?
+                .map(|value| {
+                    value
+                        .as_string()
+                        .context("invalid Arguments.GlobalManifestPrefix")
+                })
+                .transpose()?
+                .unwrap_or("apticket");
+            let suffix = wire::optional(message, &["Arguments", "GlobalManifestSuffix"])?
+                .map(|value| {
+                    value
+                        .as_string()
+                        .context("invalid Arguments.GlobalManifestSuffix")
+                })
+                .transpose()?
+                .unwrap_or("");
             format!("Firmware/Manifests/restore/{variant}/{prefix}.{class}{suffix}.im4m")
         }
         component => id.path(component)?.into(),
-    })
+    };
+    crate::ipsw::validate_path(&path)?;
+    Ok(path)
 }
 
 pub(super) fn image_data(
@@ -120,20 +141,30 @@ pub(super) fn image_data(
             "ImageData",
         ),
     };
-    let mut names = id
-        .manifest()?
-        .iter()
-        .filter(|(_, v)| wire::boolean(v, &["Info", image_type]))
-        .map(|(k, _)| k.as_str());
-    if wire::boolean(message, &["Arguments", list]) {
+    let want_list = wire::optional_boolean(message, &["Arguments", list])?.unwrap_or(false);
+    let image_name = wire::optional(message, &["Arguments", "ImageName"])?
+        .map(|value| {
+            value
+                .as_string()
+                .filter(|value| !value.is_empty())
+                .context("invalid Arguments.ImageName")
+        })
+        .transpose()?;
+    let mut names = Vec::new();
+    for (name, entry) in id.manifest()? {
+        if wire::optional_boolean(entry, &["Info", image_type])?.unwrap_or(false) {
+            names.push(name.as_str());
+        }
+    }
+    if want_list {
         return Ok(wire::dict([(
             list,
-            Value::Array(names.map(Value::from).collect()),
+            Value::Array(names.into_iter().map(Value::from).collect()),
         )]));
     }
-    if let Ok(name) = wire::string(message, &["Arguments", "ImageName"]) {
+    if let Some(name) = image_name {
         ensure!(
-            names.any(|candidate| candidate == name),
+            names.contains(&name),
             "requested image does not match {image_type}"
         );
         return Ok(wire::dict([
@@ -143,7 +174,7 @@ pub(super) fn image_data(
     }
     Ok(wire::dict([(
         key,
-        Value::Dictionary(personalized_images(ipsw, id, ticket, names)?),
+        Value::Dictionary(personalized_images(ipsw, id, ticket, names.into_iter())?),
     )]))
 }
 
@@ -169,19 +200,22 @@ pub(super) fn nor_data(
     ticket: &Value,
     message: &Value,
 ) -> Result<Value> {
-    let mut names: Vec<&str> = id
-        .manifest()?
-        .iter()
-        .filter(|(_, v)| {
-            wire::boolean(v, &["Info", "IsFirmwarePayload"])
-                || (wire::boolean(v, &["Info", "IsSecondaryFirmwarePayload"])
-                    && wire::boolean(v, &["Info", "IsLoadedByiBoot"]))
-        })
-        .map(|(k, _)| k.as_str())
-        .filter(|k| *k != "LLB" && *k != "RestoreSEP")
-        .collect();
-    names.sort_by_key(|n| !n.starts_with("iBoot"));
-    let flash_v1 = wire::get(message, &["Arguments", "FlashVersion1"]).is_ok();
+    let llb = id.require_component_type(b"illb")?;
+    let restore_sep = id.component_by_type(b"rsep")?;
+    let iboot = id.component_by_type(b"ibot")?;
+    let mut names = Vec::new();
+    for (name, entry) in id.manifest()? {
+        let primary =
+            wire::optional_boolean(entry, &["Info", "IsFirmwarePayload"])?.unwrap_or(false);
+        let secondary = wire::optional_boolean(entry, &["Info", "IsSecondaryFirmwarePayload"])?
+            .unwrap_or(false);
+        let loaded = wire::optional_boolean(entry, &["Info", "IsLoadedByiBoot"])?.unwrap_or(false);
+        if (primary || (secondary && loaded)) && name != llb && Some(name.as_str()) != restore_sep {
+            names.push(name.as_str());
+        }
+    }
+    names.sort_by_key(|n| Some(*n) != iboot);
+    let flash_v1 = wire::optional(message, &["Arguments", "FlashVersion1"])?.is_some();
     let images = if flash_v1 {
         Value::Dictionary(personalized_images(ipsw, id, ticket, names.into_iter())?)
     } else {
@@ -195,14 +229,11 @@ pub(super) fn nor_data(
     let mut d = Dictionary::new();
     d.insert(
         "LlbImageData".into(),
-        Value::Data(ipsw.personalized(id, "LLB", ticket)?),
+        Value::Data(ipsw.personalized(id, llb, ticket)?),
     );
     d.insert("NorImageData".into(), images);
-    for (name, key) in [
-        ("RestoreSEP", "RestoreSEPImageData"),
-        ("SEP", "SEPImageData"),
-    ] {
-        if id.has(name) {
+    for (tag, key) in [(b"rsep", "RestoreSEPImageData"), (b"sepi", "SEPImageData")] {
+        if let Some(name) = id.component_by_type(tag)? {
             d.insert(
                 key.into(),
                 Value::Data(ipsw.personalized(id, name, ticket)?),

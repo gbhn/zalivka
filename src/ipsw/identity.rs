@@ -4,6 +4,20 @@ use crate::{device::DeviceInfo, wire};
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
+
+fn recovery_variant(value: &Value) -> Result<Option<&str>> {
+    let info = wire::dictionary(wire::get(value, &["Info"])?)?;
+    info.get("MacOSVariant")
+        .or_else(|| info.get("RecoveryVariant"))
+        .map(|value| {
+            value
+                .as_string()
+                .filter(|value| !value.is_empty())
+                .context("invalid recoveryOS variant name")
+        })
+        .transpose()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Behavior {
@@ -15,12 +29,6 @@ impl Behavior {
         match self {
             Self::Erase => "Erase",
             Self::Update => "Update",
-        }
-    }
-    pub fn variant(self) -> &'static str {
-        match self {
-            Self::Erase => "Erase Install",
-            Self::Update => "Upgrade Install",
         }
     }
 }
@@ -41,9 +49,18 @@ pub struct IdentitySummary {
 pub struct Identity {
     pub index: usize,
     pub value: Value,
+    pub(super) file_types: HashMap<String, Option<[u8; 4]>>,
 }
 
 impl Identity {
+    pub fn new(index: usize, value: Value) -> Self {
+        Self {
+            index,
+            value,
+            file_types: HashMap::new(),
+        }
+    }
+
     pub fn manifest(&self) -> Result<&plist::Dictionary> {
         wire::dictionary(wire::get(&self.value, &["Manifest"])?)
     }
@@ -54,11 +71,47 @@ impl Identity {
         component_path(wire::get(&self.value, &["Manifest", name])?)?
             .with_context(|| format!("missing component path {name}"))
     }
-    pub fn has(&self, name: &str) -> bool {
-        self.path(name).is_ok()
+    pub fn component_by_type(&self, tag: &[u8; 4]) -> Result<Option<&str>> {
+        let mut selected = None;
+        for name in self.manifest()?.keys() {
+            if self.payload_type(name)? == Some(*tag) {
+                ensure!(selected.is_none(), "ambiguous Img4PayloadType {tag:?}");
+                selected = Some(name.as_str());
+            }
+        }
+        Ok(selected)
     }
-    pub fn is_macos(&self) -> bool {
-        self.info("MacOSVariant").is_ok()
+
+    /// An explicit manifest override takes precedence over the file's IM4P tag.
+    pub fn payload_type(&self, name: &str) -> Result<Option<[u8; 4]>> {
+        let entry = wire::get(&self.value, &["Manifest", name])?;
+        if let Some(tag) = crate::img4::component_tag(name, Some(entry))? {
+            return Ok(Some(tag));
+        }
+        Ok(component_path(entry)?
+            .and_then(|path| self.file_types.get(path))
+            .copied()
+            .flatten())
+    }
+
+    pub fn require_component_type(&self, tag: &[u8; 4]) -> Result<&str> {
+        self.component_by_type(tag)?.with_context(|| {
+            format!(
+                "IPSW has no component with payload type {} from manifest or IM4P",
+                String::from_utf8_lossy(tag)
+            )
+        })
+    }
+    pub fn is_macos(&self) -> Result<bool> {
+        Ok(wire::optional(&self.value, &["Info", "MacOSVariant"])?
+            .map(|value| {
+                value
+                    .as_string()
+                    .filter(|value| !value.is_empty())
+                    .context("invalid MacOSVariant")
+            })
+            .transpose()?
+            .is_some())
     }
     pub fn behavior(&self) -> Result<Behavior> {
         match self.info("RestoreBehavior")?.as_string() {
@@ -69,11 +122,7 @@ impl Identity {
     }
     pub fn validate_behavior(&self, behavior: Behavior) -> Result<()> {
         ensure!(
-            self.behavior()? == behavior
-                && self
-                    .info("Variant")?
-                    .as_string()
-                    .is_some_and(|variant| variant.contains(behavior.variant())),
+            self.behavior()? == behavior,
             "selected identity does not match requested behavior"
         );
         Ok(())
@@ -94,12 +143,25 @@ impl IdentitySummary {
                 .as_string()
                 .context("invalid DeviceClass")?
                 .into(),
-            variant: info("Variant")?.as_string().unwrap_or("").into(),
-            restore_behavior: info("RestoreBehavior")?.as_string().unwrap_or("").into(),
-            macos_variant: info("MacOSVariant")
-                .ok()
-                .and_then(Value::as_string)
-                .map(str::to_owned),
+            variant: info("Variant")?
+                .as_string()
+                .filter(|value| !value.is_empty())
+                .context("invalid Variant")?
+                .into(),
+            restore_behavior: info("RestoreBehavior")?
+                .as_string()
+                .filter(|value| !value.is_empty())
+                .context("invalid RestoreBehavior")?
+                .into(),
+            macos_variant: wire::optional(value, &["Info", "MacOSVariant"])?
+                .map(|value| {
+                    value
+                        .as_string()
+                        .filter(|value| !value.is_empty())
+                        .context("invalid MacOSVariant")
+                        .map(str::to_owned)
+                })
+                .transpose()?,
             components: wire::dictionary(wire::get(value, &["Manifest"])?)?.len(),
         })
     }
@@ -118,10 +180,7 @@ impl Ipsw {
 
     pub fn identities(&self) -> Vec<Identity> {
         self.identity_values()
-            .map(|(index, value)| Identity {
-                index,
-                value: value.clone(),
-            })
+            .map(|(index, value)| Identity::new(index, value.clone()))
             .collect()
     }
 
@@ -135,10 +194,7 @@ impl Ipsw {
             .identity_values()
             .nth(index)
             .context("identity index does not exist")?;
-        Ok(Identity {
-            index,
-            value: value.clone(),
-        })
+        Ok(Identity::new(index, value.clone()))
     }
 
     pub fn select_behavior(
@@ -164,17 +220,9 @@ impl Ipsw {
         device: &DeviceInfo,
         restore: &Identity,
     ) -> Result<Option<Identity>> {
-        let info = wire::dictionary(wire::get(&restore.value, &["Info"])?)?;
-        let Some(variant) = info
-            .get("MacOSVariant")
-            .or_else(|| info.get("RecoveryVariant"))
-        else {
+        let Some(variant) = recovery_variant(&restore.value)? else {
             return Ok(None);
         };
-        let variant = variant
-            .as_string()
-            .context("invalid recoveryOS variant name")?;
-        ensure!(!variant.is_empty(), "empty recoveryOS variant name");
         let identity = self
             .matching_identity(device, None, Some(variant), Behavior::Erase)?
             .with_context(|| {
@@ -205,27 +253,38 @@ impl Ipsw {
                 if summary.variant != variant {
                     continue;
                 }
-            } else if summary.restore_behavior != behavior.name()
-                || !summary.variant.contains(behavior.variant())
-                || (index.is_none() && summary.variant.contains("Research"))
-            {
+            } else if summary.restore_behavior != behavior.name() {
                 continue;
             }
-            matches.push((i, value));
+            matches.push((i, value, summary));
+        }
+        if index.is_none() && variant.is_none() && matches.len() > 1 {
+            // A restore identity can explicitly name its companion variant.
+            // That referenced identity is not a competing DFU entry point.
+            let referenced = matches
+                .iter()
+                .filter_map(|(_, value, _)| recovery_variant(value).transpose())
+                .collect::<Result<HashSet<_>>>()?;
+            matches.retain(|(_, _, summary)| !referenced.contains(summary.variant.as_str()));
+            ensure!(
+                !matches.is_empty(),
+                "matching {} build identities form a variant reference cycle; specify --identity",
+                behavior.name()
+            );
         }
         match matches.len() {
             1 => {
-                let (index, value) = matches[0];
-                Ok(Some(Identity {
-                    index,
-                    value: value.clone(),
-                }))
+                let (index, value, _) = &matches[0];
+                Ok(Some(Identity::new(*index, (*value).clone())))
             }
             0 => Ok(None),
             _ => bail!(
                 "ambiguous {} build identities {:?}{}",
                 variant.unwrap_or(behavior.name()),
-                matches.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+                matches
+                    .iter()
+                    .map(|(index, _, _)| *index)
+                    .collect::<Vec<_>>(),
                 if variant.is_some() {
                     ""
                 } else {

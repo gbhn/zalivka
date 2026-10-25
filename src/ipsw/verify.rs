@@ -3,7 +3,7 @@ use super::{
     Ipsw, component_path,
     digest::{DigestInput, verify_component_digest},
 };
-use crate::{checksum::hasher, img4, wire};
+use crate::{checksum::hasher, firmware, img4, wire};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{
@@ -23,14 +23,12 @@ pub struct Verification {
 #[derive(Hash, PartialEq, Eq)]
 struct ComponentDigest {
     tag: Option<[u8; 4]>,
-    tcon: bool,
     expected: Vec<u8>,
 }
 
-/// Keep exceptions attached to their component, even when paths are shared.
+/// Each component keeps its own declared digest input when paths are shared.
 #[derive(Default)]
 struct EntryDigests {
-    tcon: bool,
     components: HashSet<ComponentDigest>,
 }
 
@@ -46,6 +44,7 @@ impl Ipsw {
         let mut entries: HashMap<String, EntryDigests> = HashMap::new();
         for (_, value) in self.identity_values() {
             for (name, entry) in wire::dictionary(wire::get(value, &["Manifest"])?)? {
+                let tag = img4::component_tag(name, Some(entry))?;
                 let Some(path) = component_path(entry)
                     .with_context(|| format!("invalid manifest component {name}"))?
                 else {
@@ -53,8 +52,6 @@ impl Ipsw {
                 };
                 ensure!(self.contains(path), "missing manifest component {path}");
                 let requirements = entries.entry(path.into()).or_default();
-                let tcon = name == "Baobab,TCON";
-                requirements.tcon |= tcon;
                 if let Some(digest) = wire::dictionary(entry)?.get("Digest") {
                     let digest = digest.as_data().context("invalid manifest digest")?;
                     if !digest.is_empty() {
@@ -63,8 +60,7 @@ impl Ipsw {
                             "unsupported digest for {path}"
                         );
                         requirements.components.insert(ComponentDigest {
-                            tag: img4::restore_tag(name),
-                            tcon,
+                            tag,
                             expected: digest.to_vec(),
                         });
                     }
@@ -126,13 +122,13 @@ impl EntryDigests {
         length: u64,
         buffer: &mut [u8],
     ) -> Result<EntryVerification> {
-        ensure!(
-            !self.tcon || length <= 32 * 1024 * 1024,
-            "TCON metadata bundle exceeds 32 MiB"
-        );
         let mut n =
             read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
         let aea = buffer[..n].starts_with(b"AEA1");
+        let mut bundle = (!self.components.is_empty()
+            && length <= firmware::MAX_PLIST_BUNDLE
+            && firmware::plist_prefix(&buffer[..n]))
+        .then(Vec::new);
         // Validate containers even when no manifest digest references this entry.
         let inputs = DigestInput::variants(&buffer[..n], length, None)?;
         // AEA manifest digests describe decrypted content, not the ZIP bytes.
@@ -157,10 +153,13 @@ impl EntryDigests {
             aea_deferred: aea && !self.components.is_empty(),
             ..Default::default()
         };
-        let mut tcon_bytes = Vec::new();
         while n != 0 {
-            if self.tcon {
-                tcon_bytes.extend_from_slice(&buffer[..n]);
+            if let Some(bytes) = &mut bundle {
+                ensure!(
+                    bytes.len() as u64 + n as u64 <= firmware::MAX_PLIST_BUNDLE,
+                    "plist payload bundle exceeds memory limit: {name}"
+                );
+                bytes.extend_from_slice(&buffer[..n]);
             }
             for ((_, input), hash) in &mut hashes {
                 input.update(hash.as_mut(), &buffer[..n], verified.bytes);
@@ -174,17 +173,22 @@ impl EntryDigests {
             .map(|(key, hash)| (key, hash.finalize()))
             .collect();
         for (component, tag) in checks {
-            verify_component_digest(
-                inputs.iter().copied().chain(tag),
-                &component.expected,
-                |input| {
-                    Ok(actual
-                        .get(&(component.expected.len(), input))
-                        .is_some_and(|hash| hash.as_ref() == component.expected.as_slice()))
-                },
-                component.tcon.then_some(tcon_bytes.as_slice()),
-            )
-            .with_context(|| format!("manifest digest mismatch: {name}"))?;
+            let digest = verify_component_digest(inputs.iter().copied().chain(tag), |input| {
+                Ok(actual
+                    .get(&(component.expected.len(), input))
+                    .is_some_and(|hash| hash.as_ref() == component.expected.as_slice()))
+            });
+            if let Err(error) = digest {
+                let verified_bundle = bundle
+                    .as_ref()
+                    .map(|bytes| firmware::verify_plist_bundle(bytes, &component.expected))
+                    .transpose()
+                    .with_context(|| format!("checking payload bundle {name}"))?;
+                ensure!(
+                    verified_bundle.is_some_and(|report| report.manifest_digest),
+                    "manifest digest mismatch: {name}: {error}"
+                );
+            }
             verified.digests += 1;
         }
         Ok(verified)

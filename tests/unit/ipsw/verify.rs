@@ -8,6 +8,42 @@ struct Fragmented<'a> {
     interrupted: bool,
 }
 
+#[test]
+fn bundle_digests_survive_fragmented_streaming_and_reject_corrupted_payloads() {
+    let digest = Sha256::digest(b"firmware").to_vec();
+    let bundle = wire::dict([
+        ("Payload", plist::Value::Data(b"firmware".to_vec())),
+        ("Digest", plist::Value::Data(digest.clone())),
+    ]);
+    let requirements = EntryDigests {
+        components: HashSet::from([ComponentDigest {
+            tag: None,
+            expected: digest,
+        }]),
+    };
+    for corrupt in [false, true] {
+        let mut value = bundle.clone();
+        if corrupt {
+            value
+                .as_dictionary_mut()
+                .unwrap()
+                .insert("Payload".into(), plist::Value::Data(b"modified".to_vec()));
+        }
+        let bytes = wire::xml(&value).unwrap();
+        let mut reader = Fragmented {
+            data: Cursor::new(bytes.as_slice()),
+            interrupted: false,
+        };
+        let result = requirements.verify(
+            &mut reader,
+            "arbitrary.plist",
+            bytes.len() as u64,
+            &mut [0; 64],
+        );
+        assert_eq!(result.is_ok(), !corrupt);
+    }
+}
+
 impl Read for Fragmented<'_> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         self.interrupted = !self.interrupted;
@@ -45,16 +81,13 @@ fn fragmented_reads_and_interrupts_preserve_container_and_retagged_digests() {
         (&kernel, Some(*b"rkrn"), Sha256::digest(&retagged).to_vec()),
     ] {
         let requirements = EntryDigests {
-            tcon: false,
             components: HashSet::from([
                 ComponentDigest {
                     tag,
-                    tcon: false,
                     expected: digest,
                 },
                 ComponentDigest {
                     tag: None,
-                    tcon: false,
                     expected: Sha384::digest(bytes).to_vec(),
                 },
             ]),

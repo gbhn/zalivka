@@ -1,6 +1,6 @@
 //! Apple's IPSW catalogs contain the model lookup and latest restore URL/hash.
 use crate::{
-    device::{DeviceInfo, Mode, decode_hex, encode_hex, is_mac_product},
+    device::{DeviceInfo, Mode, decode_hex, encode_hex},
     ipsw::{Behavior, Ipsw},
     net, wire,
 };
@@ -21,7 +21,7 @@ fn valid_build_identifier(build: &str) -> bool {
     !build.is_empty() && build.len() <= 64 && build.bytes().all(|c| c.is_ascii_alphanumeric())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {
     pub product_type: String,
     pub version: String,
@@ -30,37 +30,56 @@ pub struct Release {
     pub sha1: [u8; 20],
 }
 
-pub fn catalog_url(device: &DeviceInfo) -> &'static str {
-    if device.chip_id == 0x8012 {
-        BRIDGEOS_CATALOG
-    } else {
-        MACOS_CATALOG
-    }
-}
-
-pub fn resolve(catalog: &Value, device: &DeviceInfo) -> Result<Release> {
+fn model_key(device: &DeviceInfo) -> Result<String> {
     ensure!(
         device.chip_id <= 0xffff && device.board_id <= 0xff,
         "hardware identifiers exceed the Apple catalog lookup format"
     );
-    // The decimal catalog key packs BDID into the high byte and CPID into the
-    // low word. Both Apple's DFU and Recovery tables use this representation.
-    let key = ((u64::from(device.board_id) << 24) | u64::from(device.chip_id)).to_string();
+    Ok(((u64::from(device.board_id) << 24) | u64::from(device.chip_id)).to_string())
+}
+
+fn product_type<'a>(catalog: &'a Value, device: &DeviceInfo) -> Result<Option<&'a str>> {
+    let key = model_key(device)?;
     let mode = match device.mode {
         Mode::Dfu => "DFU",
         Mode::Recovery => "Recovery",
     };
-    let product_type = wire::string(catalog, &["MobileDeviceProductTypes", mode, &key])
-        .with_context(|| {
-            format!(
-                "Apple catalog has no {mode} model for CPID {:04x}, BDID {:02x}",
-                device.chip_id, device.board_id
-            )
-        })?;
-    ensure!(
-        is_mac_product(product_type),
-        "Apple catalog selected a non-Mac product"
-    );
+    let types = wire::dictionary(wire::get(catalog, &["MobileDeviceProductTypes"])?)?;
+    let Some(types) = types.get(mode) else {
+        return Ok(None);
+    };
+    wire::dictionary(types)?
+        .get(&key)
+        .map(|value| {
+            value
+                .as_string()
+                .filter(|value| !value.is_empty())
+                .context("invalid catalog product type")
+        })
+        .transpose()
+}
+
+pub fn resolve_catalogs(catalogs: &[Value], device: &DeviceInfo) -> Result<Release> {
+    let mut selected = None;
+    for catalog in catalogs {
+        if product_type(catalog, device)?.is_none() {
+            continue;
+        }
+        let release = resolve(catalog, device)?;
+        ensure!(
+            selected
+                .as_ref()
+                .is_none_or(|previous| previous == &release),
+            "Apple catalogs contain conflicting firmware releases for this hardware; select an IPSW explicitly"
+        );
+        selected = Some(release);
+    }
+    selected.context("Apple catalogs have no firmware for this hardware")
+}
+
+pub fn resolve(catalog: &Value, device: &DeviceInfo) -> Result<Release> {
+    let product_type = product_type(catalog, device)?
+        .context("Apple catalog has no model for the supplied hardware and mode")?;
     let versions = wire::dictionary(wire::get(
         catalog,
         &["MobileDeviceSoftwareVersionsByVersion"],
@@ -108,14 +127,18 @@ pub fn resolve(catalog: &Value, device: &DeviceInfo) -> Result<Release> {
 }
 
 pub fn latest(device: &DeviceInfo) -> Result<Release> {
-    let mut response = net::get(catalog_url(device)).context("downloading Apple IPSW catalog")?;
-    let bytes = crate::storage::read_limited(
-        response.body_mut().as_reader(),
-        MAX_CATALOG,
-        "Apple IPSW catalog exceeds size limit",
-    )?;
-    let catalog = Value::from_reader(Cursor::new(bytes)).context("decoding Apple IPSW catalog")?;
-    resolve(&catalog, device)
+    let mut catalogs = Vec::new();
+    for url in [MACOS_CATALOG, BRIDGEOS_CATALOG] {
+        let mut response = net::get(url).context("downloading Apple IPSW catalog")?;
+        let bytes = crate::storage::read_limited(
+            response.body_mut().as_reader(),
+            MAX_CATALOG,
+            "Apple IPSW catalog exceeds size limit",
+        )?;
+        catalogs
+            .push(Value::from_reader(Cursor::new(bytes)).context("decoding Apple IPSW catalog")?);
+    }
+    resolve_catalogs(&catalogs, device)
 }
 
 pub fn cache_directory() -> Result<PathBuf> {

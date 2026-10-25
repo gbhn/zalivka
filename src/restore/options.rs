@@ -3,13 +3,8 @@ use crate::{
     ipsw::{Behavior, Identity},
     wire,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use plist::{Dictionary, Value};
-
-// Compatibility value used by idevicerestore's macOS path. Its formula is
-// unknown upstream too; preserve it until a Mac-specific calculation is verified.
-// https://cgit.libimobiledevice.org/idevicerestore.git/tree/src/restore.c?id=45145e9fdc8458022c61a4b87bd029b866d5bcdc
-const MACOS_RECOVERY_PARTITION_MIB: u64 = 58201;
 
 pub fn supported_data_types() -> Value {
     let mut types = DataType::async_types();
@@ -114,7 +109,6 @@ pub fn options(id: &Identity) -> Result<Value> {
         ("BootImageType", "User".into()),
         ("SystemImageType", "User".into()),
         ("DFUFileType", "RELEASE".into()),
-        ("RestoreBundlePath", "/tmp/Per2.tmp".into()),
     ]);
     for key in [
         "FlashNOR",
@@ -132,7 +126,7 @@ pub fn options(id: &Identity) -> Result<Value> {
     ] {
         d.insert(key.into(), false.into());
     }
-    if id.is_macos() {
+    if id.is_macos()? {
         for key in [
             "AddSystemPartitionPadding",
             "DisableUserAuthentication",
@@ -155,16 +149,23 @@ pub fn options(id: &Identity) -> Result<Value> {
             "AuthInstallRecoveryOSVariant".into(),
             id.info("MacOSVariant")?.clone(),
         );
-        d.insert(
-            "recoveryOSPartitionSize".into(),
-            MACOS_RECOVERY_PARTITION_MIB.into(),
-        );
-        if let Ok(v) = id.info("MinimumSystemPartition") {
-            d.insert("SystemPartitionSize".into(), v.clone());
+        if let Some(value) = wire::optional(&id.value, &["Info", "recoveryOSPartitionSize"])? {
+            wire::number(value).context("invalid recoveryOSPartitionSize")?;
+            d.insert("recoveryOSPartitionSize".into(), value.clone());
+        }
+        if let Some(value) = wire::optional(&id.value, &["Info", "MinimumSystemPartition"])? {
+            wire::number(value).context("invalid MinimumSystemPartition")?;
+            d.insert("SystemPartitionSize".into(), value.clone());
         }
     }
-    if let Ok(v) = id.info("SystemPartitionPadding") {
-        d.insert("SystemPartitionPadding".into(), v.clone());
+    if let Some(value) = wire::optional(&id.value, &["Info", "SystemPartitionPadding"])? {
+        for (size, padding) in wire::dictionary(value).context("invalid SystemPartitionPadding")? {
+            size.parse::<u64>()
+                .with_context(|| format!("invalid SystemPartitionPadding key {size}"))?;
+            wire::number(padding)
+                .with_context(|| format!("invalid SystemPartitionPadding.{size}"))?;
+        }
+        d.insert("SystemPartitionPadding".into(), value.clone());
     }
     Ok(Value::Dictionary(d))
 }

@@ -1,7 +1,7 @@
 //! Transfer identities, byte counters and operation progress shared with the GUI.
 use serde::{Deserialize, Serialize};
 use std::{
-    cell::Cell,
+    cell::RefCell,
     io::{self, Write},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -12,48 +12,31 @@ pub const WORKER_EVENTS_ENV: &str = "ZALIVKA_WORKER_EVENTS";
 const INTERVAL: Duration = Duration::from_millis(500);
 static NEXT_TRANSFER: AtomicU64 = AtomicU64::new(1);
 thread_local! {
-    static OPERATION: Cell<Option<u64>> = const { Cell::new(None) };
+    static OPERATION: RefCell<(Option<u64>, Option<String>)> = const { RefCell::new((None, None)) };
 }
 
 pub(crate) fn current_operation() -> Option<u64> {
-    OPERATION.get()
+    OPERATION.with_borrow(|scope| scope.0)
 }
 
-/// A request's transfers keep its operation even while other threads advance.
-pub(crate) fn with_operation<T>(operation: Option<u64>, run: impl FnOnce() -> T) -> T {
-    struct Reset(Option<u64>);
+pub(crate) fn current_async_context() -> Option<String> {
+    OPERATION.with_borrow(|scope| scope.1.clone())
+}
+
+/// Keep the device's operation metadata with a request across worker threads.
+pub(crate) fn with_operation<T>(
+    operation: Option<u64>,
+    context: Option<String>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset((Option<u64>, Option<String>));
     impl Drop for Reset {
         fn drop(&mut self) {
-            OPERATION.set(self.0);
+            OPERATION.with(|scope| scope.replace(std::mem::take(&mut self.0)));
         }
     }
-    let _reset = Reset(OPERATION.replace(operation));
+    let _reset = Reset(OPERATION.with(|scope| scope.replace((operation, context))));
     run()
-}
-
-/// Completion notifications for operations which may never report 100%.
-pub fn checkpoint_operation(name: &str) -> Option<u64> {
-    match name {
-        "create_filesystem_partitions" => Some(11),
-        "format_media" => Some(12),
-        "perform_restore_installing" => Some(13),
-        "fsck_filesystems" | "fsck_recovery_volume" => Some(15),
-        "mount_filesystem" | "mount_recovery_os_filesystem" => Some(16),
-        "fixup_var" => Some(17),
-        "update_iBoot" => Some(18),
-        "persistent_boot_args" => Some(25),
-        "wait_for_storage" => Some(28),
-        "unmount_unconditionally" | "unmount_filesystems" => Some(29),
-        "update_aht" => Some(36),
-        "clear_nvram" => Some(46),
-        "await_update_stockholm" => Some(55),
-        "update_NAND_firmware" => Some(58),
-        "await_update_se" => Some(59),
-        "create_protected_filesystems" => Some(67),
-        "update_fdr_ean" => Some(74),
-        "seal_system_volume" => Some(77),
-        _ => None,
-    }
 }
 
 /// Worker state is independent of human-readable logs and their retained history.
@@ -81,7 +64,13 @@ pub enum Event {
     OperationWeights {
         weights: Vec<(u64, u64)>,
     },
+    OperationName {
+        operation: u64,
+        name: String,
+    },
     OperationProgress {
+        #[serde(default)]
+        async_context: Option<String>,
         operation: u64,
         progress: i64,
     },
@@ -181,6 +170,8 @@ impl Drop for TransferProfile {
 pub struct Update {
     pub id: u64,
     pub operation: Option<u64>,
+    #[serde(default)]
+    pub async_context: Option<String>,
     pub stage: String,
     pub completed: u64,
     pub total: Option<u64>,
@@ -213,6 +204,7 @@ impl Update {
 pub struct Progress {
     id: u64,
     operation: Option<u64>,
+    async_context: Option<String>,
     stage: String,
     total: Option<u64>,
     completed: u64,
@@ -230,6 +222,7 @@ impl Progress {
         let progress = Self {
             id: NEXT_TRANSFER.fetch_add(1, Ordering::Relaxed),
             operation: current_operation(),
+            async_context: current_async_context(),
             stage: stage.into(),
             total,
             completed,
@@ -313,6 +306,7 @@ impl Progress {
         Update {
             id: self.id,
             operation: self.operation,
+            async_context: self.async_context.clone(),
             stage: self.stage.clone(),
             completed: self.completed,
             total: self.total,

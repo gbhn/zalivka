@@ -2,6 +2,346 @@ use super::*;
 use zalivka::ipsw::Behavior;
 
 #[test]
+fn im4p_headers_resolve_boot_roles_and_stage_firmware_without_changing_the_manifest() {
+    let mut id = identity();
+    for name in [
+        "iBSS",
+        "iBEC",
+        "RestoreRamDisk",
+        "RestoreDeviceTree",
+        "RestoreKernelCache",
+    ] {
+        manifest_mut(&mut id).remove(name);
+    }
+    let mut files = Vec::new();
+    for (name, tag, stage) in [
+        ("OpaqueBootA", *b"ibss", None),
+        ("OpaqueBootB", *b"ibec", None),
+        ("OpaqueRamdisk", *b"rdsk", None),
+        ("OpaqueTree", *b"rdtr", None),
+        ("OpaqueKernel", *b"rkrn", None),
+        ("OpaqueStageOne", *b"nx26", Some(true)),
+        ("ANE", *b"anef", Some(false)),
+    ] {
+        let bytes = im4p(&tag);
+        let path = format!("Firmware/opaque-{}", files.len());
+        let mut entry = component_entry(&path, &bytes);
+        let info = entry.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap();
+        info.remove("Img4PayloadType");
+        if let Some(first) = stage {
+            info.insert("IsLoadedByiBoot".into(), true.into());
+            info.insert("IsLoadedByiBootStage1".into(), first.into());
+        }
+        manifest_mut(&mut id).insert(name.into(), entry);
+        files.push((path, bytes));
+    }
+    let original = id.value.clone();
+    let file_refs = files
+        .iter()
+        .map(|(path, data)| (path.as_str(), data.as_slice()))
+        .collect::<Vec<_>>();
+    let file = fixture_files(Some(id.clone()), false, &file_refs);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let stages = restore::preflight(&mut ipsw, &mut id).unwrap();
+    assert_eq!(id.require_component_type(b"ibss").unwrap(), "OpaqueBootA");
+    assert_eq!(id.payload_type("ANE").unwrap(), Some(*b"anef"));
+    assert!(stages[0].contains(&restore::IBootStep::Component("OpaqueStageOne".into())));
+    assert!(stages[1].contains(&restore::IBootStep::Component("ANE".into())));
+    assert_eq!(id.value, original);
+    assert_eq!(ipsw.identity(1).unwrap().value, original);
+    assert_eq!(id.clone().payload_type("ANE").unwrap(), Some(*b"anef"));
+    let signature = wire::dict([("ApImg4Ticket", Value::Data(ticket()))]);
+    for (name, tag) in [("OpaqueBootA", *b"ibss"), ("ANE", *b"anef")] {
+        let bytes = ipsw.personalized(&id, name, &signature).unwrap();
+        assert_eq!(bytes, img4::personalize(&im4p(&tag), &ticket()).unwrap());
+    }
+    let request = tss::request(&device_info(), &id).unwrap();
+    assert!(wire::get(&request, &["ANE"]).is_ok());
+    assert_eq!(
+        request,
+        tss::request(&device_info(), &Identity::new(id.index, original)).unwrap()
+    );
+    ipsw.verify_all().unwrap();
+}
+
+#[test]
+fn header_derived_nonce_slots_still_require_explicit_slot_ids() {
+    for (tag, key) in [(*b"illb", "ApNonceSlotID"), (*b"sepi", "SepNonceSlotID")] {
+        let bytes = im4p(&tag);
+        let mut id = identity();
+        let mut entry = component_entry("Firmware/opaque-slot", &bytes);
+        entry.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .remove("Img4PayloadType");
+        manifest_mut(&mut id).insert("OpaqueSlotComponent".into(), entry);
+        id.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("RequiresNonceSlot".into(), true.into());
+        let file = fixture_files(Some(id.clone()), false, &[("Firmware/opaque-slot", &bytes)]);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        let error = ipsw.preflight_recovery(&mut id).unwrap_err();
+        assert!(error.to_string().contains(key), "{error:#}");
+        id.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(key.into(), 3u64.into());
+        ipsw.preflight_recovery(&mut id).unwrap();
+    }
+}
+
+#[test]
+fn header_types_do_not_override_explicit_manifest_types_on_shared_files() {
+    let bytes = im4p(b"krnl");
+    let mut retagged = bytes.clone();
+    let offset = img4::type_offset(&retagged).unwrap();
+    retagged[offset..offset + 4].copy_from_slice(b"nx26");
+    let mut id = identity();
+    let mut normal = component_entry("Firmware/shared-kernel", &bytes);
+    normal.as_dictionary_mut().unwrap()["Info"]
+        .as_dictionary_mut()
+        .unwrap()
+        .remove("Img4PayloadType");
+    let restore = component_entry("Firmware/shared-kernel", &retagged);
+    manifest_mut(&mut id).insert("OpaqueNormal".into(), normal);
+    manifest_mut(&mut id).insert("OpaqueRetagged".into(), restore);
+    let original = id.value.clone();
+    let file = fixture_files(
+        Some(id.clone()),
+        false,
+        &[("Firmware/shared-kernel", &bytes)],
+    );
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    ipsw.preflight_recovery(&mut id).unwrap();
+    assert_eq!(id.payload_type("OpaqueNormal").unwrap(), Some(*b"krnl"));
+    assert_eq!(id.payload_type("OpaqueRetagged").unwrap(), Some(*b"nx26"));
+    let signature = wire::dict([("ApImg4Ticket", Value::Data(ticket()))]);
+    assert_eq!(
+        ipsw.personalized(&id, "OpaqueNormal", &signature).unwrap(),
+        img4::personalize(&bytes, &ticket()).unwrap()
+    );
+    assert_eq!(
+        ipsw.personalized(&id, "OpaqueRetagged", &signature)
+            .unwrap(),
+        img4::personalize(&retagged, &ticket()).unwrap()
+    );
+    assert_eq!(id.value, original);
+    ipsw.verify_all().unwrap();
+}
+
+#[test]
+fn absent_or_invalid_im4p_headers_cannot_supply_missing_firmware_types() {
+    let invalid_tag = im4p(&[0xff, 0, 1, 2]);
+    for bytes in [
+        b"opaque binary".as_slice(),
+        &im4p(b"anef")[..12],
+        invalid_tag.as_slice(),
+    ] {
+        let mut id = identity();
+        let mut entry = component_entry("Firmware/opaque", bytes);
+        let info = entry.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap();
+        info.remove("Img4PayloadType");
+        info.insert("IsLoadedByiBoot".into(), true.into());
+        info.insert("IsLoadedByiBootStage1".into(), false.into());
+        manifest_mut(&mut id).insert("OpaqueFirmware".into(), entry);
+        let file = fixture_files(Some(id.clone()), false, &[("Firmware/opaque", bytes)]);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        let error = restore::preflight(&mut ipsw, &mut id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resolve iBoot firmware payload type for OpaqueFirmware"),
+            "{error:#}"
+        );
+        let signature = wire::dict([("ApImg4Ticket", Value::Data(ticket()))]);
+        assert!(
+            ipsw.personalized(&id, "OpaqueFirmware", &signature)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn raw_trusted_files_do_not_require_an_img4_type_when_they_are_not_boot_objects() {
+    let bytes = b"raw disk image";
+    let mut id = identity();
+    let mut entry = component_entry("raw.dmg", bytes);
+    entry.as_dictionary_mut().unwrap()["Info"]
+        .as_dictionary_mut()
+        .unwrap()
+        .remove("Img4PayloadType");
+    manifest_mut(&mut id).insert("OS".into(), entry);
+    let file = fixture_files(Some(id.clone()), false, &[("raw.dmg", bytes)]);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    restore::preflight(&mut ipsw, &mut id).unwrap();
+    assert_eq!(id.payload_type("OS").unwrap(), None);
+    assert_eq!(ipsw.component(&id, "OS").unwrap(), bytes);
+    ipsw.verify_all().unwrap();
+}
+
+#[test]
+fn malformed_variant_metadata_is_not_treated_as_an_absent_variant() {
+    for key in ["Variant", "RestoreBehavior", "MacOSVariant"] {
+        for invalid in [Value::Boolean(false), "".into()] {
+            let mut id = identity();
+            id.value.as_dictionary_mut().unwrap()["Info"]
+                .as_dictionary_mut()
+                .unwrap()
+                .insert(key.into(), invalid.clone());
+            assert!(id.summary().is_err(), "{key}: {invalid:?}");
+            if key == "MacOSVariant" {
+                assert!(id.is_macos().is_err());
+            }
+            let file = fixture(Some(id), false);
+            let ipsw = Ipsw::open(file.path()).unwrap();
+            assert!(
+                ipsw.select_behavior(&device_info(), Some(0), Behavior::Erase)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn preflight_rejects_malformed_optional_flags_and_partition_sizes() {
+    let file = fixture(None, false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    for key in [
+        "RequiresUIDMode",
+        "RequiresNonceSlot",
+        "recoveryOSPartitionSize",
+        "MinimumSystemPartition",
+        "SystemPartitionPadding",
+    ] {
+        let mut id = identity();
+        id.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(key.into(), "invalid".into());
+        assert!(restore::preflight(&mut ipsw, &mut id).is_err(), "{key}");
+    }
+    for key in [
+        "Personalize",
+        "IsLoadedByiBoot",
+        "IsLoadedByiBootStage1",
+        "IsFirmwarePayload",
+        "IsSecondaryFirmwarePayload",
+        "IsFUDFirmware",
+        "IsEarlyAccessFirmware",
+        "IsiBootEANFirmware",
+        "IsiBootNonEssentialFirmware",
+    ] {
+        let mut id = identity();
+        manifest_mut(&mut id)["iBSS"].as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(key.into(), "false".into());
+        assert!(ipsw.preflight(&mut id).is_err(), "{key}");
+        assert!(ipsw.preflight_recovery(&mut id).is_err(), "{key}");
+    }
+}
+
+#[test]
+fn restore_preflight_resolves_ambiguous_optional_boot_roles_before_upload() {
+    let file = fixture(None, false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    for tag in ["rans", "rdcp", "ibdt", "rlgo", "rsep"] {
+        let mut id = identity();
+        for name in ["FutureA", "FutureB"] {
+            manifest_mut(&mut id).insert(
+                name.into(),
+                component_entry("Firmware/iBSS", &im4p(b"test")),
+            );
+            declare_type(&mut id, name, tag);
+        }
+        let error = restore::preflight(&mut ipsw, &mut id).unwrap_err();
+        assert!(
+            error.to_string().contains("ambiguous Img4PayloadType"),
+            "{tag}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn restore_preflight_verifies_additional_stage_firmware_before_upload() {
+    let bytes = im4p(b"nx26");
+    for first in [false, true] {
+        let mut id = identity();
+        let mut entry = component_entry("Firmware/future", &bytes);
+        let info = entry.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap();
+        info.insert("IsLoadedByiBoot".into(), true.into());
+        info.insert("IsLoadedByiBootStage1".into(), first.into());
+        manifest_mut(&mut id).insert("FutureStageFirmware".into(), entry);
+        let file = fixture_files(Some(id.clone()), false, &[("Firmware/future", &bytes)]);
+        restore::preflight(&mut Ipsw::open(file.path()).unwrap(), &mut id).unwrap();
+
+        let mut corrupt = bytes.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        let file = fixture_files(Some(id.clone()), false, &[("Firmware/future", &corrupt)]);
+        let error = restore::preflight(&mut Ipsw::open(file.path()).unwrap(), &mut id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("FutureStageFirmware digest mismatch"),
+            "{error:#}"
+        );
+    }
+}
+
+#[test]
+fn boot_components_require_a_digest_even_when_not_trusted() {
+    let file = fixture(None, false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    for trusted in [false, true] {
+        for digest in [None, Some(Value::Data(vec![])), Some("invalid".into())] {
+            let mut id = identity();
+            let component = manifest_mut(&mut id)["iBEC"].as_dictionary_mut().unwrap();
+            component.insert("Trusted".into(), trusted.into());
+            component.remove("Digest");
+            if let Some(digest) = digest {
+                component.insert("Digest".into(), digest);
+            }
+            assert!(restore::preflight(&mut ipsw, &mut id).is_err());
+            if trusted {
+                assert!(ipsw.component(&id, "iBEC").is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn recovery_nonce_slot_metadata_is_checked_before_boot_by_declared_role() {
+    let file = fixture(None, false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    for (tag, slot) in [("illb", "ApNonceSlotID"), ("sepi", "SepNonceSlotID")] {
+        let mut id = identity();
+        manifest_mut(&mut id).insert(
+            "FutureRole".into(),
+            component_entry("Firmware/iBSS", &im4p(b"test")),
+        );
+        declare_type(&mut id, "FutureRole", tag);
+        id.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("RequiresNonceSlot".into(), true.into());
+        let error = ipsw.preflight_recovery(&mut id).unwrap_err();
+        assert!(error.to_string().contains(slot), "{error:#}");
+        id.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(slot.into(), 3u64.into());
+        ipsw.preflight_recovery(&mut id).unwrap();
+    }
+}
+
+#[test]
 fn manifest_paths_are_checked_consistently_before_restore_and_full_verification() {
     for entry in [
         false.into(),
@@ -14,20 +354,20 @@ fn manifest_paths_are_checked_consistently_before_restore_and_full_verification(
         manifest_mut(&mut id).insert("Extra".into(), entry.clone());
         let file = fixture(Some(id.clone()), false);
         let mut ipsw = Ipsw::open(file.path()).unwrap();
-        assert!(ipsw.preflight(&id).is_err(), "{entry:?}");
-        assert!(ipsw.preflight_recovery(&id).is_err(), "{entry:?}");
+        assert!(ipsw.preflight(&mut id).is_err(), "{entry:?}");
+        assert!(ipsw.preflight_recovery(&mut id).is_err(), "{entry:?}");
         assert!(ipsw.verify_all().is_err(), "{entry:?}");
     }
     for entry in [
-        wire::dict([("Trusted", true.into())]),
+        wire::dict([("Trusted", false.into())]),
         wire::dict([("Info", wire::dict([("IsFTAB", true.into())]))]),
     ] {
         let mut id = identity();
         manifest_mut(&mut id).insert("SigningMetadata".into(), entry);
         let file = fixture(Some(id.clone()), false);
         let mut ipsw = Ipsw::open(file.path()).unwrap();
-        ipsw.preflight(&id).unwrap();
-        ipsw.preflight_recovery(&id).unwrap();
+        ipsw.preflight(&mut id).unwrap();
+        ipsw.preflight_recovery(&mut id).unwrap();
         ipsw.verify_all().unwrap();
     }
 }
@@ -162,7 +502,13 @@ fn restore_digest_hashes_the_retagged_im4p_and_preserves_the_original_file() {
     assert_eq!(ipsw.component(&id, "RestoreKernelCache").unwrap(), raw);
     assert_eq!(ipsw.component(&id, "KernelCache").unwrap(), raw);
     ipsw.verify_all().unwrap();
-    let personalized = img4::personalize("RestoreKernelCache", &raw, &ticket()).unwrap();
+    let personalized = img4::personalize_with_metadata(
+        "RestoreKernelCache",
+        &raw,
+        &wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
+        &id.value,
+    )
+    .unwrap();
     assert!(personalized.windows(restore.len()).any(|w| w == restore));
     assert_eq!(img4::type_offset(&raw[..4]), None);
     let mut corrupt = raw;
@@ -175,6 +521,137 @@ fn restore_digest_hashes_the_retagged_im4p_and_preserves_the_original_file() {
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(ipsw.component(&id, "RestoreKernelCache").is_err());
     assert!(ipsw.verify_all().is_err());
+}
+
+#[test]
+fn manifest_payload_types_drive_verification_and_personalization_for_new_component_names() {
+    let raw = im4p(b"krnl");
+    let offset = img4::type_offset(&raw).unwrap();
+    for component in ["RestoreKernelCache", "Ap,FutureRestoreEngine"] {
+        let mut expected = raw.clone();
+        expected[offset..offset + 4].copy_from_slice(b"nx26");
+        let mut entry = component_entry("Firmware/new-engine", &expected);
+        entry
+            .as_dictionary_mut()
+            .unwrap()
+            .get_mut("Info")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("Img4PayloadType".into(), "nx26".into());
+        let mut id = identity();
+        if component == "RestoreKernelCache" {
+            let boot = manifest_mut(&mut id)["RestoreKernelCache"].clone();
+            manifest_mut(&mut id).insert("DeclaredBootKernel".into(), boot);
+        }
+        manifest_mut(&mut id).insert(component.into(), entry);
+        let file = fixture_files(Some(id.clone()), false, &[("Firmware/new-engine", &raw)]);
+        let original_archive = std::fs::read(file.path()).unwrap();
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        ipsw.preflight(&mut id).unwrap();
+        assert_eq!(ipsw.component(&id, component).unwrap(), raw);
+        ipsw.verify_all().unwrap();
+        let tss = wire::dict([("ApImg4Ticket", Value::Data(ticket()))]);
+        let personalized = ipsw.personalized(&id, component, &tss).unwrap();
+        let (image, _) = img4::parse(&personalized).unwrap();
+        let (_, body) = img4::parse(image.content).unwrap();
+        let (payload, _) = img4::parse(body).unwrap();
+        assert_eq!(payload.encoded, expected);
+        assert_eq!(std::fs::read(file.path()).unwrap(), original_archive);
+
+        let mut corrupt = raw.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        let file = fixture_files(
+            Some(id.clone()),
+            false,
+            &[("Firmware/new-engine", &corrupt)],
+        );
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        assert!(ipsw.component(&id, component).is_err());
+        assert!(ipsw.verify_all().is_err());
+        assert!(ipsw.personalized(&id, component, &tss).is_err());
+    }
+}
+
+#[test]
+fn shared_files_keep_distinct_manifest_payload_types_for_unknown_components() {
+    let raw = im4p(b"orig");
+    let offset = img4::type_offset(&raw).unwrap();
+    let mut id = identity();
+    for (name, tag) in [("FutureA", "nxa1"), ("FutureB", "nxb2")] {
+        let mut bytes = raw.clone();
+        bytes[offset..offset + 4].copy_from_slice(tag.as_bytes());
+        let mut entry = component_entry("Firmware/shared-future", &bytes);
+        entry
+            .as_dictionary_mut()
+            .unwrap()
+            .get_mut("Info")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("Img4PayloadType".into(), tag.into());
+        manifest_mut(&mut id).insert(name.into(), entry);
+    }
+    let file = fixture_files(Some(id.clone()), false, &[("Firmware/shared-future", &raw)]);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    ipsw.verify_all().unwrap();
+    for name in ["FutureA", "FutureB"] {
+        assert_eq!(ipsw.component(&id, name).unwrap(), raw);
+    }
+    // A component cannot borrow the retagged digest input of another component
+    // even when both refer to the same ZIP entry.
+    manifest_mut(&mut id)["FutureB"]
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("Info")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("Img4PayloadType".into(), "nxa1".into());
+    let file = fixture_files(Some(id.clone()), false, &[("Firmware/shared-future", &raw)]);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    assert!(ipsw.component(&id, "FutureA").is_ok());
+    assert!(ipsw.component(&id, "FutureB").is_err());
+    assert!(ipsw.verify_all().is_err());
+}
+
+#[test]
+fn malformed_manifest_payload_types_fail_before_restore_instead_of_using_legacy_tags() {
+    for invalid in [
+        Value::Boolean(true),
+        "".into(),
+        "abc".into(),
+        "abcde".into(),
+        "éxy".into(),
+    ] {
+        let mut id = identity();
+        manifest_mut(&mut id)["RestoreKernelCache"]
+            .as_dictionary_mut()
+            .unwrap()
+            .get_mut("Info")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("Img4PayloadType".into(), invalid);
+        let file = fixture(Some(id.clone()), false);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        let tss = wire::dict([("ApImg4Ticket", Value::Data(ticket()))]);
+        for error in [
+            ipsw.preflight(&mut id).unwrap_err(),
+            ipsw.preflight_recovery(&mut id).unwrap_err(),
+            ipsw.component(&id, "RestoreKernelCache").unwrap_err(),
+            ipsw.personalized(&id, "RestoreKernelCache", &tss)
+                .unwrap_err(),
+            ipsw.verify_all().err().unwrap(),
+            img4::personalize_with_metadata("RestoreKernelCache", &im4p(b"krnl"), &tss, &id.value)
+                .unwrap_err(),
+        ] {
+            assert!(
+                format!("{error:#}").contains("RestoreKernelCache Info.Img4PayloadType"),
+                "{error:#}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -197,7 +674,21 @@ fn shared_files_keep_each_components_digest_algorithm_and_restore_tag() {
                 name.into(),
                 wire::dict([
                     ("Digest", Value::Data(digest)),
-                    ("Info", wire::dict([("Path", "Firmware/shared".into())])),
+                    (
+                        "Info",
+                        wire::dict([
+                            ("Path", "Firmware/shared".into()),
+                            (
+                                "Img4PayloadType",
+                                if name == "RestoreKernelCache" {
+                                    "rkrn"
+                                } else {
+                                    "rdtr"
+                                }
+                                .into(),
+                            ),
+                        ]),
+                    ),
                 ]),
             );
         }
@@ -228,145 +719,6 @@ fn empty_components_have_the_same_digest_in_memory_and_streaming() {
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(ipsw.component(&id, "Empty").unwrap().is_empty());
     assert_eq!(ipsw.verify_all().unwrap().manifest_digests, 7);
-}
-
-#[test]
-fn tcon_bundle_checks_payload_instead_of_trusting_matching_metadata() {
-    let digest = sha2::Sha256::digest(b"flash image").to_vec();
-    let bundle = wire::xml(&wire::dict([(
-        "1",
-        wire::dict([(
-            "firmware",
-            wire::dict([
-                ("Digest", Value::Data(digest.clone())),
-                ("Payload", Value::Data(b"flash image".to_vec())),
-            ]),
-        )]),
-    )]))
-    .unwrap();
-    let mut id = identity();
-    manifest_mut(&mut id).insert(
-        "Baobab,TCON".into(),
-        wire::dict([
-            ("Digest", Value::Data(digest.clone())),
-            ("Info", wire::dict([("Path", "tcon.bin".into())])),
-        ]),
-    );
-    let file = fixture_files(Some(id.clone()), false, &[("tcon.bin", &bundle)]);
-    let mut ipsw = Ipsw::open(file.path()).unwrap();
-    assert_eq!(ipsw.component(&id, "Baobab,TCON").unwrap(), bundle);
-    let report = ipsw.verify_all().unwrap();
-    assert_eq!(report.manifest_digests, 7);
-    assert!(zalivka::firmware::verify_tcon_digest(&bundle, &[0; 32]).is_err());
-
-    // A newly packed ZIP has a valid CRC even when its TCON payload is corrupt.
-    // Matching Digest metadata must not make either verification path accept it.
-    let mut corrupt = Value::from_reader(Cursor::new(&bundle)).unwrap();
-    corrupt.as_dictionary_mut().unwrap()["1"]
-        .as_dictionary_mut()
-        .unwrap()["firmware"]
-        .as_dictionary_mut()
-        .unwrap()
-        .insert("Payload".into(), Value::Data(b"bad firmware".to_vec()));
-    let corrupt = wire::xml(&corrupt).unwrap();
-    let file = fixture_files(Some(id.clone()), false, &[("tcon.bin", &corrupt)]);
-    let mut ipsw = Ipsw::open(file.path()).unwrap();
-    assert!(ipsw.component(&id, "Baobab,TCON").is_err());
-    assert!(ipsw.verify_all().is_err());
-
-    // A different component sharing this path cannot use the TCON digest input.
-    let entry = manifest_mut(&mut id)["Baobab,TCON"].clone();
-    manifest_mut(&mut id).insert("Other".into(), entry);
-    let file = fixture_files(Some(id.clone()), false, &[("tcon.bin", &bundle)]);
-    let mut ipsw = Ipsw::open(file.path()).unwrap();
-    assert!(ipsw.component(&id, "Other").is_err());
-    assert!(ipsw.verify_all().is_err());
-}
-
-#[test]
-fn dp855_tcon_hashes_header_code_and_data_and_checks_panel_configs() {
-    use sha2::Sha256;
-    use zalivka::firmware::verify_tcon_digest;
-
-    let mut payload = vec![0xff; 0xf000];
-    payload[..8].copy_from_slice(&[0, 0, 0, 3, 0, 0, 0, 4]);
-    payload[0x1000..0x1003].copy_from_slice(b"abc");
-    payload[0x9000..0x9004].copy_from_slice(b"defg");
-    // SHA-256 of 00000003 00000004 || "abc" || "defg", independently
-    // calculated with Python hashlib; flash padding is outside the digest.
-    let digest =
-        hex::decode("52f0aec73f4c412cbb4a8b73092cf30da63f745aaf896d49aea0d4c4faff4720").unwrap();
-    let make_bundle = |payload: Vec<u8>, config: Value| {
-        wire::dict([(
-            "1",
-            wire::dict([
-                (
-                    "firmware",
-                    wire::dict([
-                        ("Digest", Value::Data(digest.clone())),
-                        ("Payload", Value::Data(payload)),
-                    ]),
-                ),
-                (
-                    "device_id",
-                    wire::dict([("A41029", wire::dict([("EDID", config)]))]),
-                ),
-            ]),
-        )])
-    };
-    let config = wire::dict([
-        (
-            "Digest",
-            Value::Data(Sha256::digest(b"panel config").to_vec()),
-        ),
-        ("Payload", Value::Data(b"panel config".to_vec())),
-    ]);
-    let bundle = make_bundle(payload.clone(), config.clone());
-    let mut id = identity();
-    manifest_mut(&mut id).insert(
-        "Baobab,TCON".into(),
-        wire::dict([
-            ("Digest", Value::Data(digest.clone())),
-            ("Info", wire::dict([("Path", "tcon.bin".into())])),
-        ]),
-    );
-    for binary in [false, true] {
-        let mut bytes = Vec::new();
-        if binary {
-            bundle.to_writer_binary(&mut bytes).unwrap();
-        } else {
-            bytes = wire::xml(&bundle).unwrap();
-        }
-        let file = fixture_files(Some(id.clone()), false, &[("tcon.bin", &bytes)]);
-        let mut ipsw = Ipsw::open(file.path()).unwrap();
-        assert_eq!(ipsw.component(&id, "Baobab,TCON").unwrap(), bytes);
-        assert_eq!(ipsw.verify_all().unwrap().manifest_digests, 7);
-    }
-    for offset in [0, 3, 7, 0x1000, 0x1002, 0x9000, 0x9003] {
-        let mut corrupt = payload.clone();
-        corrupt[offset] ^= 1;
-        let bytes = wire::xml(&make_bundle(corrupt, config.clone())).unwrap();
-        let file = fixture_files(Some(id.clone()), false, &[("tcon.bin", &bytes)]);
-        let mut ipsw = Ipsw::open(file.path()).unwrap();
-        assert!(
-            ipsw.component(&id, "Baobab,TCON").is_err(),
-            "offset {offset:#x}"
-        );
-        assert!(ipsw.verify_all().is_err(), "offset {offset:#x}");
-    }
-    for bad_config in [
-        wire::dict([
-            ("Digest", Value::Data(vec![0; 32])),
-            ("Payload", Value::Data(b"panel config".to_vec())),
-        ]),
-        wire::dict([("Digest", Value::Data(vec![0; 32]))]),
-        false.into(),
-    ] {
-        let bytes = wire::xml(&make_bundle(payload.clone(), bad_config)).unwrap();
-        assert!(verify_tcon_digest(&bytes, &digest).is_err());
-    }
-    let bytes = wire::xml(&make_bundle(payload[..0x9002].to_vec(), config)).unwrap();
-    assert!(verify_tcon_digest(&bytes, &digest).is_err());
 }
 
 #[test]
@@ -483,10 +835,10 @@ fn zip64_streams_five_gib_with_bounded_memory() {
 fn ipsw_identity_selection_and_stored_image_have_bounded_seeks() {
     let file = fixture(None, false);
     let mut ipsw = Ipsw::open(file.path()).unwrap();
-    let id = ipsw
+    let mut id = ipsw
         .select_behavior(&device_info(), None, Behavior::Erase)
         .unwrap();
-    ipsw.preflight(&id).unwrap();
+    ipsw.preflight(&mut id).unwrap();
     assert_eq!(ipsw.component(&id, "iBSS").unwrap(), im4p(b"test"));
     let mut image = ipsw.stored_image(id.path("OS").unwrap()).unwrap().unwrap();
     let mut data = vec![];
@@ -523,7 +875,7 @@ fn ipsw_ambiguity_mismatch_and_missing_component_are_errors() {
     );
     let file = fixture(None, true);
     let mut ipsw = Ipsw::open(file.path()).unwrap();
-    assert!(ipsw.preflight(&identity()).is_err());
+    assert!(ipsw.preflight(&mut identity()).is_err());
 }
 
 #[test]
@@ -574,6 +926,123 @@ fn identity_selection_returns_an_owned_value_and_checks_later_entries() {
 }
 
 #[test]
+fn automatic_identity_selection_follows_declared_variant_links_in_any_order() {
+    let file = fixture(None, false);
+    for key in ["MacOSVariant", "RecoveryVariant"] {
+        let mut primary = identity();
+        let info = primary.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap();
+        info.remove("MacOSVariant");
+        info.insert("Variant".into(), "OpaquePrimary".into());
+        info.insert(key.into(), "OpaqueCompanion".into());
+        let mut companion = recovery_identity();
+        companion.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("Variant".into(), "OpaqueCompanion".into());
+        for reversed in [false, true] {
+            let mut ipsw = Ipsw::open(file.path()).unwrap();
+            let values = if reversed {
+                vec![companion.value.clone(), primary.value.clone()]
+            } else {
+                vec![primary.value.clone(), companion.value.clone()]
+            };
+            Arc::make_mut(&mut ipsw.manifest)
+                .as_dictionary_mut()
+                .unwrap()
+                .insert("BuildIdentities".into(), Value::Array(values));
+            let selected = ipsw
+                .select_behavior(&device_info(), None, Behavior::Erase)
+                .unwrap();
+            assert_eq!(selected.index, usize::from(reversed), "{key}");
+            assert_eq!(selected.summary().unwrap().variant, "OpaquePrimary");
+            let recovery = ipsw
+                .recovery_identity(&device_info(), &selected)
+                .unwrap()
+                .unwrap();
+            assert_eq!(recovery.index, usize::from(!reversed), "{key}");
+            assert_eq!(recovery.summary().unwrap().variant, "OpaqueCompanion");
+        }
+    }
+}
+
+#[test]
+fn variant_links_do_not_hide_multiple_roots_or_choose_across_hardware() {
+    let file = fixture(Some(recovery_identity()), false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let values = Arc::make_mut(&mut ipsw.manifest)
+        .as_dictionary_mut()
+        .unwrap()["BuildIdentities"]
+        .as_array_mut()
+        .unwrap();
+    values.push(identity().value);
+    assert!(
+        ipsw.select_behavior(&device_info(), None, Behavior::Erase)
+            .is_err()
+    );
+    assert_eq!(
+        ipsw.select_behavior(&device_info(), Some(0), Behavior::Erase)
+            .unwrap()
+            .index,
+        0
+    );
+    assert_eq!(
+        ipsw.select_behavior(&device_info(), Some(2), Behavior::Erase)
+            .unwrap()
+            .index,
+        2
+    );
+
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let values = Arc::make_mut(&mut ipsw.manifest)
+        .as_dictionary_mut()
+        .unwrap()["BuildIdentities"]
+        .as_array_mut()
+        .unwrap();
+    // A reference from another board must not suppress this board's identity.
+    values[0]
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("ApBoardID".into(), "0x0b".into());
+    assert_eq!(
+        ipsw.select_behavior(&device_info(), None, Behavior::Erase)
+            .unwrap()
+            .index,
+        1
+    );
+}
+
+#[test]
+fn cyclic_variant_links_require_an_explicit_identity() {
+    let file = fixture(Some(recovery_identity()), false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let values = Arc::make_mut(&mut ipsw.manifest)
+        .as_dictionary_mut()
+        .unwrap()["BuildIdentities"]
+        .as_array_mut()
+        .unwrap();
+    values[1].as_dictionary_mut().unwrap()["Info"]
+        .as_dictionary_mut()
+        .unwrap()
+        .insert(
+            "RecoveryVariant".into(),
+            "Customer Erase Install (IPSW)".into(),
+        );
+    let error = ipsw
+        .select_behavior(&device_info(), None, Behavior::Erase)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("variant reference cycle"),
+        "{error:#}"
+    );
+    assert!(
+        ipsw.select_behavior(&device_info(), Some(0), Behavior::Erase)
+            .is_ok()
+    );
+}
+
+#[test]
 fn optional_recovery_identity_distinguishes_absence_from_ambiguity() {
     let file = fixture(None, false);
     let mut ipsw = Ipsw::open(file.path()).unwrap();
@@ -601,16 +1070,25 @@ fn optional_recovery_identity_distinguishes_absence_from_ambiguity() {
         .as_array_mut()
         .unwrap();
     identities.push(recovery_identity().value);
-    // Both identities say Erase; the named macOS variant is not an erase installer.
+    // MacOSVariant explicitly links the companion identity; it is not another
+    // DFU entry point with the same restore behavior.
     assert_eq!(
         ipsw.select_behavior(&device_info(), None, Behavior::Erase)
             .unwrap()
             .index,
         0
     );
-    assert!(
+    assert_eq!(
+        ipsw.select_behavior(&device_info(), Some(0), Behavior::Erase)
+            .unwrap()
+            .index,
+        0
+    );
+    assert_eq!(
         ipsw.select_behavior(&device_info(), Some(1), Behavior::Erase)
-            .is_err()
+            .unwrap()
+            .index,
+        1
     );
     assert_eq!(
         ipsw.recovery_identity(&device_info(), &identity())
@@ -641,14 +1119,14 @@ fn recovery_preflight_accepts_os_only_but_rejects_missing_or_invalid_paths() {
         .recovery_identity(&device_info(), &identity())
         .unwrap()
         .unwrap();
-    ipsw.preflight_recovery(&id).unwrap();
-    assert!(ipsw.preflight(&id).is_err());
+    ipsw.preflight_recovery(&mut id).unwrap();
+    assert!(ipsw.preflight(&mut id).is_err());
     for bad in ["Firmware/missing", "../OS"] {
         manifest_mut(&mut id).insert(
             "Other".into(),
             wire::dict([("Info", wire::dict([("Path", bad.into())]))]),
         );
-        assert!(ipsw.preflight_recovery(&id).is_err());
+        assert!(ipsw.preflight_recovery(&mut id).is_err());
     }
 }
 
@@ -664,7 +1142,7 @@ fn preflight_rejects_corrupt_boot_components_and_invalid_digest_types() {
             .as_dictionary_mut()
             .unwrap()
             .insert("Digest".into(), digest);
-        assert!(ipsw.preflight(&id).is_err());
+        assert!(ipsw.preflight(&mut id).is_err());
     }
 }
 

@@ -70,12 +70,12 @@ pub fn empty_local_policy() -> Vec<u8> {
     element(0x30, &fields)
 }
 
-pub fn personalize(component: &str, payload: &[u8], ticket: &[u8]) -> Result<Vec<u8>> {
-    personalized_image(component, payload, ticket, &[])
+pub fn personalize(payload: &[u8], ticket: &[u8]) -> Result<Vec<u8>> {
+    personalized_image(None, payload, ticket, &[])
 }
 
 fn personalized_image(
-    component: &str,
+    tag: Option<[u8; 4]>,
     payload: &[u8],
     ticket: &[u8],
     metadata: &[u8],
@@ -96,7 +96,7 @@ fn personalized_image(
         magic_ticket.tag == 0x16 && magic_ticket.content == b"IM4M",
         "TSS ticket is not IM4M"
     );
-    let tag = restore_tag(component).unwrap_or(payload[kind.clone()].try_into()?);
+    let tag = tag.unwrap_or(payload[kind.clone()].try_into()?);
     let manifest_header = encoded_header(header(0xa0, ticket.len()));
     let length = [
         6,
@@ -137,29 +137,111 @@ fn private_property(name: &[u8; 4], value: &[u8]) -> Vec<u8> {
     encoded
 }
 
+fn manifest_property<'a>(mut fields: &'a [u8], name: &[u8; 4]) -> Result<Option<Der<'a>>> {
+    let mut found = None;
+    while !fields.is_empty() {
+        let (rest, property) = asn1_rs::Any::from_der(fields)
+            .map_err(|error| anyhow::anyhow!("invalid IMG4 manifest property: {error}"))?;
+        if property.class() == Class::Private && property.tag().0 == u32::from_be_bytes(*name) {
+            ensure!(found.is_none(), "duplicate IMG4 manifest property {name:?}");
+            ensure!(
+                property.header.constructed(),
+                "invalid IMG4 manifest property tag"
+            );
+            let mut header = Vec::new();
+            property.header.write_der_header(&mut header)?;
+            ensure!(
+                fields.starts_with(&header),
+                "noncanonical IMG4 manifest property"
+            );
+            let (sequence, trailing) = parse(property.data)?;
+            ensure!(
+                sequence.tag == 0x30 && trailing.is_empty(),
+                "invalid IMG4 manifest property sequence"
+            );
+            let (key, value) = parse(sequence.content)?;
+            ensure!(
+                key.tag == 0x16 && key.content == name,
+                "IMG4 manifest property name mismatch"
+            );
+            let (value, trailing) = parse(value)?;
+            ensure!(trailing.is_empty(), "trailing IMG4 manifest property data");
+            found = Some(value);
+        }
+        fields = rest;
+    }
+    Ok(found)
+}
+
+/// Inspect an IM4M data property. Signature authentication remains with the device.
+pub(crate) fn manifest_data<'a>(
+    ticket: &'a [u8],
+    object: &[u8; 4],
+    key: &[u8; 4],
+) -> Result<Option<&'a [u8]>> {
+    let (sequence, trailing) = parse(ticket)?;
+    ensure!(
+        sequence.tag == 0x30 && trailing.is_empty(),
+        "invalid IM4M sequence"
+    );
+    let (magic, rest) = parse(sequence.content)?;
+    ensure!(
+        magic.tag == 0x16 && magic.content == b"IM4M",
+        "ticket is not IM4M"
+    );
+    let (version, rest) = parse(rest)?;
+    ensure!(version.tag == 0x02, "invalid IM4M version");
+    let (body, _) = parse(rest)?;
+    ensure!(body.tag == 0x31, "invalid IM4M body");
+    let Some(body) = manifest_property(body.content, b"MANB")? else {
+        return Ok(None);
+    };
+    ensure!(body.tag == 0x31, "invalid IM4M MANB");
+    let Some(object) = manifest_property(body.content, object)? else {
+        return Ok(None);
+    };
+    ensure!(object.tag == 0x31, "invalid IM4M object");
+    let Some(value) = manifest_property(object.content, key)? else {
+        return Ok(None);
+    };
+    ensure!(value.tag == 0x04, "IMG4 manifest property is not data");
+    Ok(Some(value.content))
+}
+
+pub(crate) fn nonce_slot(
+    identity: &plist::Value,
+    payload_type: Option<[u8; 4]>,
+) -> Result<Option<([u8; 4], u64)>> {
+    use crate::wire;
+    if wire::optional_boolean(identity, &["Info", "RequiresNonceSlot"])?.unwrap_or(false)
+        && matches!(payload_type, Some(tag) if tag == *b"illb" || tag == *b"sepi")
+    {
+        let (tag, key) = if payload_type == Some(*b"illb") {
+            (b"anid", "ApNonceSlotID")
+        } else {
+            (b"snid", "SepNonceSlotID")
+        };
+        let slot = wire::number(
+            wire::get(identity, &["Info", key])
+                .with_context(|| format!("strict restore requires explicit {key}"))?,
+        )?;
+        return Ok(Some((*tag, slot)));
+    }
+    Ok(None)
+}
+
 pub fn restore_info(
     tss: &plist::Value,
     component: &str,
     identity: &plist::Value,
+    payload_type: Option<[u8; 4]>,
 ) -> Result<Option<Vec<u8>>> {
     use crate::wire;
     let mut properties = Vec::new();
-    if wire::boolean(identity, &["Info", "RequiresNonceSlot"])
-        && ["SEP", "SepStage1", "LLB"].contains(&component)
-    {
-        let (tag, key, default) = if component == "LLB" {
-            (b"anid", "ApNonceSlotID", 0u64)
-        } else {
-            (b"snid", "SepNonceSlotID", 2u64)
-        };
-        let slot = wire::get(identity, &["Info", key])
-            .ok()
-            .map(wire::number)
-            .transpose()?
-            .unwrap_or(default);
-        properties.extend(private_property(tag, &slot.to_der_vec()?));
+    if let Some((tag, slot)) = nonce_slot(identity, payload_type)? {
+        properties.extend(private_property(&tag, &slot.to_der_vec()?));
     }
-    if let Ok(tbm) = wire::get(tss, &[&format!("{component}-TBM")]) {
+    if let Some(tbm) = wire::optional(tss, &[&format!("{component}-TBM")])? {
         for name in [b"ucon", b"ucer"] {
             let key = std::str::from_utf8(name)?;
             let data = wire::get(tbm, &[key])?
@@ -182,37 +264,52 @@ pub fn personalize_with_metadata(
     tss: &plist::Value,
     identity: &plist::Value,
 ) -> Result<Vec<u8>> {
-    let info = restore_info(tss, component, identity)?;
-    personalized_image(
+    let manifest = crate::wire::dictionary(identity)?
+        .get("Manifest")
+        .map(crate::wire::dictionary)
+        .transpose()?;
+    let tag = component_tag(
         component,
+        manifest.and_then(|manifest| manifest.get(component)),
+    )?
+    .or_else(|| payload_type(payload))
+    .with_context(|| format!("cannot resolve IMG4 payload type for {component}: no manifest override or valid IM4P header"))?;
+    let info = restore_info(tss, component, identity, Some(tag))?;
+    personalized_image(
+        Some(tag),
         payload,
         crate::tss::ticket(tss)?,
         info.as_deref().unwrap_or_default(),
     )
 }
 
-/// IM4P restore variants share a file with normal components and change its tag.
-pub fn restore_tag(component: &str) -> Option<[u8; 4]> {
-    match component {
-        "RestoreKernelCache" => Some(*b"rkrn"),
-        "RestoreDeviceTree" => Some(*b"rdtr"),
-        "RestoreSEP" => Some(*b"rsep"),
-        "RestoreLogo" => Some(*b"rlgo"),
-        "RestoreTrustCache" => Some(*b"rtsc"),
-        "RestoreDCP" => Some(*b"rdcp"),
-        "Ap,RestoreDCP2" => Some(*b"rdc2"),
-        "Ap,DCP2" => Some(*b"dcp2"),
-        "Ap,RestoreCIO" => Some(*b"rcio"),
-        "Ap,RestoreTMU" => Some(*b"rtmu"),
-        "Ap,RestoreSecureM3Firmware" => Some(*b"rsm3"),
-        "Ap,RestoreSecurePageTableMonitor" => Some(*b"rspt"),
-        "Ap,RestoreTrustedExecutionMonitor" => Some(*b"rtrx"),
-        "Ap,RestorecL4" => Some(*b"rxcl"),
-        "Ap,RestoreANE1" => Some(*b"ran1"),
-        "Ap,RestoreANE2" => Some(*b"ran2"),
-        "Ap,RestoreANE3" => Some(*b"ran3"),
-        _ => None,
-    }
+/// An optional manifest override; missing types can be read from the IM4P file.
+pub(crate) fn component_tag(
+    component: &str,
+    entry: Option<&plist::Value>,
+) -> Result<Option<[u8; 4]>> {
+    let info = entry
+        .map(crate::wire::dictionary)
+        .transpose()?
+        .and_then(|entry| entry.get("Info"))
+        .map(crate::wire::dictionary)
+        .transpose()?;
+    let Some(tag) = info.and_then(|info| info.get("Img4PayloadType")) else {
+        return Ok(None);
+    };
+    let tag = tag
+        .as_string()
+        .filter(|tag| tag.len() == 4 && tag.is_ascii())
+        .with_context(|| {
+            format!("invalid {component} Info.Img4PayloadType: expected four ASCII bytes")
+        })?;
+    Ok(Some(tag.as_bytes().try_into()?))
+}
+
+/// Read the encoded IM4P type without requiring the payload body in memory.
+pub fn payload_type(prefix: &[u8]) -> Option<[u8; 4]> {
+    let offset = type_offset(prefix)?;
+    prefix.get(offset..offset + 4)?.try_into().ok()
 }
 
 /// Locate the four tag bytes from a prefix; the image body may be gigabytes long.
@@ -231,7 +328,7 @@ fn im4p_type_range(prefix: &[u8]) -> Result<Range<usize>> {
     );
     let (kind, _) = parse(fields)?;
     ensure!(
-        kind.tag == 0x16 && kind.content.len() == 4,
+        kind.tag == 0x16 && kind.content.len() == 4 && kind.content.is_ascii(),
         "invalid IM4P type"
     );
     let end = range.start + magic.encoded.len() + kind.encoded.len();

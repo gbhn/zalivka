@@ -1,0 +1,11 @@
+{
+  "MsgType": "DataRequestMsg",
+  "DataType": "SourceBootObjectV4",
+  "Arguments": {
+    "GlobalManifestPrefix": "centauri/centauri",
+    "Variant": "macOS Customer",
+    "DataChunkSize": 131072,
+    "ImageName": "__GlobalManifest__",
+    "GlobalManifestOptional": true
+  }
+}

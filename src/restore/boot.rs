@@ -15,8 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum IBootStep {
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum IBootStep {
     Component(String),
     Command(&'static str),
 }
@@ -24,20 +25,26 @@ pub(super) enum IBootStep {
 /// MobileDevice's stage preparation: ANS, parameters, iBootData, DCP, remainder.
 /// These are full restore stages, not the separate ApBootstrapOnly operation.
 pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>> {
-    let mut firmware: Vec<_> = id
-        .manifest()?
-        .iter()
-        .filter(|(_, v)| {
-            wire::boolean(v, &["Info", "IsLoadedByiBootStage1"]) == stage1
-                && (stage1 || wire::boolean(v, &["Info", "IsLoadedByiBoot"]))
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
-    let has_dcp = firmware.iter().any(|name| name == "RestoreDCP");
+    let mut firmware = Vec::new();
+    for (name, entry) in id.manifest()? {
+        let first =
+            wire::optional_boolean(entry, &["Info", "IsLoadedByiBootStage1"])?.unwrap_or(false);
+        let loaded = wire::optional_boolean(entry, &["Info", "IsLoadedByiBoot"])?.unwrap_or(false);
+        if first == stage1 && (stage1 || loaded) {
+            ensure!(
+                id.payload_type(name)?.is_some(),
+                "cannot resolve iBoot firmware payload type for {name}: no manifest override or valid IM4P header"
+            );
+            firmware.push(name.clone());
+        }
+    }
+    let dcp = id.component_by_type(b"rdcp")?;
+    let has_dcp = dcp.is_some_and(|dcp| firmware.iter().any(|name| name == dcp));
+    let restore_logo = id.component_by_type(b"rlgo")?;
     let mut steps = Vec::new();
     let logo = |steps: &mut Vec<IBootStep>| {
-        if id.has("RestoreLogo") {
-            steps.push(IBootStep::Component("RestoreLogo".into()));
+        if let Some(name) = restore_logo {
+            steps.push(IBootStep::Component(name.into()));
             steps.push(IBootStep::Command("setpicture 4"));
             steps.push(IBootStep::Command("bgcolor 0 0 0"));
         }
@@ -47,7 +54,9 @@ pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>>
     if !stage1 && !has_dcp {
         logo(&mut steps);
     }
-    if let Some(index) = firmware.iter().position(|name| name == "RestoreANS") {
+    if let Some(ans) = id.component_by_type(b"rans")?
+        && let Some(index) = firmware.iter().position(|name| name == ans)
+    {
         steps.push(IBootStep::Component(firmware.remove(index)));
         steps.push(IBootStep::Command("firmware"));
     }
@@ -56,8 +65,10 @@ pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>>
         IBootStep::Command("saveenv"),
         IBootStep::Command(behavior_boot_arguments(id.behavior()?)),
     ]);
-    for priority in ["iBootData", "RestoreDCP"] {
-        if let Some(index) = firmware.iter().position(|name| name == priority) {
+    for tag in [b"ibdt", b"rdcp"] {
+        if let Some(priority) = id.component_by_type(tag)?
+            && let Some(index) = firmware.iter().position(|name| name == priority)
+        {
             steps.push(IBootStep::Component(firmware.remove(index)));
             steps.push(IBootStep::Command("firmware"));
         }
@@ -84,15 +95,17 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         );
         usb.check_reset_access()?;
         let mut ipsw = Ipsw::open(path)?;
-        let identity = ipsw.select_behavior(&usb.info, None, Behavior::Update)?;
+        let mut identity = ipsw.select_behavior(&usb.info, None, Behavior::Update)?;
         ensure!(
-            identity.is_macos(),
+            identity.is_macos()?,
             "RAM boot-state probe supports Apple silicon Macs only"
         );
-        let component = ipsw.component(&identity, "iBSS")?;
+        ipsw.resolve_types(&mut identity)?;
+        let name = identity.require_component_type(b"ibss")?;
+        let component = ipsw.component(&identity, name)?;
         let ticket = tss::send(&tss::request(&usb.info, &identity)?)
             .context("personalizing diagnostic iBSS")?;
-        let bytes = img4::personalize_with_metadata("iBSS", &component, &ticket, &identity.value)?;
+        let bytes = img4::personalize_with_metadata(name, &component, &ticket, &identity.value)?;
         let chip_id = usb.info.chip_id;
         let board_id = usb.info.board_id;
         crate::log!(
@@ -183,16 +196,29 @@ impl ContextState {
         dfu::upload(usb, usb.info.mode, &bytes, true).with_context(|| format!("uploading {name}"))
     }
 
+    fn send_boot_object(&mut self, usb: &mut RecoveryUsb, tag: &[u8; 4]) -> Result<()> {
+        let name = self
+            .restore
+            .identity
+            .require_component_type(tag)?
+            .to_owned();
+        self.send_component(usb, &name, None)
+    }
+
     // Errors before bootx stop immediately. A bootx USB error must be resolved
     // by checking the restore service's identity after closing iBoot USB.
-    pub(super) fn boot(&mut self, mut usb: RecoveryUsb) -> Result<Option<anyhow::Error>> {
+    pub(super) fn boot(
+        &mut self,
+        mut usb: RecoveryUsb,
+        stages: &[Vec<IBootStep>; 2],
+    ) -> Result<Option<anyhow::Error>> {
         ensure!(
             usb.info.mode == Mode::Dfu,
             "restore must start in ROM DFU mode"
         );
-        let upload = self.send_component(&mut usb, "iBSS", None);
+        let upload = self.send_boot_object(&mut usb, b"ibss");
         drop(usb);
-        let mode = self.restore.identity.is_macos().then_some(Mode::Recovery);
+        let mode = self.restore.identity.is_macos()?.then_some(Mode::Recovery);
         let mut usb =
             reconnect_after_ibss(upload, mode, |mode| wait_recovery(self.device.ecid, mode))?;
         ensure!(
@@ -211,7 +237,7 @@ impl ContextState {
                 tss::send(&tss::request(&self.device, &self.restore.identity)?)
                     .context("personalizing restore firmware after iBSS nonce change")?;
         }
-        if self.restore.identity.is_macos() {
+        if self.restore.identity.is_macos()? {
             ensure!(
                 usb.info.mode == Mode::Recovery,
                 "Apple Silicon iBSS did not expose the iBoot recovery transport"
@@ -224,25 +250,25 @@ impl ContextState {
             .context("personalizing initial Ap,LocalPolicy for iBoot")?;
             self.send_component(&mut usb, "Ap,LocalPolicy", Some(&local))?;
             dfu::command(&mut usb, "lpolrestore", false)?;
-            self.send_iboot_firmware(&mut usb, true)?;
+            self.send_iboot_firmware(&mut usb, true, &stages[0])?;
         }
-        self.send_component(&mut usb, "iBEC", None)?;
+        self.send_boot_object(&mut usb, b"ibec")?;
         if usb.info.mode == Mode::Recovery {
             dfu::command(&mut usb, "go", true)?;
         }
         drop(usb);
         let mut usb = wait_recovery(self.device.ecid, Some(Mode::Recovery))?;
-        self.send_iboot_firmware(&mut usb, false)?;
-        self.send_component(&mut usb, "RestoreRamDisk", None)?;
+        self.send_iboot_firmware(&mut usb, false, &stages[1])?;
+        self.send_boot_object(&mut usb, b"rdsk")?;
         dfu::command(&mut usb, "ramdisk", false)?;
         std::thread::sleep(Duration::from_secs(2));
-        self.send_component(&mut usb, "RestoreDeviceTree", None)?;
+        self.send_boot_object(&mut usb, b"rdtr")?;
         dfu::command(&mut usb, "devicetree", false)?;
-        if self.restore.identity.has("RestoreSEP") {
-            self.send_component(&mut usb, "RestoreSEP", None)?;
+        if self.restore.identity.component_by_type(b"rsep")?.is_some() {
+            self.send_boot_object(&mut usb, b"rsep")?;
             dfu::command(&mut usb, "rsepfirmware", false)?;
         }
-        self.send_component(&mut usb, "RestoreKernelCache", None)?;
+        self.send_boot_object(&mut usb, b"rkrn")?;
         Ok(dfu::boot_kernel(&mut usb).err())
     }
 
@@ -250,6 +276,7 @@ impl ContextState {
         &mut self,
         usb: &mut RecoveryUsb,
         stage1: bool,
+        steps: &[IBootStep],
     ) -> Result<()> {
         crate::log!(
             Info,
@@ -257,10 +284,10 @@ impl ContextState {
             "Подготовка загрузчика: этап {}",
             if stage1 { 1 } else { 2 }
         );
-        for step in iboot_stage(&self.restore.identity, stage1)? {
+        for step in steps {
             match step {
                 IBootStep::Component(name) => {
-                    self.send_component(usb, &name, None)?;
+                    self.send_component(usb, name, None)?;
                 }
                 IBootStep::Command(command) => {
                     crate::log!(Debug, "boot", "iBoot: {command}");

@@ -244,6 +244,14 @@ fn personalized_data_enables_early_iboot_dcp_and_keeps_ean_separate() {
                     "Info",
                     wire::dict([
                         ("Path", path.into()),
+                        (
+                            "Img4PayloadType",
+                            String::from_utf8(
+                                bytes[img4::type_offset(bytes).unwrap()..][..4].to_vec(),
+                            )
+                            .unwrap()
+                            .into(),
+                        ),
                         ("IsiBootEANFirmware", early.into()),
                         ("IsFUDFirmware", fud.into()),
                         ("IsLoadedByiBootStage1", stage1.into()),
@@ -293,7 +301,7 @@ fn personalized_data_enables_early_iboot_dcp_and_keeps_ean_separate() {
         wire::get(&wire::receive(&mut replies).unwrap(), &["ImageList"]).unwrap(),
         &Value::Array(vec!["DCP".into()])
     );
-    let personalized = img4::personalize("DCP", &dcp, &ticket()).unwrap();
+    let personalized = img4::personalize(&dcp, &ticket()).unwrap();
     let boot_object = wire::receive(&mut replies).unwrap();
     assert_eq!(
         wire::get(&boot_object, &["FileData"])
@@ -331,6 +339,7 @@ fn untrusted_input_device_uses_img4_for_fud_and_personalized_boot_objects() {
                 "Info",
                 wire::dict([
                     ("Path", "Firmware/InputDevice.im4p".into()),
+                    ("Img4PayloadType", "ipdf".into()),
                     ("Personalize", true.into()),
                     ("IsFUDFirmware", true.into()),
                     ("RestoreRequestRules", Value::Array(vec![])),
@@ -465,6 +474,15 @@ fn restored_dispatch_transfers_identity_ticket_signed_boot_object_and_asr_image(
             ("MsgType", "DataRequestMsg".into()),
             ("DataType", kind.into()),
             ("Arguments", wire::dict([("ImageName", "iBSS".into())])),
+            (
+                "DataPort",
+                if kind == "SystemImageData" {
+                    12345u64
+                } else {
+                    0u64
+                }
+                .into(),
+            ),
         ]);
         state.serve(&session, &mut main, &message).unwrap();
     }
@@ -677,6 +695,278 @@ fn ticket_selection_uses_request_type_with_distinct_macos_identity() {
 }
 
 #[test]
+fn malformed_request_selectors_fail_without_serving_the_primary_identity_or_all_images() {
+    let file = fixture(None, false);
+    let mut state = restore_state(file.path());
+    let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
+    let session = Session::new(usb).unwrap();
+    let mut main = session.connect(62078).unwrap();
+    for (kind, arguments) in [
+        ("BuildIdentityDict", false.into()),
+        (
+            "BuildIdentityDict",
+            wire::dict([("IsRecoveryOS", "false".into())]),
+        ),
+        ("BuildIdentityDict", wire::dict([("Variant", false.into())])),
+        ("BuildIdentityDict", wire::dict([("Variant", "".into())])),
+        ("FUDData", wire::dict([("ImageName", false.into())])),
+        ("FUDData", wire::dict([("ImageName", "".into())])),
+        ("FUDData", wire::dict([("FUDImageList", "false".into())])),
+        (
+            "PersonalizedData",
+            wire::dict([
+                ("ImageType", "FutureFlag".into()),
+                ("ImageList", 0u64.into()),
+            ]),
+        ),
+    ] {
+        let message = wire::dict([("DataType", kind.into()), ("Arguments", arguments.clone())]);
+        assert!(
+            state.serve(&session, &mut main, &message).is_err(),
+            "{kind}: {arguments:?}"
+        );
+    }
+    assert!(mux_output(&output, 62078).get_ref().is_empty());
+}
+
+#[test]
+fn malformed_manifest_image_selector_is_not_treated_as_false() {
+    let file = fixture(None, false);
+    let mut state = restore_state(file.path());
+    let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
+    let session = Session::new(usb).unwrap();
+    let mut main = session.connect(62078).unwrap();
+    for (kind, flag, args) in [
+        (
+            "FUDData",
+            "IsFUDFirmware",
+            wire::dict([("FUDImageList", true.into())]),
+        ),
+        (
+            "PersonalizedData",
+            "FutureFlag",
+            wire::dict([("ImageType", "FutureFlag".into())]),
+        ),
+    ] {
+        manifest_mut(&mut state.restore.identity)["iBSS"]
+            .as_dictionary_mut()
+            .unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(flag.into(), "false".into());
+        let message = wire::dict([("DataType", kind.into()), ("Arguments", args)]);
+        assert!(state.serve(&session, &mut main, &message).is_err());
+    }
+    assert!(mux_output(&output, 62078).get_ref().is_empty());
+}
+
+#[test]
+fn malformed_global_manifest_metadata_does_not_take_the_optional_path() {
+    let file = fixture(None, false);
+    let mut state = restore_state(file.path());
+    let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
+    let session = Session::new(usb).unwrap();
+    let mut main = session.connect(62078).unwrap();
+    for (key, invalid) in [
+        ("Variant", Value::Boolean(false)),
+        ("Variant", "".into()),
+        ("GlobalManifestOptional", "false".into()),
+        ("GlobalManifestPrefix", false.into()),
+        ("GlobalManifestSuffix", false.into()),
+    ] {
+        let mut args = wire::dict([
+            ("ImageName", "__GlobalManifest__".into()),
+            ("GlobalManifestPrefix", "apticket".into()),
+            ("GlobalManifestSuffix", "".into()),
+        ]);
+        args.as_dictionary_mut()
+            .unwrap()
+            .insert(key.into(), invalid);
+        let message = wire::dict([
+            ("DataType", "SourceBootObjectV4".into()),
+            ("Arguments", args),
+        ]);
+        assert!(state.serve(&session, &mut main, &message).is_err(), "{key}");
+    }
+    assert!(mux_output(&output, 62078).get_ref().is_empty());
+}
+
+#[test]
+fn malformed_present_recovery_assets_are_errors_instead_of_no_asset_replies() {
+    let file = fixture(None, false);
+    let mut state = restore_state(file.path());
+    state.recovery = Some(restore::SignedIdentity {
+        identity: recovery_identity(),
+        ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
+    });
+    let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
+    let session = Session::new(usb).unwrap();
+    let mut main = session.connect(62078).unwrap();
+    for entry in [
+        Value::Boolean(false),
+        wire::dict([(
+            "Info",
+            wire::dict([("Path", false.into()), ("IsLoadedByiBoot", true.into())]),
+        )]),
+        wire::dict([("Info", wire::dict([("IsLoadedByiBoot", "false".into())]))]),
+    ] {
+        manifest_mut(&mut state.recovery.as_mut().unwrap().identity)
+            .insert("FutureAsset".into(), entry);
+        for kind in ["RecoveryOSFileAssetImage", "RecoveryOSIBootFWFilesImages"] {
+            let message = wire::dict([
+                ("DataType", kind.into()),
+                (
+                    "Arguments",
+                    wire::dict([("FWOverrideKey", "RecoveryOSFutureAsset".into())]),
+                ),
+            ]);
+            assert!(
+                state.serve(&session, &mut main, &message).is_err(),
+                "{kind}"
+            );
+        }
+    }
+    assert!(mux_output(&output, 62078).get_ref().is_empty());
+}
+
+#[test]
+fn captured_optional_global_manifest_request_completes_and_keeps_the_channel_usable() {
+    let file = fixture(None, false);
+    let mut state = restore_state(file.path());
+    state.restore.identity.value.as_dictionary_mut().unwrap()["Info"]
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("VariantSupportsGlobalSigning".into(), true.into());
+    let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
+    let session = Session::new(usb).unwrap();
+    let mut main = session.connect(62078).unwrap();
+    let request: Value = serde_json::from_str(include_str!(
+        "../fixtures/restored-26A434-global-manifest.json"
+    ))
+    .unwrap();
+    state.serve(&session, &mut main, &request).unwrap();
+    let mut required = request.clone();
+    required.as_dictionary_mut().unwrap()["Arguments"]
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("GlobalManifestOptional".into(), false.into());
+    let error = state.serve(&session, &mut main, &required).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("IPSW is missing required global manifest"),
+        "{error:#}"
+    );
+    required.as_dictionary_mut().unwrap()["Arguments"]
+        .as_dictionary_mut()
+        .unwrap()
+        .remove("GlobalManifestOptional");
+    assert!(state.serve(&session, &mut main, &required).is_err());
+    state
+        .serve(
+            &session,
+            &mut main,
+            &wire::dict([("DataType", "RootTicket".into())]),
+        )
+        .unwrap();
+    let mut replies = mux_output(&output, 62078);
+    assert_eq!(
+        wire::receive(&mut replies).unwrap(),
+        wire::dict([("FileDataDone", true.into())])
+    );
+    assert_eq!(
+        wire::receive(&mut replies).unwrap(),
+        wire::dict([("RootTicketData", Value::Data(ticket()))])
+    );
+    assert_eq!(replies.position(), replies.get_ref().len() as u64);
+}
+
+#[test]
+fn global_manifests_use_request_variant_prefix_and_suffix_with_protocol_defaults() {
+    let normal = b"normal global manifest";
+    let cryptex = b"cryptex global manifest";
+    let development = b"development global manifest";
+    let file = fixture_files(
+        None,
+        false,
+        &[
+            (
+                "Firmware/Manifests/restore/macOS Customer/apticket.j313ap.im4m",
+                normal,
+            ),
+            (
+                "Firmware/Manifests/restore/cryptex1/macOS Customer/apticket.j313ap.im4m",
+                cryptex,
+            ),
+            (
+                "Firmware/Manifests/restore/macOS Customer/future/ticket.j313ap.dev.im4m",
+                development,
+            ),
+        ],
+    );
+    let mut state = restore_state(file.path());
+    state.recovery = Some(restore::SignedIdentity {
+        identity: recovery_identity(),
+        ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
+    });
+    let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
+    let session = Session::new(usb).unwrap();
+    let mut main = session.connect(62078).unwrap();
+    for (variant, prefix, suffix) in [
+        ("macOS Customer", None, None),
+        ("cryptex1/macOS Customer", None, None),
+        ("macOS Customer", Some("future/ticket"), Some(".dev")),
+        ("macOS Customer", Some("apticket"), Some("")),
+    ] {
+        let mut args = wire::dict([
+            ("ImageName", "__GlobalManifest__".into()),
+            ("Variant", variant.into()),
+            ("IsRecoveryOS", true.into()),
+        ]);
+        for (key, value) in [
+            ("GlobalManifestPrefix", prefix),
+            ("GlobalManifestSuffix", suffix),
+        ] {
+            if let Some(value) = value {
+                args.as_dictionary_mut()
+                    .unwrap()
+                    .insert(key.into(), value.into());
+            }
+        }
+        state
+            .serve(
+                &session,
+                &mut main,
+                &wire::dict([
+                    ("DataType", "SourceBootObjectV4".into()),
+                    ("Arguments", args),
+                ]),
+            )
+            .unwrap();
+    }
+    let mut replies = mux_output(&output, 62078);
+    for expected in [
+        normal.as_slice(),
+        cryptex.as_slice(),
+        development.as_slice(),
+        normal.as_slice(),
+    ] {
+        assert_eq!(
+            wire::get(&wire::receive(&mut replies).unwrap(), &["FileData"])
+                .unwrap()
+                .as_data()
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            wire::receive(&mut replies).unwrap(),
+            wire::dict([("FileDataDone", true.into())])
+        );
+    }
+    assert_eq!(replies.position(), replies.get_ref().len() as u64);
+}
+
+#[test]
 fn optional_global_manifest_completes_without_data_but_required_manifest_must_exist() {
     let file = fixture(None, false);
     let mut state = restore_state(file.path());
@@ -690,6 +980,7 @@ fn optional_global_manifest_completes_without_data_but_required_manifest_must_ex
                 "Arguments",
                 wire::dict([
                     ("ImageName", "__GlobalManifest__".into()),
+                    ("GlobalManifestPrefix", "apticket".into()),
                     ("Variant", "macOS Customer".into()),
                     ("GlobalManifestOptional", Value::Boolean(optional)),
                     ("GlobalManifestSuffix", suffix.into()),
@@ -803,11 +1094,11 @@ fn recovery_ticket_has_recovery_images_and_local_policy_uses_device_arguments() 
         .as_dictionary_mut()
         .unwrap()
         .insert("Trusted".into(), false.into());
-    assert!(wire::get(&tss::request(&device_info(), &id).unwrap(), &["OS"]).is_err());
+    assert!(wire::get(&tss::request(&device_info(), &id).unwrap(), &["OS"]).is_ok());
     let recovery = tss::recovery_request(&device_info(), &id).unwrap();
     assert!(wire::get(&recovery, &["Ap,LocalBoot"]).is_err());
     assert!(wire::get(&recovery, &["OS"]).is_ok());
-    assert!(wire::get(&recovery, &["iBSS"]).is_err());
+    assert!(wire::get(&recovery, &["iBSS"]).is_ok());
     let args = wire::dict([
         ("Ap,NextStageIM4MHash", Value::Data(vec![5; 48])),
         ("Ap,RecoveryOSPolicyNonceHash", Value::Data(vec![6; 48])),
@@ -892,9 +1183,37 @@ fn system_image_metadata_requests_use_manifest_components_and_exact_file_keys() 
             wire::dict([
                 ("Trusted", false.into()),
                 ("Digest", Value::Data(Sha384::digest(bytes).to_vec())),
-                ("Info", wire::dict([("Path", path.into())])),
+                (
+                    "Info",
+                    wire::dict([
+                        ("Path", path.into()),
+                        (
+                            "Img4PayloadType",
+                            if component == "SystemVolume" {
+                                "isys"
+                            } else {
+                                "msys"
+                            }
+                            .into(),
+                        ),
+                    ]),
+                ),
             ]),
         );
+    }
+    declare_type(&mut state.restore.identity, "SystemVolume", "isys");
+    declare_type(
+        &mut state.restore.identity,
+        "Ap,SystemVolumeCanonicalMetadata",
+        "msys",
+    );
+    for (old, new) in [
+        ("SystemVolume", "FutureSystemPayload"),
+        ("Ap,SystemVolumeCanonicalMetadata", "FutureCanonicalPayload"),
+    ] {
+        let entries = manifest_mut(&mut state.restore.identity);
+        let entry = entries.remove(old).unwrap();
+        entries.insert(new.into(), entry);
     }
     let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
     let session = Session::new(usb).unwrap();
@@ -1482,6 +1801,24 @@ fn nor_formats_preserve_firmware_order_and_separate_llb_and_sep_images() {
     let manifest = manifest_mut(&mut state.restore.identity);
     for (name, path) in names.into_iter().zip(&paths) {
         let mut entry = component_entry(path, &bytes);
+        entry
+            .as_dictionary_mut()
+            .unwrap()
+            .get_mut("Info")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(
+                "Img4PayloadType".into(),
+                match name {
+                    "LLB" => "illb",
+                    "iBoot" => "ibot",
+                    "RestoreSEP" => "rsep",
+                    "SEP" => "sepi",
+                    _ => "test",
+                }
+                .into(),
+            );
         entry.as_dictionary_mut().unwrap()["Info"]
             .as_dictionary_mut()
             .unwrap()
@@ -1567,6 +1904,24 @@ fn large_nor_reply_crosses_mux_windows_and_allows_the_next_checkpoint() {
     let mut state = restore_state(file.path());
     for (name, path) in names.into_iter().zip(&paths) {
         let mut entry = component_entry(path, &bytes);
+        entry
+            .as_dictionary_mut()
+            .unwrap()
+            .get_mut("Info")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(
+                "Img4PayloadType".into(),
+                match name {
+                    "LLB" => "illb",
+                    "iBoot" => "ibot",
+                    "RestoreSEP" => "rsep",
+                    "SEP" => "sepi",
+                    _ => "test",
+                }
+                .into(),
+            );
         entry.as_dictionary_mut().unwrap()["Info"]
             .as_dictionary_mut()
             .unwrap()

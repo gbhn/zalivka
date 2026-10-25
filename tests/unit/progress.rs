@@ -36,12 +36,13 @@ fn dropped_streams_emit_one_terminal_event_without_claiming_all_bytes_were_sent(
 
 #[test]
 fn transfer_identity_and_operation_are_stable_and_isolated_between_workers() {
-    let (first, second) = with_operation(Some(59), || {
+    let (first, second) = with_operation(Some(59), Some("first-context".into()), || {
         let progress = Progress::new("same component", Some(100), 0);
         let first = progress.update(progress.started, false);
         let second = std::thread::spawn(|| {
             assert_eq!(current_operation(), None);
-            with_operation(Some(80), || {
+            assert_eq!(current_async_context(), None);
+            with_operation(Some(80), Some("second-context".into()), || {
                 let progress = Progress::new("same component", Some(100), 0);
                 progress.update(progress.started, false)
             })
@@ -49,13 +50,17 @@ fn transfer_identity_and_operation_are_stable_and_isolated_between_workers() {
         .join()
         .unwrap();
         assert_eq!(current_operation(), Some(59));
+        assert_eq!(current_async_context().as_deref(), Some("first-context"));
         assert_eq!(first.id, progress.update(progress.started, true).id);
         (first, second)
     });
     assert_eq!(current_operation(), None);
+    assert_eq!(current_async_context(), None);
     assert_ne!(first.id, second.id);
     assert_eq!(first.operation, Some(59));
     assert_eq!(second.operation, Some(80));
+    assert_eq!(first.async_context.as_deref(), Some("first-context"));
+    assert_eq!(second.async_context.as_deref(), Some("second-context"));
     let mut encoded = Vec::new();
     Event::Transfer(first.clone())
         .write_to(&mut encoded)
@@ -64,9 +69,14 @@ fn transfer_identity_and_operation_are_stable_and_isolated_between_workers() {
         Event::parse(std::str::from_utf8(&encoded).unwrap()),
         Some(Event::Transfer(first))
     );
-    let result = std::panic::catch_unwind(|| with_operation(Some(13), || panic!("failed request")));
+    let result = std::panic::catch_unwind(|| {
+        with_operation(Some(13), Some("failed-context".into()), || {
+            panic!("failed request")
+        })
+    });
     assert!(result.is_err());
     assert_eq!(current_operation(), None);
+    assert_eq!(current_async_context(), None);
 }
 
 #[test]

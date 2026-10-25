@@ -59,17 +59,12 @@ impl DigestInput {
 /// Use only the inputs belonging to this component, for both streaming and RAM reads.
 pub(super) fn verify_component_digest(
     inputs: impl IntoIterator<Item = DigestInput>,
-    expected: &[u8],
     mut matches: impl FnMut(DigestInput) -> Result<bool>,
-    tcon: Option<&[u8]>,
 ) -> Result<()> {
     for input in inputs {
         if matches(input)? {
             return Ok(());
         }
-    }
-    if let Some(bytes) = tcon {
-        return firmware::verify_tcon_digest(bytes, expected);
     }
     bail!("digest verification failed")
 }

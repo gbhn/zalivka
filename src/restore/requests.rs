@@ -59,11 +59,12 @@ impl AsyncRequests {
         let sender = self.sender.clone();
         let kind = kind.to_owned();
         let operation = crate::progress::current_operation();
+        let context = crate::progress::current_async_context();
         let worker = thread::Builder::new()
             .name(format!("zalivka-{kind}"))
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::progress::with_operation(operation, || {
+                    crate::progress::with_operation(operation, context, || {
                         let mut stream = session.connect_retry(port, Duration::from_secs(60))?;
                         if let Some(state) = &mut state {
                             state.serve_on(&session, &mut stream, &request, data_type)

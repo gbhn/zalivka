@@ -91,14 +91,39 @@ fn identity() -> Identity {
                 ("Digest", Value::Data(Sha384::digest(&bytes).to_vec())),
                 (
                     "Info",
-                    wire::dict([("Path", format!("Firmware/{name}").into())]),
+                    wire::dict([
+                        ("Path", format!("Firmware/{name}").into()),
+                        ("Personalize", true.into()),
+                        (
+                            "Img4PayloadType",
+                            match name {
+                                "iBSS" => "ibss",
+                                "iBEC" => "ibec",
+                                "RestoreRamDisk" => "rdsk",
+                                "RestoreDeviceTree" => "rdtr",
+                                "RestoreKernelCache" => "rkrn",
+                                _ => "test",
+                            }
+                            .into(),
+                        ),
+                        (
+                            "RestoreRequestRules",
+                            Value::Array(vec![wire::dict([
+                                ("Conditions", wire::dict([] as [(&str, Value); 0])),
+                                (
+                                    "Actions",
+                                    wire::dict([("EPRO", true.into()), ("ESEC", true.into())]),
+                                ),
+                            ])]),
+                        ),
+                    ]),
                 ),
             ]),
         );
     }
-    Identity {
-        index: 0,
-        value: wire::dict([
+    Identity::new(
+        0,
+        wire::dict([
             ("ApChipID", "0x8103".into()),
             ("ApBoardID", "0x0a".into()),
             ("ApSecurityDomain", "0x01".into()),
@@ -114,7 +139,7 @@ fn identity() -> Identity {
                 ]),
             ),
         ]),
-    }
+    )
 }
 
 struct Duplex {
@@ -290,7 +315,22 @@ fn component_entry(path: &str, bytes: &[u8]) -> Value {
     wire::dict([
         ("Trusted", true.into()),
         ("Digest", Value::Data(Sha384::digest(bytes).to_vec())),
-        ("Info", wire::dict([("Path", path.into())])),
+        (
+            "Info",
+            wire::dict([
+                ("Path", path.into()),
+                (
+                    "Img4PayloadType",
+                    img4::type_offset(bytes)
+                        .map(|offset| {
+                            String::from_utf8(bytes[offset..offset + 4].to_vec()).unwrap()
+                        })
+                        .unwrap_or("test".into())
+                        .into(),
+                ),
+                ("Personalize", true.into()),
+            ]),
+        ),
     ])
 }
 
@@ -305,4 +345,15 @@ fn restore_state(file: &std::path::Path) -> restore::ContextState {
         device: device_info(),
         assets: net::AssetClient::default(),
     }
+}
+
+fn declare_type(id: &mut Identity, name: &str, tag: &str) {
+    manifest_mut(id)[name]
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("Info")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("Img4PayloadType".into(), tag.into());
 }

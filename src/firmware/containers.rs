@@ -1,80 +1,93 @@
-//! FTAB/UARP ranges and metadata used for streamed digest validation.
-use crate::wire;
+//! Container parsing and payload digest validation, independent of device names.
 use anyhow::{Context, Result, ensure};
 use plist::Value;
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, io::Cursor, ops::Range};
+use std::{collections::HashSet, ops::Range};
 
-/// Baobab's manifest digest identifies firmware inside a plist bundle. Verify
-/// the actual firmware and its panel configurations, not just their metadata.
-pub fn verify_tcon_digest(bytes: &[u8], digest: &[u8]) -> Result<()> {
+pub(crate) const MAX_PLIST_BUNDLE: u64 = 32 * 1024 * 1024;
+
+pub(crate) fn plist_prefix(bytes: &[u8]) -> bool {
+    let bytes = bytes
+        .strip_prefix(b"\xef\xbb\xbf")
+        .unwrap_or(bytes)
+        .trim_ascii_start();
+    bytes.starts_with(b"bplist00") || bytes.starts_with(b"<?xml") || bytes.starts_with(b"<plist")
+}
+
+#[derive(Default)]
+pub(crate) struct BundleVerification {
+    pub payloads: usize,
+    pub manifest_digest: bool,
+}
+
+/// Verify named payload records without using controller, model or path names.
+pub(crate) fn verify_plist_bundle(bytes: &[u8], expected: &[u8]) -> Result<BundleVerification> {
+    if !plist_prefix(bytes) {
+        return Ok(BundleVerification::default());
+    }
     ensure!(
-        bytes.len() <= 32 * 1024 * 1024,
-        "TCON metadata bundle exceeds 32 MiB"
+        bytes.len() as u64 <= MAX_PLIST_BUNDLE,
+        "plist payload bundle exceeds memory limit"
     );
-    let value = Value::from_reader(Cursor::new(bytes)).context("reading TCON plist bundle")?;
-    let mut matched = false;
-    for (version_name, version) in wire::dictionary(&value)? {
-        if wire::get(version, &["firmware", "Digest"])
-            .ok()
-            .and_then(Value::as_data)
-            != Some(digest)
-        {
-            continue;
+    let value =
+        Value::from_reader(std::io::Cursor::new(bytes)).context("reading plist payload bundle")?;
+    let mut report = BundleVerification::default();
+    verify_plist_node(&value, expected, 0, &mut report)?;
+    Ok(report)
+}
+
+fn verify_plist_node(
+    value: &Value,
+    expected: &[u8],
+    depth: usize,
+    report: &mut BundleVerification,
+) -> Result<()> {
+    ensure!(depth <= 32, "plist payload bundle nested too deeply");
+    if let Some(fields) = value.as_dictionary() {
+        if let Some(payload) = fields.get("Payload") {
+            let payload = payload.as_data().context("invalid bundle Payload")?;
+            let digest = fields
+                .get("Digest")
+                .and_then(Value::as_data)
+                .context("bundle payload has no data Digest")?;
+            verify_bundle_payload(payload, digest)?;
+            report.payloads += 1;
+            report.manifest_digest |= digest == expected;
         }
-        verify_tcon_payload(wire::get(version, &["firmware"])?, true)
-            .with_context(|| format!("TCON {version_name} firmware digest mismatch"))?;
-        if let Some(panels) = wire::dictionary(version)?.get("device_id") {
-            for (panel, components) in wire::dictionary(panels)? {
-                for (name, component) in wire::dictionary(components)? {
-                    verify_tcon_payload(component, false).with_context(|| {
-                        format!("TCON {version_name}/{panel}/{name} digest mismatch")
-                    })?;
-                }
+        for (name, child) in fields {
+            if name != "Payload" {
+                verify_plist_node(child, expected, depth + 1, report)
+                    .with_context(|| format!("checking bundle field {name}"))?;
             }
         }
-        matched = true;
+    } else if let Some(values) = value.as_array() {
+        for child in values {
+            verify_plist_node(child, expected, depth + 1, report)?;
+        }
     }
-    ensure!(matched, "TCON firmware digest does not match manifest");
     Ok(())
 }
 
-fn verify_tcon_payload(component: &Value, firmware: bool) -> Result<()> {
-    let payload = wire::get(component, &["Payload"])?
-        .as_data()
-        .context("invalid TCON Payload")?;
-    let digest = wire::get(component, &["Digest"])?
-        .as_data()
-        .context("invalid TCON Digest")?;
-    ensure!(
-        !payload.is_empty() && digest.len() == 32,
-        "invalid TCON payload or SHA-256 digest"
-    );
-    if Sha256::digest(payload).as_slice() == digest {
+fn verify_bundle_payload(payload: &[u8], digest: &[u8]) -> Result<()> {
+    if crate::ipsw::verify_digest(payload, digest).is_ok() {
         return Ok(());
     }
-    // DP855's 60 KiB flash image stores big-endian code/data lengths in its
-    // first eight bytes. The digest covers that header, code at 0x1000 and
-    // data at 0x9000, excluding flash padding. Checked against every DP855
-    // bundle in 26A434 (17 products, including X1769 for j313ap).
-    if firmware && payload.len() == 0xf000 {
-        let code_len = u32::from_be_bytes(payload[..4].try_into()?) as usize;
-        let data_len = u32::from_be_bytes(payload[4..8].try_into()?) as usize;
-        ensure!(
-            code_len > 0 && code_len <= 0x8000 && data_len > 0 && data_len <= 0x6000,
-            "invalid TCON DP855 code/data lengths"
-        );
-        let mut hash = Sha256::new();
-        hash.update(&payload[..8]);
-        hash.update(&payload[0x1000..0x1000 + code_len]);
-        hash.update(&payload[0x9000..0x9000 + data_len]);
-        ensure!(
-            hash.finalize().as_slice() == digest,
-            "TCON DP855 digest mismatch"
-        );
-        return Ok(());
+    // DP855 flash-image format: two big-endian lengths, code and data banks.
+    // These offsets define the format, not a model/controller selection table.
+    if payload.len() == 0xf000 && digest.len() == 32 {
+        let code = u32::from_be_bytes(payload[..4].try_into()?) as usize;
+        let data = u32::from_be_bytes(payload[4..8].try_into()?) as usize;
+        if (1..=0x8000).contains(&code) && (1..=0x6000).contains(&data) {
+            let mut hash = Sha256::new();
+            hash.update(&payload[..8]);
+            hash.update(&payload[0x1000..0x1000 + code]);
+            hash.update(&payload[0x9000..0x9000 + data]);
+            if hash.finalize().as_slice() == digest {
+                return Ok(());
+            }
+        }
     }
-    anyhow::bail!("TCON payload digest mismatch")
+    anyhow::bail!("bundle payload digest mismatch or unsupported digest format")
 }
 
 pub(super) struct FtabEntry {
@@ -243,3 +256,7 @@ impl Ftab {
         Ok(output)
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/firmware/containers.rs"]
+mod tests;

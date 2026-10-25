@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn optional_metadata_distinguishes_absence_from_malformed_present_values() {
+    let missing = dict([] as [(&str, Value); 0]);
+    assert_eq!(optional(&missing, &["Arguments", "Flag"]).unwrap(), None);
+    for flag in [false, true] {
+        let message = dict([("Arguments", dict([("Flag", flag.into())]))]);
+        assert_eq!(
+            optional_boolean(&message, &["Arguments", "Flag"]).unwrap(),
+            Some(flag)
+        );
+    }
+    for message in [
+        false.into(),
+        dict([("Arguments", false.into())]),
+        dict([("Arguments", dict([("Flag", "false".into())]))]),
+        dict([("Arguments", dict([("Flag", 0u64.into())]))]),
+    ] {
+        let error = optional_boolean(&message, &["Arguments", "Flag"]).unwrap_err();
+        assert!(error.to_string().contains("Arguments.Flag"), "{error:#}");
+    }
+}
+
+#[test]
 fn unframed_xml_size_limit_also_bounds_an_unterminated_comment() {
     let prefix = b"<plist><!--";
     let input = prefix

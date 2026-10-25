@@ -7,7 +7,7 @@ use plist::Value;
 /// These deliberately synthetic Test,Ticket fields never enter TSS or IMG4.
 /// Confirmed in 26A434 libauthinstall __Canary{GetTags,CopyFirmware,LocalSign}.
 pub fn canary_response(arguments: &Value) -> Result<Option<Value>> {
-    if wire::string(arguments, &["MessageArgUpdaterName"])? != "Canary" {
+    if wire::string(arguments, &["MessageArgUpdaterName"]).ok() != Some("Canary") {
         return Ok(None);
     }
     ensure!(
