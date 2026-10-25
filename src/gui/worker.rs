@@ -224,16 +224,14 @@ impl Job {
                 }
             }
             progress::Event::OperationWeights { weights } => {
-                self.overall_operations = weights
-                    .into_iter()
-                    .map(|(operation, weight)| {
-                        let fraction = self
-                            .overall_operations
-                            .get(&operation)
-                            .map_or(0.0, |(_, fraction)| *fraction);
-                        (operation, (weight, fraction))
-                    })
-                    .collect();
+                // Weights can arrive after progress, or temporarily omit an
+                // operation. Retain its measured fraction across both cases.
+                for (weight, _) in self.overall_operations.values_mut() {
+                    *weight = 0;
+                }
+                for (operation, weight) in weights {
+                    self.overall_operations.entry(operation).or_default().0 = weight;
+                }
                 self.update_overall();
             }
             progress::Event::OperationProgress {
@@ -250,10 +248,9 @@ impl Job {
     }
 
     fn advance_overall(&mut self, operation: u64, fraction: f32) {
-        if let Some((_, previous)) = self.overall_operations.get_mut(&operation) {
-            *previous = previous.max(fraction);
-            self.update_overall();
-        }
+        let (_, previous) = self.overall_operations.entry(operation).or_default();
+        *previous = previous.max(fraction);
+        self.update_overall();
     }
 
     fn update_overall(&mut self) {

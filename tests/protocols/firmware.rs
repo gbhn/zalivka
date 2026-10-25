@@ -1143,11 +1143,36 @@ fn namespace_payloads_require_a_valid_ticket_and_verified_bundle() {
 }
 
 #[test]
+fn namespace_bundle_integrity_checks_agree_even_when_the_outer_hash_is_valid() {
+    let (mut id, args, bundle) = namespace_bundle("New");
+    let mut corrupt = Value::from_reader(Cursor::new(&bundle)).unwrap();
+    corrupt.as_dictionary_mut().unwrap()["arbitrary wrapper"]
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("Payload".into(), Value::Data(b"changed".to_vec()));
+    let corrupt = wire::xml(&corrupt).unwrap();
+    manifest_mut(&mut id)["New,ArbitraryComponent"]
+        .as_dictionary_mut()
+        .unwrap()
+        .insert(
+            "Digest".into(),
+            Value::Data(sha2::Sha256::digest(&corrupt).to_vec()),
+        );
+    let file = fixture_files(
+        Some(id.clone()),
+        false,
+        &[("arbitrary/path.plist", &corrupt)],
+    );
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    assert!(ipsw.component(&id, "New,ArbitraryComponent").is_err());
+    assert!(ipsw.verify_all().is_err());
+    assert!(zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).is_err());
+}
+
+#[test]
 fn namespace_bundle_limit_is_checked_before_reading_and_raw_manifest_hashes_are_supported() {
     let (mut id, args, bundle) = namespace_bundle("New");
-    manifest_mut(&mut id)
-        .get_mut("New,ArbitraryComponent")
-        .unwrap()
+    manifest_mut(&mut id)["New,ArbitraryComponent"]
         .as_dictionary_mut()
         .unwrap()
         .insert(
@@ -1161,7 +1186,11 @@ fn namespace_bundle_limit_is_checked_before_reading_and_raw_manifest_hashes_are_
     );
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).is_ok());
-    let oversized = vec![0; 32 * 1024 * 1024 + 1];
+    assert!(ipsw.component(&id, "New,ArbitraryComponent").is_ok());
+    assert!(ipsw.verify_all().is_ok());
+
+    let mut oversized = vec![0; 32 * 1024 * 1024 + 1];
+    oversized[..8].copy_from_slice(b"bplist00");
     let file = fixture_compression(
         Some(id.clone()),
         false,
@@ -1169,6 +1198,8 @@ fn namespace_bundle_limit_is_checked_before_reading_and_raw_manifest_hashes_are_
         zip::CompressionMethod::Deflated,
     );
     let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let error = ipsw.verify_all().unwrap_err();
+    assert!(format!("{error:#}").contains("exceeds memory limit"));
     let error = zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args)
         .err()
         .unwrap();

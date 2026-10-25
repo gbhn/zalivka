@@ -150,7 +150,7 @@ enum InternetCommand {
 
 #[derive(Args)]
 struct RestoreArgs {
-    /// After successful erase restore, share internet with the same USB port for 15 minutes.
+    /// After successful erase restore, share internet with the same USB port until stopped.
     #[arg(long)]
     share_internet: bool,
     /// Local IPSW; omitted to automatically download the current compatible image.

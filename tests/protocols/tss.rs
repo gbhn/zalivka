@@ -300,7 +300,52 @@ fn signing_rejects_malformed_metadata_instead_of_skipping_components() {
     let mut id = identity();
     manifest_mut(&mut id).insert("SigningOnly".into(), wire::dict([("Trusted", true.into())]));
     for build in [tss::request, tss::recovery_request] {
-        assert!(wire::get(&build(&device_info(), &id).unwrap(), &["SigningOnly"]).is_err());
+        let error = build(&device_info(), &id).unwrap_err();
+        assert!(format!("{error:#}").contains("SigningOnly"));
+    }
+}
+
+#[test]
+fn trusted_signing_measurements_without_info_keep_their_declared_digest() {
+    let entry = wire::dict([
+        ("Trusted", true.into()),
+        ("Digest", Value::Data(vec![0x36; 48])),
+    ]);
+    let mut id = identity();
+    manifest_mut(&mut id).insert("FutureMeasurement".into(), entry.clone());
+    for build in [tss::request, tss::recovery_request] {
+        let request = build(&device_info(), &id).unwrap();
+        assert_eq!(wire::get(&request, &["FutureMeasurement"]).unwrap(), &entry);
+    }
+}
+
+#[test]
+fn local_policy_rejects_missing_empty_or_nondata_hashes() {
+    let valid = wire::dict([
+        ("Ap,NextStageIM4MHash", Value::Data(vec![5; 48])),
+        ("Ap,RecoveryOSPolicyNonceHash", Value::Data(vec![6; 48])),
+        (
+            "Ap,VolumeUUID",
+            "00112233-4455-6677-8899-aabbccddeeff".into(),
+        ),
+    ]);
+    for name in ["Ap,NextStageIM4MHash", "Ap,RecoveryOSPolicyNonceHash"] {
+        for invalid in [
+            None,
+            Some(Value::Data(vec![])),
+            Some("hash".into()),
+            Some(false.into()),
+        ] {
+            let mut args = valid.clone();
+            let fields = args.as_dictionary_mut().unwrap();
+            fields.remove(name);
+            if let Some(value) = invalid {
+                fields.insert(name.into(), value);
+            }
+            let error =
+                tss::local_policy_request(&device_info(), &ticket(), Some(&args)).unwrap_err();
+            assert!(format!("{error:#}").contains(name), "{error:#}");
+        }
     }
 }
 

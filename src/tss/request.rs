@@ -117,11 +117,9 @@ fn firmware_request(device: &DeviceInfo, id: &Identity, chain: BootChain) -> Res
     for (name, value) in id.manifest()? {
         let component =
             Component::parse(value).with_context(|| format!("invalid signing component {name}"))?;
-        let Some(info) = component.info else {
-            continue;
-        };
-        let selected = info
-            .get("Personalize")
+        let selected = component
+            .info
+            .and_then(|info| info.get("Personalize"))
             .map(|value| {
                 value
                     .as_boolean()
@@ -130,7 +128,11 @@ fn firmware_request(device: &DeviceInfo, id: &Identity, chain: BootChain) -> Res
             .transpose()?;
         // Personalize controls file packaging. Trusted measurements and explicit
         // signing rules also belong in the ticket, even with Personalize=false.
-        if selected != Some(true) && !component.trusted && !info.contains_key("RestoreRequestRules")
+        if selected != Some(true)
+            && !component.trusted
+            && !component
+                .info
+                .is_some_and(|info| info.contains_key("RestoreRequestRules"))
         {
             continue;
         }
@@ -254,7 +256,11 @@ pub fn local_policy_request(
     if let Some(args) = args {
         d.remove("ApNonce");
         for key in ["Ap,NextStageIM4MHash", "Ap,RecoveryOSPolicyNonceHash"] {
-            d.insert(key.into(), wire::get(args, &[key])?.clone());
+            let hash = wire::get(args, &[key])?
+                .as_data()
+                .filter(|hash| !hash.is_empty())
+                .with_context(|| format!("local policy requires nonempty data {key}"))?;
+            d.insert(key.into(), Value::Data(hash.to_vec()));
         }
         let uuid = uuid::Uuid::parse_str(wire::string(args, &["Ap,VolumeUUID"])?)
             .context("invalid local policy volume UUID")?;

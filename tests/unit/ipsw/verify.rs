@@ -44,6 +44,38 @@ fn bundle_digests_survive_fragmented_streaming_and_reject_corrupted_payloads() {
     }
 }
 
+#[test]
+fn a_valid_outer_digest_does_not_hide_a_corrupt_bundle_payload() {
+    for corrupt in [false, true] {
+        let value = wire::dict([
+            ("Payload", plist::Value::Data(b"firmware".to_vec())),
+            (
+                "Digest",
+                plist::Value::Data(
+                    Sha256::digest(if corrupt { b"modified" } else { b"firmware" }).to_vec(),
+                ),
+            ),
+        ]);
+        let bytes = wire::xml(&value).unwrap();
+        let expected = Sha256::digest(&bytes).to_vec();
+        let requirements = EntryDigests {
+            components: HashSet::from([ComponentDigest {
+                tag: None,
+                expected: expected.clone(),
+            }]),
+        };
+        let result = requirements.verify(
+            &mut bytes.as_slice(),
+            "bundle.plist",
+            bytes.len() as u64,
+            &mut [0; 64],
+        );
+        let prepared = firmware::verify_plist_bundle(&bytes, &expected);
+        assert_eq!(result.is_ok(), prepared.is_ok(), "corrupt={corrupt}");
+        assert_eq!(result.is_ok(), !corrupt);
+    }
+}
+
 impl Read for Fragmented<'_> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         self.interrupted = !self.interrupted;

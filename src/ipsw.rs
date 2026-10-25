@@ -175,13 +175,13 @@ impl Ipsw {
         let data = self.read(id.path(name)?)?;
         if let Some(expected) = digest {
             let inputs = digest::DigestInput::variants(&data, data.len() as u64, tag)?;
+            let bundle = crate::firmware::verify_plist_bundle(&data, expected)
+                .with_context(|| format!("checking component {name} payload bundle"))?;
             if let Err(error) =
                 digest::verify_component_digest(inputs, |input| input.matches(&data, expected))
             {
                 ensure!(
-                    crate::firmware::verify_plist_bundle(&data, expected)
-                        .with_context(|| format!("checking component {name} payload bundle"))?
-                        .manifest_digest,
+                    bundle.manifest_digest,
                     "component {name} digest mismatch: {error}"
                 );
             }

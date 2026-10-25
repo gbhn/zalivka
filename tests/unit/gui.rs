@@ -735,6 +735,42 @@ fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
 }
 
 #[test]
+fn overall_progress_keeps_updates_received_before_their_weights() {
+    let mut app = App::new();
+    app.job = Some(job(Action::Restore));
+    send_worker(
+        &mut app,
+        progress::Event::OperationProgress {
+            operation: 28,
+            progress: 80,
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, None);
+    send_worker(
+        &mut app,
+        progress::Event::OperationWeights {
+            weights: vec![(28, 1), (99, 1)],
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.4));
+    send_worker(
+        &mut app,
+        progress::Event::OperationWeights {
+            weights: vec![(99, 1)],
+        },
+    );
+    send_worker(
+        &mut app,
+        progress::Event::OperationWeights {
+            weights: vec![(28, 1)],
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.8));
+    send_worker(&mut app, progress::Event::RestoreCompleted);
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(1.0));
+}
+
+#[test]
 fn checkpoints_and_operation_completion_preserve_an_active_transfer() {
     let mut app = App::new();
     app.job = Some(job(Action::Restore));

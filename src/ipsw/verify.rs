@@ -125,10 +125,12 @@ impl EntryDigests {
         let mut n =
             read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
         let aea = buffer[..n].starts_with(b"AEA1");
-        let mut bundle = (!self.components.is_empty()
-            && length <= firmware::MAX_PLIST_BUNDLE
-            && firmware::plist_prefix(&buffer[..n]))
-        .then(Vec::new);
+        let mut bundle =
+            (!self.components.is_empty() && firmware::plist_prefix(&buffer[..n])).then(Vec::new);
+        ensure!(
+            bundle.is_none() || length <= firmware::MAX_PLIST_BUNDLE,
+            "plist payload bundle exceeds memory limit: {name}"
+        );
         // Validate containers even when no manifest digest references this entry.
         let inputs = DigestInput::variants(&buffer[..n], length, None)?;
         // AEA manifest digests describe decrypted content, not the ZIP bytes.
@@ -173,17 +175,19 @@ impl EntryDigests {
             .map(|(key, hash)| (key, hash.finalize()))
             .collect();
         for (component, tag) in checks {
+            // Match preparation: an outer file digest never excuses a broken
+            // payload record inside a plist bundle.
+            let verified_bundle = bundle
+                .as_ref()
+                .map(|bytes| firmware::verify_plist_bundle(bytes, &component.expected))
+                .transpose()
+                .with_context(|| format!("checking payload bundle {name}"))?;
             let digest = verify_component_digest(inputs.iter().copied().chain(tag), |input| {
                 Ok(actual
                     .get(&(component.expected.len(), input))
                     .is_some_and(|hash| hash.as_ref() == component.expected.as_slice()))
             });
             if let Err(error) = digest {
-                let verified_bundle = bundle
-                    .as_ref()
-                    .map(|bytes| firmware::verify_plist_bundle(bytes, &component.expected))
-                    .transpose()
-                    .with_context(|| format!("checking payload bundle {name}"))?;
                 ensure!(
                     verified_bundle.is_some_and(|report| report.manifest_digest),
                     "manifest digest mismatch: {name}: {error}"
