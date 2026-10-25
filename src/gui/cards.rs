@@ -83,7 +83,7 @@ impl App {
                             ui.selectable_value(
                                 &mut self.setup.ecid,
                                 ecid.clone(),
-                                format!("Mac · {ecid} · {:?}", d.mode),
+                                format!("Mac, {ecid}, {:?}", d.mode),
                             );
                         }
                     });
@@ -214,7 +214,6 @@ impl App {
                             action,
                             ecid: target.ecid,
                             accepted: false,
-                            erase: String::new(),
                         });
                     }
                 }
@@ -229,10 +228,6 @@ impl App {
                 ui.checkbox(
                     &mut self.setup.share_internet,
                     "Давать Mac интернет по USB после восстановления",
-                );
-                caption(
-                    ui,
-                    "После восстановления — до 15 минут. При запуске кнопкой — без ограничения времени. Оставьте кабель подключённым и Zalivka открытой.",
                 );
                 if ui
                     .add_enabled(
@@ -253,50 +248,64 @@ impl App {
                 ui.add(egui::Spinner::new().size(24.0).color(BLUE));
                 ui.label(RichText::new(job.action.title()).size(21.0).strong());
             });
-            ui.add_space(12.0);
-            let stage = job
-                .transfer
-                .as_ref()
-                .map(|t| t.update.stage.as_str())
-                .unwrap_or(&job.phase);
-            ui.label(RichText::new(stage).size(16.0));
-            let fraction = job
-                .transfer
-                .as_ref()
-                .and_then(|t| t.update.fraction())
-                .or(job.fraction);
-            if let Some(value) = fraction {
-                ui.add(
-                    egui::ProgressBar::new(value)
-                        .fill(BLUE)
-                        .desired_height(10.0),
-                );
-            } else {
-                ui.add(
-                    egui::ProgressBar::new(0.0)
-                        .animate(true)
-                        .desired_height(10.0),
-                );
-            }
-            ui.horizontal(|ui| {
-                caption(ui, "Текущий этап");
+            let now = Instant::now();
+            let internet_speed = job.internet_speed(now);
+            if internet_speed.is_none() {
+                ui.add_space(12.0);
+                let stage = job
+                    .transfer
+                    .as_ref()
+                    .map(|t| t.update.stage.as_str())
+                    .unwrap_or(&job.phase);
+                ui.label(RichText::new(stage).size(16.0));
+                let fraction = job
+                    .transfer
+                    .as_ref()
+                    .and_then(|t| t.update.fraction())
+                    .or(job.fraction);
                 if let Some(value) = fraction {
-                    ui.label(
-                        RichText::new(format!("{:.0}%", value * 100.0))
-                            .small()
-                            .strong(),
+                    ui.add(
+                        egui::ProgressBar::new(value)
+                            .fill(BLUE)
+                            .desired_height(10.0),
+                    );
+                } else {
+                    ui.add(
+                        egui::ProgressBar::new(0.0)
+                            .animate(true)
+                            .desired_height(10.0),
                     );
                 }
-            });
+                ui.horizontal(|ui| {
+                    caption(ui, "Текущий этап");
+                    if let Some(value) = fraction {
+                        ui.label(
+                            RichText::new(format!("{:.0}%", value * 100.0))
+                                .small()
+                                .strong(),
+                        );
+                    }
+                });
+            }
             ui.add_space(14.0);
-            let now = Instant::now();
             ui.columns(3, |columns| {
                 metric(
                     &mut columns[0],
                     "Прошло",
                     &elapsed_text(job.started.elapsed().as_secs()),
                 );
-                if let Some(t) = &job.transfer {
+                if let Some((upload, download)) = internet_speed {
+                    metric(
+                        &mut columns[1],
+                        "↑ Up",
+                        &format!("{}/с", human_bytes(upload as u64)),
+                    );
+                    metric(
+                        &mut columns[2],
+                        "↓ Down",
+                        &format!("{}/с", human_bytes(download as u64)),
+                    );
+                } else if let Some(t) = &job.transfer {
                     metric(
                         &mut columns[1],
                         "Скорость",
@@ -325,13 +334,12 @@ impl App {
             }
             ui.add_space(14.0);
             let idle = job.last_activity.elapsed();
-            if job.action.writes_device() && !job.restore_completed {
-                caption(ui, "Оставьте питание и USB подключёнными");
-            } else if !job.can_stop() {
+            if !job.can_stop() && !job.action.writes_device() {
                 ui.label("Дождитесь завершения установки и проверки службы Windows.");
-            } else if ui
-                .add_enabled(!job.cancelled, egui::Button::new("Остановить"))
-                .clicked()
+            } else if job.can_stop()
+                && ui
+                    .add_enabled(!job.cancelled, egui::Button::new("Остановить"))
+                    .clicked()
                 && let Some(job) = &mut self.job
                 && let Err(e) = job.stop()
             {
@@ -340,7 +348,7 @@ impl App {
             if idle > Duration::from_secs(5) {
                 caption(
                     ui,
-                    format!("Ожидание ответа · {}", elapsed_text(idle.as_secs())),
+                    format!("Ожидание ответа, {}", elapsed_text(idle.as_secs())),
                 );
             }
         });
@@ -405,7 +413,7 @@ impl App {
                         "требуется подготовка"
                     };
                     ui.label(format!(
-                        "USB-сеть · {} · интерфейс {}: {status}",
+                        "USB-сеть, {}, интерфейс {}: {status}",
                         interface.serial, interface.interface,
                     ))
                     .on_hover_text(interface.error.as_deref().unwrap_or("WinUSB готов"));

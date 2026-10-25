@@ -69,7 +69,6 @@ fn fragmented_reads_and_interrupts_preserve_container_and_retagged_digests() {
         assert_eq!(result.bytes, bytes.len() as u64);
         assert_eq!(result.digests, 2);
         assert!(!result.aea_deferred);
-        assert!(!result.tcon_deferred);
     }
 }
 

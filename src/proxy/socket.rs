@@ -137,8 +137,10 @@ pub(super) fn connect_blocking(host: &str, port: u16, proxy: Option<Proxy>) -> R
 
 fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Result<Stream> {
     let mut stream = if let Some(proxy) = proxy {
-        eprintln!(
-            "TCP tunnel: route {host}:{port} via {:?} proxy",
+        crate::log!(
+            Debug,
+            "proxy",
+            "Соединение с {host}:{port} через прокси {:?}",
             proxy.protocol()
         );
         let tcp = tcp_connect(proxy.host(), proxy.port(), timeout)
@@ -164,7 +166,7 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
         }
         stream
     } else {
-        eprintln!("TCP tunnel: route {host}:{port} directly from the host");
+        crate::log!(Debug, "proxy", "Прямое соединение с {host}:{port}");
         Stream {
             transport: Transport::Tcp(tcp_connect(host, port, timeout)?),
             shutdown_pending: false,

@@ -16,7 +16,11 @@ pub(super) fn serve_asr(ipsw: &mut Ipsw, id: &Identity, stream: &mut MuxStream) 
     if let Some(mut image) = ipsw.stored_image(path)? {
         asr::transfer(stream, &mut image, length)
     } else {
-        eprintln!("Expanding compressed filesystem to a temporary file ({length} bytes)");
+        crate::log!(
+            Info,
+            "filesystem",
+            "Распаковка файловой системы во временный файл ({length} байт)"
+        );
         crate::storage::require(&std::env::temp_dir(), length)?;
         let mut image = tempfile::tempfile()?;
         ensure!(

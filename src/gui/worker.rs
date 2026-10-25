@@ -1,6 +1,6 @@
 //! Child-process lifetime, progress and completion for one GUI operation.
-use super::widgets::{elapsed_text, friendly_phase, human_bytes};
-use super::{Action, Event, Notice, Setup, Tone, progress};
+use super::widgets::{elapsed_text, friendly_phase};
+use super::{Action, Event, Level, Notice, Record, Setup, Tone, progress};
 use anyhow::{Context, Result};
 use eframe::egui;
 use std::{
@@ -26,7 +26,6 @@ pub(super) struct Job {
     pub(super) transfer: Option<Transfer>,
     pub(super) fraction: Option<f32>,
     pub(super) phase: String,
-    last_stats: Instant,
     pub(super) last_activity: Instant,
 }
 
@@ -53,6 +52,11 @@ impl Transfer {
 enum Internet {
     Idle,
     Preparing,
+    Ready {
+        upload: f64,
+        download: f64,
+        received: Instant,
+    },
     Unavailable(String),
 }
 
@@ -94,7 +98,6 @@ impl Job {
             } else {
                 "Подготовка".into()
             },
-            last_stats: now,
             last_activity: now,
         }
     }
@@ -103,6 +106,21 @@ impl Job {
         (!self.action.writes_device() || self.restore_completed)
             && self.action != Action::PrepareWindows
             && !matches!(self.internet, Internet::Preparing)
+    }
+
+    pub(super) fn internet_speed(&self, now: Instant) -> Option<(f64, f64)> {
+        match self.internet {
+            Internet::Ready {
+                upload,
+                download,
+                received,
+            } => Some(if now.duration_since(received) > Duration::from_secs(2) {
+                (0.0, 0.0)
+            } else {
+                (upload, download)
+            }),
+            _ => None,
+        }
     }
 
     pub(super) fn stop(&mut self) -> std::io::Result<()> {
@@ -116,12 +134,19 @@ impl Job {
         Ok(())
     }
 
-    pub(super) fn output(&mut self, output: Output) -> Option<String> {
+    pub(super) fn record(&mut self, mut record: Record) -> Record {
+        record.elapsed_ms = self.started.elapsed().as_millis() as u64;
+        record.normalize();
+        let _ = record.write_to(&mut self.log);
+        record
+    }
+
+    pub(super) fn output(&mut self, output: Output) -> Option<Record> {
         match output {
             Output::Line(line) => {
                 self.last_activity = Instant::now();
-                let _ = writeln!(self.log, "{line}");
-                Some(line)
+                // stderr is reserved for unexpected runtime/OS diagnostics.
+                Some(self.record(Record::new(Level::Warning, "worker", line)))
             }
             Output::State(event) => self.worker_event(event),
             Output::Closed => {
@@ -131,10 +156,11 @@ impl Job {
         }
     }
 
-    fn worker_event(&mut self, event: progress::Event) -> Option<String> {
-        let _ = event.write_to(&mut self.log);
+    fn worker_event(&mut self, event: progress::Event) -> Option<Record> {
         self.last_activity = Instant::now();
-        let mut journal = None;
+        if let progress::Event::Log(record) = event {
+            return Some(self.record(record));
+        }
         if matches!(
             &event,
             progress::Event::Checkpoint { .. } | progress::Event::OperationProgress { .. }
@@ -146,27 +172,8 @@ impl Job {
             self.transfer = None;
         }
         match event {
+            progress::Event::Log(_) => unreachable!(),
             progress::Event::Transfer(update) => {
-                let keep = update.completed == 0
-                    || update.finished
-                    || self
-                        .transfer
-                        .as_ref()
-                        .is_none_or(|t| t.update.stage != update.stage)
-                    || self.last_stats.elapsed() >= Duration::from_secs(10);
-                if keep {
-                    journal = Some(format!(
-                        "{}: {}{} · {:.1} МиБ/с",
-                        update.stage,
-                        human_bytes(update.completed),
-                        update
-                            .total
-                            .map(|n| format!(" / {}", human_bytes(n)))
-                            .unwrap_or_default(),
-                        update.bytes_per_second / 1048576.0,
-                    ));
-                    self.last_stats = Instant::now();
-                }
                 self.transfer = Some(Transfer {
                     update,
                     received: Instant::now(),
@@ -187,8 +194,24 @@ impl Job {
                 self.set_phase("Подтвердите запрос прав администратора Windows");
             }
             progress::Event::InternetReady => {
-                self.internet = Internet::Idle;
-                self.set_phase("Интернет по USB · оставьте Zalivka открытой");
+                self.internet = Internet::Ready {
+                    upload: 0.0,
+                    download: 0.0,
+                    received: Instant::now(),
+                };
+                self.set_phase("Интернет по USB, оставьте Zalivka открытой");
+            }
+            progress::Event::InternetSpeed {
+                upload_bytes_per_second,
+                download_bytes_per_second,
+            } => {
+                if matches!(self.internet, Internet::Ready { .. }) {
+                    self.internet = Internet::Ready {
+                        upload: upload_bytes_per_second,
+                        download: download_bytes_per_second,
+                        received: Instant::now(),
+                    };
+                }
             }
             progress::Event::InternetUnavailable { error } => {
                 self.internet = Internet::Unavailable(error);
@@ -202,7 +225,7 @@ impl Job {
                 self.fraction = (progress >= 0).then(|| (progress as f32 / 100.0).clamp(0.0, 1.0));
             }
         }
-        journal
+        None
     }
 
     fn set_phase(&mut self, phase: &str) {
@@ -224,7 +247,7 @@ impl Job {
         let (title, detail, tone) = if self.cancelled {
             (
                 if self.action == Action::Restore && self.restore_completed {
-                    "Восстановление завершено · раздача остановлена".into()
+                    "Восстановление завершено, раздача остановлена".into()
                 } else {
                     "Операция остановлена".into()
                 },
@@ -245,7 +268,7 @@ impl Job {
             )
         } else if let Internet::Unavailable(error) = &self.internet {
             (
-                "Восстановление завершено · интернет по USB недоступен".into(),
+                "Восстановление завершено, интернет по USB недоступен".into(),
                 error.clone(),
                 Tone::Neutral,
             )
@@ -253,7 +276,7 @@ impl Job {
             (
                 self.action.completed_title().into(),
                 if self.action.writes_device() {
-                    format!("{elapsed} · Проверьте запуск Mac.")
+                    format!("{elapsed}, Проверьте запуск Mac.")
                 } else {
                     elapsed
                 },

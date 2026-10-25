@@ -173,7 +173,9 @@ pub(crate) fn for_url(uri: &Uri) -> Result<Option<Option<Proxy>>> {
             match auto_proxy(uri, config.0.fAutoDetect != 0, &pac) {
                 Ok(proxy) => return Ok(Some(proxy)),
                 Err(error) if !manual.is_empty() => {
-                    eprintln!(
+                    crate::log!(
+                        Warning,
+                        "proxy",
                         "Windows PAC/WPAD unavailable ({error:#}); using configured manual proxy"
                     );
                 }

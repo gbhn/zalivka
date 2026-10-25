@@ -16,6 +16,9 @@ use zalivka::{
     about = "Native Rust Mac DFU tools (experimental restore engine)"
 )]
 struct Cli {
+    /// Include protocol details and transfer timings in terminal diagnostics.
+    #[arg(short, long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -211,20 +214,20 @@ impl RestoreArgs {
             behavior,
             assets,
         )?;
+        zalivka::log!(Info, "restore", "Восстановление завершено");
         progress::Event::RestoreCompleted.emit();
-        if let Some(target) = internet_target {
-            eprintln!("Restore completed; waiting for the Mac's USB network");
-            if let Err(error) = usb_internet::share(
-                None,
-                Some(&target),
-                Some(std::time::Duration::from_secs(900)),
-            ) {
-                progress::Event::InternetUnavailable {
-                    error: format!("{error:#}"),
-                }
-                .emit();
-                eprintln!("USB internet unavailable: {error:#}");
+        if let Some(target) = internet_target
+            && let Err(error) = usb_internet::share(None, Some(&target), None)
+        {
+            progress::Event::InternetUnavailable {
+                error: format!("{error:#}"),
             }
+            .emit();
+            zalivka::log!(
+                Warning,
+                "usb-internet",
+                "Интернет по USB недоступен: {error:#}"
+            );
         }
         Ok(())
     }
@@ -258,7 +261,11 @@ fn parse_pid(value: &str) -> std::result::Result<u16, String> {
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
+    if zalivka::logging::worker() {
+        zalivka::log!(Debug, "report", "{}", serde_json::to_string(value)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    }
     Ok(())
 }
 
@@ -267,7 +274,9 @@ pub(super) fn run() -> Result<()> {
     if std::env::args_os().len() == 1 {
         return crate::gui::run();
     }
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    zalivka::logging::init(cli.verbose);
+    match cli.command {
         Command::UsbInternet { command } => match command {
             InternetCommand::Status => print_json(&usb_internet::status()?)?,
             InternetCommand::Prepare { serial, restore } => {
@@ -287,12 +296,57 @@ pub(super) fn run() -> Result<()> {
         Command::Gui => crate::gui::run()?,
         Command::Doctor => {
             if let Some(host) = drivers::host_status()? {
-                eprintln!("Windows: {}", serde_json::to_string(&host)?);
+                zalivka::log!(
+                    Debug,
+                    "drivers",
+                    "Windows: {}",
+                    serde_json::to_string(&host)?
+                );
+                zalivka::log!(
+                    Info,
+                    "drivers",
+                    "Драйвер Apple: {}; драйвер USB-сети: {}; служба Apple запущена: {}",
+                    host.apple_driver_installed,
+                    host.usb_network_driver_available,
+                    host.apple_service_running
+                );
                 if let Some(reason) = host.blocking_reason() {
-                    eprintln!("{reason}; zalivka drivers prepare");
+                    zalivka::log!(Warning, "drivers", "{reason}; zalivka drivers prepare");
                 }
             }
             let diagnostics = drivers::doctor()?;
+            if diagnostics.is_empty() {
+                zalivka::log!(
+                    Info,
+                    "usb",
+                    "Устройства Apple в DFU или Recovery не найдены"
+                );
+            }
+            for device in &diagnostics {
+                let message = format!(
+                    "USB {}: {}{}",
+                    device.product_id,
+                    if device.accessible {
+                        "доступен"
+                    } else {
+                        "недоступен"
+                    },
+                    device
+                        .error
+                        .as_ref()
+                        .map(|e| format!(": {e}"))
+                        .unwrap_or_default()
+                );
+                zalivka::logging::emit(
+                    if device.accessible {
+                        zalivka::logging::Level::Info
+                    } else {
+                        zalivka::logging::Level::Warning
+                    },
+                    "usb",
+                    format_args!("{message}"),
+                );
+            }
             print_json(&diagnostics)?;
             ensure!(
                 diagnostics.iter().all(|d| d.accessible),
@@ -305,10 +359,18 @@ pub(super) fn run() -> Result<()> {
             }
             DriverCommand::Prepare => {
                 let reboot = drivers::prepare_windows()?;
-                println!("Подготовка Windows завершена. Перезагрузка требуется: {reboot}");
+                zalivka::log!(
+                    Info,
+                    "drivers",
+                    "Подготовка Windows завершена. Перезагрузка требуется: {reboot}"
+                );
                 if reboot {
                     progress::Event::RebootRequired.emit();
-                    println!("Перезагрузите Windows перед восстановлением Mac.");
+                    zalivka::log!(
+                        Warning,
+                        "drivers",
+                        "Перезагрузите Windows перед восстановлением Mac."
+                    );
                 }
             }
             #[cfg(windows)]
@@ -346,12 +408,28 @@ pub(super) fn run() -> Result<()> {
             print_json(&restore::probe_boot_state(&ipsw, ecid, load_ibss)?)?;
         }
         Command::Verify { ipsw, checksum } => {
+            zalivka::log!(Info, "ipsw", "Проверка архива: {}", ipsw.display());
             if let Some(checksum) = &checksum {
                 net::verify_file(&ipsw, &zalivka::device::decode_hex(checksum)?)?;
             }
             let mut ipsw = Ipsw::open(&ipsw)?;
             let mut report = ipsw.verify_all()?;
             report.archive_checksum_verified = checksum.is_some();
+            zalivka::log!(
+                Info,
+                "ipsw",
+                "Проверено файлов: {}; контрольных сумм манифеста: {}",
+                report.entries,
+                report.manifest_digests
+            );
+            if !report.aea_content_digests_not_checked.is_empty() {
+                zalivka::log!(
+                    Warning,
+                    "ipsw",
+                    "Контрольные суммы содержимого AEA не проверены: {}",
+                    report.aea_content_digests_not_checked.len()
+                );
+            }
             print_json(&report)?;
         }
         Command::Detect { json } => {
@@ -464,7 +542,12 @@ pub(super) fn run() -> Result<()> {
             let device = usb::RecoveryUsb::open(ecid)?.info;
             let directory = firmware_dir.map_or_else(catalog::cache_directory, Ok)?;
             let path = catalog::obtain(&device, &directory, None, Behavior::Erase)?;
-            println!("Verified firmware saved to {}", path.display());
+            zalivka::log!(
+                Info,
+                "firmware",
+                "Проверенная прошивка сохранена: {}",
+                path.display()
+            );
         }
         Command::Restore { args, erase } => {
             ensure!(

@@ -59,25 +59,50 @@ fn gui_workers_emit_transfer_events_on_stdout_and_cli_keeps_json_clean() {
                 .filter_map(zalivka::progress::Event::parse)
                 .collect::<Vec<_>>()
         };
-        let (event_output, text_output) = if worker {
-            (&output.stdout, &output.stderr)
+        if worker {
+            let events = events(&output.stdout);
+            assert!(output.stderr.is_empty());
+            assert_eq!(
+                events.len(),
+                String::from_utf8_lossy(&output.stdout).lines().count()
+            );
+            let transfers: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    zalivka::progress::Event::Transfer(update) => Some(update),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(transfers.first().unwrap().completed, 0);
+            assert!(transfers.last().unwrap().finished);
+            assert!(events.iter().any(|event| matches!(event,
+                zalivka::progress::Event::Log(record) if record.level == zalivka::logging::Level::Debug)));
         } else {
             serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
-            (&output.stderr, &output.stdout)
-        };
-        let events = events(event_output);
-        assert!(
-            matches!(events.first(), Some(zalivka::progress::Event::Transfer(update)) if update.completed == 0)
-        );
-        assert!(
-            matches!(events.last(), Some(zalivka::progress::Event::Transfer(update)) if update.finished)
-        );
-        assert!(
-            !String::from_utf8_lossy(text_output)
-                .lines()
-                .any(|line| zalivka::progress::Event::parse(line).is_some())
-        );
+            assert!(events(&output.stdout).is_empty());
+            assert!(events(&output.stderr).is_empty());
+            let diagnostics = String::from_utf8_lossy(&output.stderr);
+            assert!(!diagnostics.contains("DEBUG"));
+            assert!(!diagnostics.contains('\u{00b7}'));
+        }
     }
+}
+
+#[test]
+fn verbose_diagnostics_keep_stdout_machine_readable() {
+    let file = fixture(None, false);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
+        .env_remove(zalivka::progress::WORKER_EVENTS_ENV)
+        .arg("verify")
+        .arg(file.path())
+        .arg("--verbose")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostics.contains("DEBUG"));
+    assert!(!diagnostics.contains(zalivka::progress::EVENT_PREFIX));
 }
 
 #[test]

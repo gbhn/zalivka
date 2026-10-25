@@ -21,7 +21,9 @@ use std::{
 };
 use zalivka::{
     device::{DeviceInfo, Mode, parse_ecid},
-    drivers, progress, usb,
+    drivers,
+    logging::{Level, Record},
+    progress, usb,
 };
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
@@ -77,7 +79,6 @@ struct Confirmation {
     action: Action,
     ecid: u64,
     accepted: bool,
-    erase: String,
 }
 
 struct App {
@@ -92,7 +93,8 @@ struct App {
     rx: Receiver<Event>,
     next_job: u64,
     job: Option<Job>,
-    logs: VecDeque<String>,
+    logs: VecDeque<Record>,
+    log_details: bool,
     log_path: Option<PathBuf>,
     notice: Option<Notice>,
     journal_open: bool,
@@ -117,6 +119,7 @@ impl App {
             next_job: 0,
             job: None,
             logs: VecDeque::new(),
+            log_details: false,
             log_path: None,
             notice: None,
             journal_open: false,
@@ -169,11 +172,12 @@ impl App {
     fn journal_text(&self) -> String {
         self.logs
             .iter()
-            .map(String::as_str)
+            .filter(|record| self.log_details || record.level != Level::Debug)
+            .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n")
     }
-    fn journal_line(&mut self, line: String) {
+    fn journal_line(&mut self, line: Record) {
         self.logs.push_back(line);
         while self.logs.len() > 4000 {
             self.logs.pop_front();
@@ -255,8 +259,23 @@ impl App {
         let id = self.next_job;
         let result = Job::spawn(id, action, &self.setup, &self.tx, ctx);
         match result {
-            Ok((job, path)) => {
+            Ok((mut job, path)) => {
                 self.logs.clear();
+                let record = job.record(Record::new(
+                    Level::Info,
+                    "session",
+                    format!(
+                        "Начало: {}; Zalivka {}{}",
+                        action.title(),
+                        env!("CARGO_PKG_VERSION"),
+                        if self.setup.ecid.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; ECID: {}", self.setup.ecid)
+                        }
+                    ),
+                ));
+                self.journal_line(record);
                 self.log_path = Some(path);
                 self.notice = None;
                 self.job = Some(job);

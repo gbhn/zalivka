@@ -287,9 +287,9 @@ pub(crate) fn prepare(serial: &str, restore: bool) -> Result<()> {
         .map(|(_, id)| {
             let installed = !restore && ready(&id).is_ok();
             if installed {
-                eprintln!("USB network driver already ready: {id}");
+                crate::log!(Info, "drivers", "Сетевой USB-драйвер готов: {id}");
             } else {
-                eprintln!("Preparing USB network interface: {id}");
+                crate::log!(Info, "drivers", "Подготовка сетевого USB-интерфейса: {id}");
             }
             (id, installed)
         })

@@ -128,14 +128,21 @@ pub fn obtain(
     identity: Option<usize>,
     behavior: Behavior,
 ) -> Result<PathBuf> {
-    eprintln!(
-        "Looking up firmware in Apple's catalog for CPID {:04x}, BDID {:02x}",
-        device.chip_id, device.board_id
+    crate::log!(
+        Info,
+        "firmware",
+        "Поиск прошивки в каталоге Apple: CPID {:04x}, BDID {:02x}",
+        device.chip_id,
+        device.board_id
     );
     let release = latest(device)?;
-    eprintln!(
-        "Selected {}: version {}, build {}",
-        release.product_type, release.version, release.build
+    crate::log!(
+        Info,
+        "firmware",
+        "Выбрана прошивка для {}: версия {}, сборка {}",
+        release.product_type,
+        release.version,
+        release.build
     );
     ensure_cached(&release, device, directory, identity, behavior)
 }
@@ -161,7 +168,12 @@ pub fn ensure_cached(
         encode_hex(&release.sha1)
     ));
     if path.exists() {
-        eprintln!("Checking cached firmware: {}", path.display());
+        crate::log!(
+            Info,
+            "firmware",
+            "Проверка сохранённой прошивки: {}",
+            path.display()
+        );
         net::verify_file(&path, &release.sha1).with_context(|| {
             format!(
                 "cached IPSW is corrupt; remove {} to download it again",
@@ -169,7 +181,7 @@ pub fn ensure_cached(
             )
         })?;
     } else {
-        eprintln!("Downloading firmware to {}", path.display());
+        crate::log!(Info, "firmware", "Загрузка прошивки: {}", path.display());
         net::download_verified(&release.url, &path, &release.sha1)?;
     }
     let ipsw = Ipsw::open(&path)?;

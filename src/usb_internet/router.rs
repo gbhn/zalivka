@@ -203,6 +203,7 @@ impl Router {
             traffic: (0, 0),
         }
     }
+    /// Internet payload bytes: upload from the Mac, then download to the Mac.
     pub fn bytes(&self) -> (u64, u64) {
         self.traffic
     }
@@ -330,7 +331,11 @@ impl Router {
                     let _ = tx.send(result);
                 })
             {
-                eprintln!("USB internet: could not start connection worker: {error}");
+                crate::log!(
+                    Warning,
+                    "usb-internet",
+                    "Не удалось запустить обработчик соединения: {error}"
+                );
                 return;
             }
             Upstream::Connecting(rx)
@@ -362,7 +367,11 @@ impl Router {
                     EthernetAddress::BROADCAST,
                     &reply,
                 );
-                eprintln!("USB internet: Mac requested an IPv4 address; offered {CLIENT}");
+                crate::log!(
+                    Debug,
+                    "usb-internet",
+                    "Mac запросил IP-адрес; предложен {CLIENT}"
+                );
             }
             return;
         }
@@ -380,15 +389,21 @@ impl Router {
             let socket = self.sockets.get_mut::<tcp::Socket>(flow.handle);
             let connecting = matches!(flow.upstream, Upstream::Connecting(_));
             if let Err(error) = flow.poll(socket, &mut self.dns, &mut self.traffic) {
-                eprintln!(
-                    "USB internet: connection to {}:{} failed: {error}",
-                    key.destination, key.destination_port
+                crate::log!(
+                    Warning,
+                    "usb-internet",
+                    "Ошибка соединения с {}:{}: {error}",
+                    key.destination,
+                    key.destination_port
                 );
                 socket.abort();
             } else if connecting && matches!(flow.upstream, Upstream::Network(_)) {
-                eprintln!(
-                    "USB internet: TCP connected {}:{}",
-                    key.destination, key.destination_port
+                crate::log!(
+                    Debug,
+                    "usb-internet",
+                    "TCP-соединение установлено: {}:{}",
+                    key.destination,
+                    key.destination_port
                 );
             }
             if flow.last.elapsed() > FLOW_TIMEOUT {

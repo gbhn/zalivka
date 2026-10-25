@@ -18,7 +18,6 @@ pub struct Verification {
     pub manifest_digests: usize,
     pub archive_checksum_verified: bool,
     pub aea_content_digests_not_checked: Vec<String>,
-    pub tcon_payload_digests_not_checked: Vec<String>,
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -40,7 +39,6 @@ struct EntryVerification {
     bytes: u64,
     digests: usize,
     aea_deferred: bool,
-    tcon_deferred: bool,
 }
 
 impl Ipsw {
@@ -86,7 +84,6 @@ impl Ipsw {
             manifest_digests: 0,
             archive_checksum_verified: false,
             aea_content_digests_not_checked: vec![],
-            tcon_payload_digests_not_checked: vec![],
         };
         let mut buffer = vec![0; 2 * 1024 * 1024];
         for index in 0..self.archive.len() {
@@ -107,11 +104,10 @@ impl Ipsw {
             if verified.aea_deferred {
                 report.aea_content_digests_not_checked.push(name.clone());
             }
-            if verified.tcon_deferred {
-                report.tcon_payload_digests_not_checked.push(name.clone());
-            }
-            eprintln!(
-                "Verified {}/{}: {} ({} MiB)",
+            crate::log!(
+                Debug,
+                "ipsw",
+                "Проверен файл {}/{}: {} ({} МиБ)",
                 index + 1,
                 report.entries,
                 name,
@@ -178,7 +174,7 @@ impl EntryDigests {
             .map(|(key, hash)| (key, hash.finalize()))
             .collect();
         for (component, tag) in checks {
-            let matched = verify_component_digest(
+            verify_component_digest(
                 inputs.iter().copied().chain(tag),
                 &component.expected,
                 |input| {
@@ -189,11 +185,7 @@ impl EntryDigests {
                 component.tcon.then_some(tcon_bytes.as_slice()),
             )
             .with_context(|| format!("manifest digest mismatch: {name}"))?;
-            if matched {
-                verified.digests += 1;
-            } else {
-                verified.tcon_deferred = true;
-            }
+            verified.digests += 1;
         }
         Ok(verified)
     }

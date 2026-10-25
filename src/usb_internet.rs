@@ -126,16 +126,21 @@ pub fn prepare(serial: Option<&str>, restore: bool) -> Result<()> {
 pub fn prepare_elevated(serial: &str, restore: bool) -> Result<()> {
     let directory = crate::storage::log_directory()?;
     let result = crate::windows::ncm::prepare(serial, restore);
-    std::fs::write(
-        directory.join("usb-network-driver.log"),
-        format!(
-            "{}\n",
-            match &result {
-                Ok(()) => "USB network driver preparation completed".into(),
-                Err(e) => format!("{e:#}"),
-            }
+    let record = match &result {
+        Ok(()) => crate::logging::Record::new(
+            crate::logging::Level::Info,
+            "drivers",
+            "Подготовка сетевого USB-драйвера завершена",
         ),
-    )?;
+        Err(error) => crate::logging::Record::new(
+            crate::logging::Level::Error,
+            "drivers",
+            format!("{error:#}"),
+        ),
+    };
+    record.write_to(std::fs::File::create(
+        directory.join("usb-network-driver.log"),
+    )?)?;
     result
 }
 pub fn status() -> Result<Vec<Status>> {
@@ -171,9 +176,11 @@ pub fn share(
         "USB internet sharing currently supports Windows hosts"
     );
     crate::progress::Event::InternetWaiting.emit();
-    eprintln!("USB internet: waiting for the Mac USB network (up to 90 seconds)");
-    eprintln!(
-        "USB internet: if macOS has booted but its USB network is missing, reconnect the cable to the same USB port"
+    crate::log!(Info, "usb-internet", "Ожидание USB-сети Mac (до 90 секунд)");
+    crate::log!(
+        Info,
+        "usb-internet",
+        "Если macOS запущена, а USB-сеть не появилась, переподключите кабель к тому же USB-порту"
     );
     let deadline = Instant::now() + Duration::from_secs(90);
     let info = loop {
@@ -193,7 +200,11 @@ pub fn share(
         let accessible = link::claim_pair(&device, selected).is_ok();
         if !accessible {
             crate::progress::Event::InternetPreparing.emit();
-            eprintln!("USB internet: preparing the Mac's network driver; confirm Windows UAC");
+            crate::log!(
+                Info,
+                "usb-internet",
+                "Подготовка сетевого драйвера Mac. Подтвердите запрос прав администратора Windows"
+            );
             prepare(
                 info.serial_number().map(|s| s.trim_end_matches('\0')),
                 false,
@@ -209,11 +220,13 @@ pub fn share(
     let mut link = Link::open(&info)?;
     let mut router = router::Router::new();
     crate::progress::Event::InternetReady.emit();
-    eprintln!(
-        "USB internet ready: USB network started; waiting for Mac traffic; keep Zalivka open"
+    crate::log!(
+        Info,
+        "usb-internet",
+        "Интернет по USB включён. Ожидание сетевых запросов Mac"
     );
     let started = Instant::now();
-    let mut report = Instant::now();
+    let mut report = started;
     let mut packets = 0u64;
     let mut active = false;
     let mut previous_bytes = (0u64, 0u64);
@@ -229,8 +242,10 @@ pub fn share(
         for frame in frames {
             packets += 1;
             if packets <= 20 && frame.len() >= 14 {
-                eprintln!(
-                    "USB internet: Ethernet type {:02x}{:02x}, length {}",
+                crate::log!(
+                    Debug,
+                    "usb-internet",
+                    "Ethernet: тип {:02x}{:02x}, длина {}",
                     frame[12],
                     frame[13],
                     frame.len()
@@ -242,31 +257,21 @@ pub fn share(
         let frames = router.transmit();
         active |= !frames.is_empty();
         link.send(&frames)?;
-        if report.elapsed() >= Duration::from_secs(10) {
+        let now = Instant::now();
+        let interval = now.duration_since(report);
+        if interval >= Duration::from_secs(1) {
             let bytes = router.bytes();
-            let interval = report.elapsed().as_secs_f64() * 1_000_000.0;
-            let remaining = duration.map_or_else(
-                || "no time limit".to_owned(),
-                |limit| {
-                    format!(
-                        "{} seconds remaining",
-                        limit.saturating_sub(started.elapsed()).as_secs()
-                    )
-                },
-            );
-            eprintln!(
-                "USB internet: received {packets} Ethernet packets; upstream bytes {:?}; up {:.2} MB/s, down {:.2} MB/s; USB IN completions {}, NCM OUT blocks {}; {}",
-                bytes,
-                (bytes.0 - previous_bytes.0) as f64 / interval,
-                (bytes.1 - previous_bytes.1) as f64 / interval,
-                link.rx_reads,
-                link.tx_blocks,
-                remaining
-            );
+            crate::progress::Event::InternetSpeed {
+                upload_bytes_per_second: (bytes.0 - previous_bytes.0) as f64
+                    / interval.as_secs_f64(),
+                download_bytes_per_second: (bytes.1 - previous_bytes.1) as f64
+                    / interval.as_secs_f64(),
+            }
+            .emit();
             previous_bytes = bytes;
-            report = Instant::now();
+            report = now;
         }
     }
-    eprintln!("USB internet stopped");
+    crate::log!(Info, "usb-internet", "Раздача интернета по USB остановлена");
     Ok(())
 }

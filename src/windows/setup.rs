@@ -194,7 +194,11 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
         "Windows не подтвердила готовность всех драйверов. Откройте диагностику USB."
     );
     if host.usb_network_interfaces.is_empty() {
-        eprintln!("USB-сеть: проверка привязок будет доступна после подключения загруженного Mac.");
+        crate::log!(
+            Info,
+            "drivers",
+            "USB-сеть: проверка привязок будет доступна после подключения загруженного Mac."
+        );
     }
     Ok(reboot)
 }
@@ -202,9 +206,15 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
 pub(crate) fn prepare() -> Result<bool> {
     let host = status()?;
     if !host.needs_preparation() {
-        eprintln!("Все доступные драйверы уже готовы; повторная установка не требуется.");
+        crate::log!(
+            Info,
+            "drivers",
+            "Все доступные драйверы уже готовы; повторная установка не требуется."
+        );
         if host.usb_network_interfaces.is_empty() {
-            eprintln!(
+            crate::log!(
+                Info,
+                "drivers",
                 "USB-сеть: проверка привязок будет доступна после подключения загруженного Mac."
             );
         }
@@ -213,8 +223,10 @@ pub(crate) fn prepare() -> Result<bool> {
     if unsafe { IsUserAnAdmin() } != 0 {
         return prepare_elevated();
     }
-    eprintln!(
-        "Подготовка Windows: подтвердите запрос прав администратора. Недостающий драйвер Apple устанавливается из exe, USB-сеть использует штатный WinUSB. Загрузка не требуется."
+    crate::log!(
+        Info,
+        "drivers",
+        "Подготовка драйверов: подтвердите запрос прав администратора Windows"
     );
     let code = run_elevated("drivers prepare-elevated")?;
     ensure!(

@@ -27,7 +27,11 @@ impl Fdr {
         let (mut control, port, version) = match control_handshake(session, 2) {
             Ok((control, port)) => (control, port, 2),
             Err(error) => {
-                eprintln!("FDR v2 handshake failed ({error:#}); trying v1");
+                crate::log!(
+                    Debug,
+                    "fdr",
+                    "Согласование FDR v2 не удалось: {error:#}; попытка FDR v1"
+                );
                 let (control, port) = control_handshake(session, 1)?;
                 (control, port, 1)
             }
@@ -107,7 +111,11 @@ fn control_loop(
                 }
                 ensure!(children.len() < 64, "too many active FDR connections");
                 sync_id += 1;
-                eprintln!("FDR Sync {sync_id}: connecting port {port}");
+                crate::log!(
+                    Debug,
+                    "fdr",
+                    "FDR Sync {sync_id}: подключение к порту {port}"
+                );
                 // Match the reference Sync ordering: complete HelloConn
                 // before accepting another Sync. Only proxy handling is
                 // concurrent; parallel connects could reorder requests.
@@ -122,14 +130,16 @@ fn control_loop(
                     Ok(connection) => connection,
                     Err(error) => {
                         if !stop.load(Ordering::Relaxed) {
-                            eprintln!(
-                                "FDR Sync {sync_id} connection failed: {error:#}; waiting for restored status"
+                            crate::log!(
+                                Warning,
+                                "fdr",
+                                "FDR Sync {sync_id}: ошибка подключения: {error:#}; ожидание статуса восстановления"
                             );
                         }
                         continue;
                     }
                 };
-                eprintln!("FDR Sync {sync_id}: HelloConn completed");
+                crate::log!(Debug, "fdr", "FDR Sync {sync_id}: HelloConn завершён");
                 let child_stop = Arc::clone(stop);
                 let child_id = sync_id;
                 children.push(
@@ -143,11 +153,11 @@ fn control_loop(
                             if let Err(e) = result
                                 && !child_stop.load(Ordering::Relaxed)
                             {
-                                eprintln!(
-                                    "FDR connection {child_id} on port {port} ended with an error: {e:#}; waiting for restored status"
+                                crate::log!(Warning, "fdr",
+                                    "Соединение FDR {child_id}, порт {port}: {e:#}; ожидание статуса восстановления"
                                 );
                             } else if !child_stop.load(Ordering::Relaxed) {
-                                eprintln!("FDR connection {child_id}: closed");
+                                crate::log!(Debug, "fdr", "Соединение FDR {child_id} закрыто");
                             }
                         })?,
                 );
@@ -174,12 +184,12 @@ fn handle_connection(mut stream: MuxStream, stop: &AtomicBool) -> Result<()> {
     while read_exact_idle(&mut stream, &mut cmd, stop).context("reading FDR connection command")? {
         match u16::from_le_bytes(cmd) {
             0xbbaa => {
-                eprintln!("FDR connection: Ping");
+                crate::log!(Debug, "fdr", "Получен FDR Ping");
                 ping(&mut stream)?;
             }
             0x105 => {
                 let (host, port) = proxy_handshake(&mut stream)?;
-                eprintln!("FDR proxy: connecting {host}:{port}");
+                crate::log!(Debug, "fdr", "Подключение прокси FDR к {host}:{port}");
                 let mut socket =
                     crate::proxy::connect(&host, port).context("connecting FDR Apple endpoint")?;
                 stream.set_read_timeout(Duration::from_millis(100));

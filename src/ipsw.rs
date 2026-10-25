@@ -135,18 +135,13 @@ impl Ipsw {
                     data.len() as u64,
                     img4::restore_tag(name),
                 )?;
-                let verified = digest::verify_component_digest(
+                digest::verify_component_digest(
                     inputs,
                     expected,
                     |input| input.matches(&data, expected),
                     (name == "Baobab,TCON").then_some(data.as_slice()),
                 )
                 .with_context(|| format!("component {name} digest mismatch"))?;
-                if !verified {
-                    eprintln!(
-                        "TCON bundle metadata matches the manifest; payload digest was not checked on the host"
-                    );
-                }
             }
         }
         Ok(data)

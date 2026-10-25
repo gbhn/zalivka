@@ -7,9 +7,7 @@ use zalivka::device::{DeviceInfo, Mode};
 
 impl Confirmation {
     pub(super) fn ready(&self, target: Option<&DeviceInfo>) -> bool {
-        self.accepted
-            && target.is_some_and(|d| d.ecid == self.ecid && d.mode == Mode::Dfu)
-            && (self.action != Action::Restore || self.erase == "ERASE")
+        self.accepted && target.is_some_and(|d| d.ecid == self.ecid && d.mode == Mode::Dfu)
     }
 }
 
@@ -37,7 +35,7 @@ impl App {
                 );
                 ui.add_space(9.0);
                 ui.label(
-                    RichText::new(format!("Mac · ECID {:016x}", pending.ecid))
+                    RichText::new(format!("Mac, ECID {:016x}", pending.ecid))
                         .monospace()
                         .color(ui.visuals().weak_text_color()),
                 );
@@ -47,19 +45,14 @@ impl App {
                 } else {
                     "Будут обновлены прошивка и recoveryOS. Без стирания диска."
                 });
-                if erase {
-                    ui.add_space(8.0);
-                    ui.label("Введите ERASE для подтверждения");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut pending.erase)
-                            .hint_text("ERASE")
-                            .desired_width(f32::INFINITY),
-                    );
-                }
                 ui.add_space(12.0);
                 ui.checkbox(
                     &mut pending.accepted,
-                    "Я понимаю экспериментальный статус инструмента",
+                    if erase {
+                        "Я согласен на удаление всех данных с этого Mac"
+                    } else {
+                        "Я понимаю экспериментальный статус инструмента"
+                    },
                 );
                 if target.is_none_or(|d| d.ecid != pending.ecid || d.mode != Mode::Dfu) {
                     ui.label(

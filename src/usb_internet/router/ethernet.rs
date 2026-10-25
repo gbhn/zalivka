@@ -69,7 +69,7 @@ pub(super) fn dhcp_reply(bytes: &[u8]) -> Option<Vec<u8>> {
     if repr.server_identifier.is_some_and(|a| a != GATEWAY) {
         return None;
     }
-    eprintln!("USB internet DHCP: {:?}", repr.message_type);
+    crate::log!(Debug, "dhcp", "DHCP: {:?}", repr.message_type);
     repr.message_type = match repr.message_type {
         DhcpMessageType::Discover => DhcpMessageType::Offer,
         DhcpMessageType::Request => {

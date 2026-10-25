@@ -18,6 +18,8 @@ fn samples_measure_new_bytes_and_keep_resumed_offsets_out_of_the_rate() {
     progress.sampled_bytes = 600;
     let idle = progress.update(progress.started + Duration::from_secs(4), false);
     assert_eq!(idle.bytes_per_second, 0.0);
+    let finished = progress.update(progress.started + Duration::from_secs(4), true);
+    assert_eq!(finished.bytes_per_second, 50.0);
     progress.total = None;
     assert_eq!(progress.update(progress.started, true).fraction(), None);
 }

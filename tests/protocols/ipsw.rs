@@ -231,8 +231,8 @@ fn empty_components_have_the_same_digest_in_memory_and_streaming() {
 }
 
 #[test]
-fn tcon_bundle_metadata_is_matched_without_claiming_payload_digest_verification() {
-    let digest = sha2::Sha256::digest(b"vendor logical firmware digest").to_vec();
+fn tcon_bundle_checks_payload_instead_of_trusting_matching_metadata() {
+    let digest = sha2::Sha256::digest(b"flash image").to_vec();
     let bundle = wire::xml(&wire::dict([(
         "1",
         wire::dict([(
@@ -248,7 +248,7 @@ fn tcon_bundle_metadata_is_matched_without_claiming_payload_digest_verification(
     manifest_mut(&mut id).insert(
         "Baobab,TCON".into(),
         wire::dict([
-            ("Digest", Value::Data(digest)),
+            ("Digest", Value::Data(digest.clone())),
             ("Info", wire::dict([("Path", "tcon.bin".into())])),
         ]),
     );
@@ -256,17 +256,117 @@ fn tcon_bundle_metadata_is_matched_without_claiming_payload_digest_verification(
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert_eq!(ipsw.component(&id, "Baobab,TCON").unwrap(), bundle);
     let report = ipsw.verify_all().unwrap();
-    assert_eq!(report.tcon_payload_digests_not_checked, ["tcon.bin"]);
-    assert_eq!(report.manifest_digests, 6);
-    assert!(!zalivka::firmware::tcon_metadata_matches(&bundle, &[0; 32]).unwrap());
+    assert_eq!(report.manifest_digests, 7);
+    assert!(zalivka::firmware::verify_tcon_digest(&bundle, &[0; 32]).is_err());
 
-    // A different component sharing this path cannot inherit the TCON exception.
+    // A newly packed ZIP has a valid CRC even when its TCON payload is corrupt.
+    // Matching Digest metadata must not make either verification path accept it.
+    let mut corrupt = Value::from_reader(Cursor::new(&bundle)).unwrap();
+    corrupt.as_dictionary_mut().unwrap()["1"]
+        .as_dictionary_mut()
+        .unwrap()["firmware"]
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("Payload".into(), Value::Data(b"bad firmware".to_vec()));
+    let corrupt = wire::xml(&corrupt).unwrap();
+    let file = fixture_files(Some(id.clone()), false, &[("tcon.bin", &corrupt)]);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    assert!(ipsw.component(&id, "Baobab,TCON").is_err());
+    assert!(ipsw.verify_all().is_err());
+
+    // A different component sharing this path cannot use the TCON digest input.
     let entry = manifest_mut(&mut id)["Baobab,TCON"].clone();
     manifest_mut(&mut id).insert("Other".into(), entry);
     let file = fixture_files(Some(id.clone()), false, &[("tcon.bin", &bundle)]);
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(ipsw.component(&id, "Other").is_err());
     assert!(ipsw.verify_all().is_err());
+}
+
+#[test]
+fn dp855_tcon_hashes_header_code_and_data_and_checks_panel_configs() {
+    use sha2::Sha256;
+    use zalivka::firmware::verify_tcon_digest;
+
+    let mut payload = vec![0xff; 0xf000];
+    payload[..8].copy_from_slice(&[0, 0, 0, 3, 0, 0, 0, 4]);
+    payload[0x1000..0x1003].copy_from_slice(b"abc");
+    payload[0x9000..0x9004].copy_from_slice(b"defg");
+    // SHA-256 of 00000003 00000004 || "abc" || "defg", independently
+    // calculated with Python hashlib; flash padding is outside the digest.
+    let digest =
+        hex::decode("52f0aec73f4c412cbb4a8b73092cf30da63f745aaf896d49aea0d4c4faff4720").unwrap();
+    let make_bundle = |payload: Vec<u8>, config: Value| {
+        wire::dict([(
+            "1",
+            wire::dict([
+                (
+                    "firmware",
+                    wire::dict([
+                        ("Digest", Value::Data(digest.clone())),
+                        ("Payload", Value::Data(payload)),
+                    ]),
+                ),
+                (
+                    "device_id",
+                    wire::dict([("A41029", wire::dict([("EDID", config)]))]),
+                ),
+            ]),
+        )])
+    };
+    let config = wire::dict([
+        (
+            "Digest",
+            Value::Data(Sha256::digest(b"panel config").to_vec()),
+        ),
+        ("Payload", Value::Data(b"panel config".to_vec())),
+    ]);
+    let bundle = make_bundle(payload.clone(), config.clone());
+    let mut id = identity();
+    manifest_mut(&mut id).insert(
+        "Baobab,TCON".into(),
+        wire::dict([
+            ("Digest", Value::Data(digest.clone())),
+            ("Info", wire::dict([("Path", "tcon.bin".into())])),
+        ]),
+    );
+    for binary in [false, true] {
+        let mut bytes = Vec::new();
+        if binary {
+            bundle.to_writer_binary(&mut bytes).unwrap();
+        } else {
+            bytes = wire::xml(&bundle).unwrap();
+        }
+        let file = fixture_files(Some(id.clone()), false, &[("tcon.bin", &bytes)]);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        assert_eq!(ipsw.component(&id, "Baobab,TCON").unwrap(), bytes);
+        assert_eq!(ipsw.verify_all().unwrap().manifest_digests, 7);
+    }
+    for offset in [0, 3, 7, 0x1000, 0x1002, 0x9000, 0x9003] {
+        let mut corrupt = payload.clone();
+        corrupt[offset] ^= 1;
+        let bytes = wire::xml(&make_bundle(corrupt, config.clone())).unwrap();
+        let file = fixture_files(Some(id.clone()), false, &[("tcon.bin", &bytes)]);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        assert!(
+            ipsw.component(&id, "Baobab,TCON").is_err(),
+            "offset {offset:#x}"
+        );
+        assert!(ipsw.verify_all().is_err(), "offset {offset:#x}");
+    }
+    for bad_config in [
+        wire::dict([
+            ("Digest", Value::Data(vec![0; 32])),
+            ("Payload", Value::Data(b"panel config".to_vec())),
+        ]),
+        wire::dict([("Digest", Value::Data(vec![0; 32]))]),
+        false.into(),
+    ] {
+        let bytes = wire::xml(&make_bundle(payload.clone(), bad_config)).unwrap();
+        assert!(verify_tcon_digest(&bytes, &digest).is_err());
+    }
+    let bytes = wire::xml(&make_bundle(payload[..0x9002].to_vec(), config)).unwrap();
+    assert!(verify_tcon_digest(&bytes, &digest).is_err());
 }
 
 #[test]

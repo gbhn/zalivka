@@ -3,7 +3,7 @@ use super::connection::confirm_restore_service;
 use super::file_data::{FILE_DATA_BATCH, FileDataWriter, send_file_data};
 use super::keys::{ImagePrefix, key_exchange};
 use super::session::{
-    acknowledge_final_status, attestation_reply, finish_final_status, log_checkpoint, log_progress,
+    acknowledge_final_status, finish_final_status, log_checkpoint, log_progress,
     wait_for_restore_close,
 };
 use super::*;
@@ -251,29 +251,6 @@ fn bootstrap_respects_stage_flags_and_defers_logo_until_present_dcp() {
 }
 
 #[test]
-fn attestation_declines_only_the_initial_question() {
-    let message = |state: Value| {
-        wire::dict([
-            ("MsgType", "RestoreAttestation".into()),
-            ("RestoreAttestationState", state),
-        ])
-    };
-    assert_eq!(
-        attestation_reply(&message("RestoreShouldAttest".into())).unwrap(),
-        wire::dict([("RestoreShouldAttest", false.into())])
-    );
-    for state in [
-        "AttestationIssued".into(),
-        "AttestationError".into(),
-        "unknown".into(),
-        false.into(),
-    ] {
-        assert!(attestation_reply(&message(state)).is_err());
-    }
-    assert!(attestation_reply(&wire::dict([] as [(&str, Value); 0])).is_err());
-}
-
-#[test]
 fn signed_progress_survives_xml_and_binary_plist_framing() {
     for progress in [-1i64, 0, 50, 100] {
         let message = wire::dict([
@@ -290,13 +267,10 @@ fn signed_progress_survives_xml_and_binary_plist_framing() {
             }
             let received = wire::receive(&mut std::io::Cursor::new(framed)).unwrap();
             let mut output = Vec::new();
-            let event = log_progress(&received, &mut output).unwrap();
-            let expected = if progress == -1 {
-                "Operation 28: progress unavailable (-1)\n".to_owned()
-            } else {
-                format!("Operation 28: {progress}%\n")
-            };
-            assert_eq!(String::from_utf8(output).unwrap(), expected);
+            let event = log_progress(&received, |record| output.push(record)).unwrap();
+            assert_eq!(output.len(), 1);
+            assert_eq!(output[0].level, crate::logging::Level::Debug);
+            assert!(output[0].message.contains("28"));
             assert_eq!(
                 event,
                 crate::progress::Event::OperationProgress {
@@ -324,7 +298,7 @@ fn malformed_progress_reports_the_field_without_inventing_a_percentage() {
                 dict.remove(key);
             }
             let mut output = Vec::new();
-            let error = log_progress(&malformed, &mut output).unwrap_err();
+            let error = log_progress(&malformed, |record| output.push(record)).unwrap_err();
             assert!(format!("{error:#}").contains(key), "{error:#}");
             assert!(output.is_empty());
         }
@@ -342,8 +316,12 @@ fn checkpoint_results_do_not_replace_final_restore_status() {
                 ("CHECKPOINT_COMPLETE", complete.into()),
             ]);
             let mut output = Vec::new();
-            log_checkpoint(&checkpoint, &mut output).unwrap();
-            let output = String::from_utf8(output).unwrap();
+            log_checkpoint(&checkpoint, |record| output.push(record)).unwrap();
+            let output = output
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
             assert!(output.contains(if complete { "completed" } else { "started" }));
             assert!(output.contains(&format!("result={result}")));
             assert!(validate_final_status(&checkpoint).is_err());
@@ -370,14 +348,77 @@ fn checkpoint_log_preserves_step_and_device_diagnostics() {
         ("CHECKPOINT_ERROR", "test error details".into()),
     ]);
     let mut output = Vec::new();
-    log_checkpoint(&checkpoint, &mut output).unwrap();
-    let output = String::from_utf8(output).unwrap();
+    log_checkpoint(&checkpoint, |record| output.push(record)).unwrap();
+    assert_eq!(
+        output.iter().map(|record| record.level).collect::<Vec<_>>(),
+        vec![
+            crate::logging::Level::Warning,
+            crate::logging::Level::Warning,
+            crate::logging::Level::Error
+        ]
+    );
+    let output = output
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
     for expected in [
         "Checkpoint completed: id=0x123, name=test_step, result=10",
-        "Checkpoint warning: id=0x123, test warning",
-        "Checkpoint error: id=0x123, test error details",
+        "test_step (0x123): test warning",
+        "test_step (0x123): test error details",
     ] {
         assert!(output.contains(expected), "{output}");
+    }
+}
+
+#[test]
+fn missing_ecfg_keeps_the_device_warning_and_explains_the_failed_data_lookup() {
+    use crate::logging::Level;
+    let checkpoint = wire::dict([
+        ("CHECKPOINT_ID", 0x1504u64.into()),
+        ("CHECKPOINT_NAME", "update_fdr_ean".into()),
+        ("CHECKPOINT_RESULT", 0i64.into()),
+        ("CHECKPOINT_COMPLETE", true.into()),
+        (
+            "CHECKPOINT_WARNING",
+            "update_fdr_ean missing data for eCfg.".into(),
+        ),
+    ]);
+    let mut output = Vec::new();
+    log_checkpoint(&checkpoint, |record| output.push(record)).unwrap();
+    assert_eq!(output[1].level, Level::Warning);
+    assert!(
+        output[1]
+            .message
+            .contains("update_fdr_ean missing data for eCfg.")
+    );
+    assert!(output[1].message.contains("result=0"));
+    assert!(output[1].message.contains("FDR в EAN"));
+    assert!(!output[1].message.contains("Заводская"));
+
+    for (key, value) in [
+        ("CHECKPOINT_ID", 0x131au64.into()),
+        ("CHECKPOINT_NAME", "another_step".into()),
+        ("CHECKPOINT_RESULT", (-1i64).into()),
+        ("CHECKPOINT_COMPLETE", false.into()),
+        ("CHECKPOINT_ERROR", "FDR validation failed".into()),
+        (
+            "CHECKPOINT_WARNING",
+            "update_fdr_ean missing data for trst.".into(),
+        ),
+        ("CHECKPOINT_WARNING", "unrecognized FDR warning".into()),
+    ] {
+        let mut message = checkpoint.clone();
+        message
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(key.into(), value);
+        let mut output = Vec::new();
+        log_checkpoint(&message, |record| output.push(record)).unwrap();
+        assert_eq!(output[1].level, Level::Warning, "{message:?}");
+        if key == "CHECKPOINT_ERROR" {
+            assert_eq!(output[2].level, Level::Error);
+        }
     }
 }
 
@@ -390,13 +431,13 @@ fn malformed_checkpoints_are_still_rejected() {
     for key in ["CHECKPOINT_ID", "CHECKPOINT_RESULT"] {
         let mut missing = checkpoint.clone();
         missing.as_dictionary_mut().unwrap().remove(key);
-        assert!(log_checkpoint(&missing, Vec::new()).is_err());
+        assert!(log_checkpoint(&missing, |_| {}).is_err());
         let mut malformed = checkpoint.clone();
         malformed
             .as_dictionary_mut()
             .unwrap()
             .insert(key.into(), true.into());
-        assert!(log_checkpoint(&malformed, Vec::new()).is_err());
+        assert!(log_checkpoint(&malformed, |_| {}).is_err());
     }
 }
 

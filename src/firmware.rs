@@ -10,7 +10,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 pub use canary::canary_response;
-pub use containers::{Ftab, payload_ranges, tcon_metadata_matches};
+pub use containers::{Ftab, payload_ranges, verify_tcon_digest};
 use payload::payload;
 use plist::Value;
 use std::io::Write;

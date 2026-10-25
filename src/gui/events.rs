@@ -1,7 +1,7 @@
 //! Apply background events and finish jobs only after their logs are drained.
 use super::theme::Tone;
 use super::worker::{Job, Output};
-use super::{App, Event, Notice, Picker, SCAN_INTERVAL, worker};
+use super::{App, Event, Level, Notice, Picker, Record, SCAN_INTERVAL, worker};
 use eframe::egui;
 use std::time::Instant;
 use zalivka::progress;
@@ -83,8 +83,18 @@ impl App {
             }
             _ => return,
         };
-        let job = self.job.take().unwrap();
+        let mut job = self.job.take().unwrap();
         let notice = job.completion_notice(success, self.windows_reboot_required);
+        let level = match notice.tone {
+            Tone::Error => Level::Error,
+            Tone::Neutral if !job.cancelled => Level::Warning,
+            _ => Level::Info,
+        };
+        self.journal_line(job.record(Record::new(
+            level,
+            "session",
+            format!("{}: {}", notice.title, notice.detail),
+        )));
         if notice.tone == Tone::Error {
             self.journal_open = true;
         }

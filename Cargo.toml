@@ -44,6 +44,8 @@ rfd = { version = "0.17.2", optional = true }
 
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 webpki-roots = "1"
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
+x509-parser = { version = "0.18", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 cab = "0.6"
@@ -51,8 +53,9 @@ windows-service = "0.8"
 windows-sys = { version = "0.61", features = ["Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_Devices_Usb", "Win32_Foundation", "Win32_Networking_WinHttp", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
-lto = "thin"
+lto = "fat"
 strip = true
+codegen-units = 1
 
 [lints.rust]
 unsafe_code = "deny"

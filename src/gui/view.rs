@@ -1,7 +1,7 @@
 //! Main window layout, journal and frame updates.
 use super::theme::BLUE;
 use super::widgets::{caption, card, tint};
-use super::{App, Picker, SCAN_INTERVAL};
+use super::{App, Level, Picker, SCAN_INTERVAL};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::time::Duration;
 
@@ -63,7 +63,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.strong("Журнал");
-                    caption(ui, format!("{} строк", self.logs.len()));
+                    ui.checkbox(&mut self.log_details, "Технические подробности");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Скрыть").clicked() {
                             self.journal_open = false;
@@ -71,7 +71,7 @@ impl App {
                         if ui
                             .add_enabled(
                                 !self.logs.is_empty() && !self.picking,
-                                egui::Button::new("Сохранить").small(),
+                                egui::Button::new("Сохранить всё").small(),
                             )
                             .clicked()
                         {
@@ -89,7 +89,12 @@ impl App {
                     });
                 });
                 ui.separator();
-                if self.logs.is_empty() {
+                let records: Vec<_> = self
+                    .logs
+                    .iter()
+                    .filter(|record| self.log_details || record.level != Level::Debug)
+                    .collect();
+                if records.is_empty() {
                     ui.label(
                         RichText::new("Здесь появится ход операции.")
                             .color(ui.visuals().weak_text_color()),
@@ -99,18 +104,21 @@ impl App {
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
-                    .show_rows(ui, row_height, self.logs.len(), |ui, rows| {
+                    .show_rows(ui, row_height, records.len(), |ui, rows| {
                         for row in rows {
-                            let text = &self.logs[row];
-                            let color =
-                                if text.contains("Error:") || text.contains("CHECKPOINT_ERROR") {
-                                    ui.visuals().error_fg_color
-                                } else {
-                                    ui.visuals().weak_text_color()
-                                };
+                            let record = records[row];
+                            let color = match record.level {
+                                Level::Error => ui.visuals().error_fg_color,
+                                Level::Warning => ui.visuals().warn_fg_color,
+                                Level::Info => ui.visuals().text_color(),
+                                Level::Debug => ui.visuals().weak_text_color(),
+                            };
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(text).monospace().size(12.0).color(color),
+                                    RichText::new(record.to_string())
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(color),
                                 )
                                 .wrap_mode(egui::TextWrapMode::Extend),
                             );

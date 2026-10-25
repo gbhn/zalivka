@@ -146,7 +146,7 @@ pub(super) fn proxy_handshake(stream: &mut (impl Read + Write)) -> Result<(Strin
     validate_proxy_target(host, port)?;
     stream.write_all(&[0, address_type[0], address_type[1]])?;
     stream.write_all(&address)?;
-    eprintln!("FDR proxy: CONNECT accepted for {host}:{port}");
+    crate::log!(Debug, "fdr", "Запрос CONNECT к {host}:{port} принят");
     Ok((host.into(), port))
 }
 

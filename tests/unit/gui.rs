@@ -43,7 +43,6 @@ fn erase_confirmation_is_bound_to_target_and_explicit_consent() {
         action: Action::Restore,
         ecid: 42,
         accepted: false,
-        erase: "ERASE".into(),
     };
     assert!(!p.ready(Some(&device(42, Mode::Dfu))));
     p.accepted = true;
@@ -51,8 +50,6 @@ fn erase_confirmation_is_bound_to_target_and_explicit_consent() {
     assert!(!p.ready(Some(&device(43, Mode::Dfu))));
     assert!(!p.ready(Some(&device(42, Mode::Recovery))));
     assert!(!p.ready(None));
-    p.erase = "erase".into();
-    assert!(!p.ready(Some(&device(42, Mode::Dfu))));
     p.action = Action::Revive;
     assert!(p.ready(Some(&device(42, Mode::Dfu))));
 }
@@ -232,6 +229,48 @@ fn stale_worker_events_do_not_enter_a_new_journal() {
     }
 }
 
+#[test]
+fn structured_journal_filters_details_and_saves_each_record_once() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut app = App::new();
+    let mut operation = job(Action::Restore);
+    operation.log = log.reopen().unwrap();
+    app.job = Some(operation);
+    for (level, message) in [
+        (Level::Debug, "protocol details"),
+        (Level::Info, "Error: this text is informational"),
+        (Level::Warning, "retry"),
+        (Level::Error, "connection failed"),
+    ] {
+        send_worker(
+            &mut app,
+            progress::Event::Log(Record::new(level, "test", message)),
+        );
+    }
+    assert_eq!(app.logs.len(), 4);
+    assert_eq!(app.logs[1].level, Level::Info);
+    assert!(!app.journal_text().contains("protocol details"));
+    assert!(app.journal_text().contains("connection failed"));
+    app.log_details = true;
+    assert!(app.journal_text().contains("protocol details"));
+    send_worker(
+        &mut app,
+        progress::Event::Transfer(progress::Update {
+            stage: "ASR".into(),
+            completed: 0,
+            total: Some(100),
+            bytes_per_second: 0.0,
+            elapsed_seconds: 0.0,
+            finished: false,
+        }),
+    );
+    assert_eq!(app.logs.len(), 4);
+    let saved = std::fs::read_to_string(log.path()).unwrap();
+    assert_eq!(saved.lines().count(), 4);
+    assert!(saved.contains("protocol details"));
+    assert!(!saved.contains(progress::EVENT_PREFIX));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn stopped_worker_is_reaped_when_the_window_drops_without_another_poll() {
@@ -305,7 +344,7 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
     let notice = job.completion_notice(false, true);
     assert_eq!(
         notice.title,
-        "Восстановление завершено · раздача остановлена"
+        "Восстановление завершено, раздача остановлена"
     );
     assert_eq!(notice.tone, Tone::Neutral);
     job.action = Action::Revive;
@@ -350,8 +389,12 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
     let mut app = App::new();
     app.job = Some(job(Action::Restore));
     assert!(!app.job.as_ref().unwrap().can_stop());
-    app.journal_line("Restore completed; waiting for the Mac's USB network".into());
-    app.journal_line("Перезагрузите Windows перед восстановлением Mac.".into());
+    app.journal_line(Record::new(Level::Info, "test", "Восстановление завершено"));
+    app.journal_line(Record::new(
+        Level::Warning,
+        "test",
+        "Перезагрузите Windows перед восстановлением Mac.",
+    ));
     app.tx
         .send(Event::Worker(
             7,
@@ -394,7 +437,7 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
     assert!(app.job.as_ref().unwrap().can_stop());
     assert_eq!(
         app.job.as_ref().unwrap().phase,
-        "Интернет по USB · оставьте Zalivka открытой"
+        "Интернет по USB, оставьте Zalivka открытой"
     );
     send_worker(
         &mut app,
@@ -403,7 +446,7 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
         },
     );
     for index in 0..4001 {
-        app.journal_line(format!("message {index}"));
+        app.journal_line(Record::new(Level::Info, "test", format!("message {index}")));
     }
     assert_eq!(app.logs.len(), 4000);
     let job = app.job.as_mut().unwrap();
@@ -411,7 +454,7 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
     job.cancelled = true;
     assert_eq!(
         job.completion_notice(false, false).title,
-        "Восстановление завершено · раздача остановлена"
+        "Восстановление завершено, раздача остановлена"
     );
     job.action = Action::PrepareWindows;
     job.cancelled = false;
@@ -466,9 +509,9 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
     assert!(app.job.as_ref().unwrap().can_stop());
     assert_eq!(
         app.job.as_ref().unwrap().phase,
-        "Интернет по USB · оставьте Zalivka открытой"
+        "Интернет по USB, оставьте Zalivka открытой"
     );
-    assert_eq!(app.logs.back(), Some(&line));
+    assert_eq!(app.logs.back().unwrap().message, line);
 }
 
 #[test]
@@ -581,7 +624,6 @@ fn dialogs_stay_open_and_escape_cancels_without_starting_a_job() {
             action,
             ecid: 42,
             accepted: false,
-            erase: String::new(),
         });
         for _ in 0..3 {
             let _ = ctx.run(
@@ -645,7 +687,8 @@ fn main_panels_render_in_both_themes_without_light_surfaces_in_dark_mode() {
     configure(&ctx);
     let mut app = App::new();
     app.journal_open = true;
-    app.logs.push_back("Error: example".into());
+    app.logs
+        .push_back(Record::new(Level::Error, "test", "example"));
     for theme in [egui::Theme::Dark, egui::Theme::Light] {
         ctx.set_theme(theme);
         let output = ctx.run(

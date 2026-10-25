@@ -1,10 +1,12 @@
 //! Restored message loop, reconnect policy and final status acknowledgement.
 use super::{
     AsyncRequests, ContextState,
+    attestation::Attestation,
     connection::{confirm_restore_service, wait_restored},
     options,
 };
 use crate::{
+    logging::{Level, Record},
     mux::{MuxStream, Session},
     wire,
 };
@@ -95,19 +97,9 @@ pub(super) fn wait_for_restore_close(
     result
 }
 
-pub(super) fn attestation_reply(message: &Value) -> Result<Value> {
-    let state = wire::string(message, &["RestoreAttestationState"])?;
-    ensure!(
-        state == "RestoreShouldAttest",
-        "unexpected restore attestation state {state}: certificate verification is not implemented"
-    );
-    eprintln!("Restore attestation was requested but will not be verified by this client");
-    Ok(wire::dict([("RestoreShouldAttest", false.into())]))
-}
-
 pub(super) fn log_progress(
     message: &Value,
-    mut output: impl Write,
+    mut output: impl FnMut(Record),
 ) -> Result<crate::progress::Event> {
     let operation = wire::get(message, &["Operation"])
         .and_then(wire::number)
@@ -116,15 +108,15 @@ pub(super) fn log_progress(
     let progress = value.as_signed_integer().with_context(|| {
         format!("invalid ProgressMsg.Progress: expected signed plist integer, got {value:?}")
     })?;
-    // restored sends -1 while waiting for storage: no percentage is available yet.
-    if progress < 0 {
-        writeln!(
-            output,
-            "Operation {operation}: progress unavailable ({progress})"
-        )?;
-    } else {
-        writeln!(output, "Operation {operation}: {progress}%")?;
-    }
+    output(Record::new(
+        Level::Debug,
+        "restored",
+        if progress < 0 {
+            format!("Операция {operation}: процент выполнения недоступен ({progress})")
+        } else {
+            format!("Операция {operation}: {progress}%")
+        },
+    ));
     Ok(crate::progress::Event::OperationProgress {
         operation,
         progress,
@@ -133,7 +125,7 @@ pub(super) fn log_progress(
 
 pub(super) fn log_checkpoint(
     message: &Value,
-    mut output: impl Write,
+    mut output: impl FnMut(Record),
 ) -> Result<Option<crate::progress::Event>> {
     let id = wire::number(wire::get(message, &["CHECKPOINT_ID"])?)?;
     let name = wire::string(message, &["CHECKPOINT_NAME"]).unwrap_or("unknown");
@@ -146,16 +138,57 @@ pub(super) fn log_checkpoint(
         "started"
     };
     // Checkpoints describe individual steps; only StatusMsg decides the final result.
-    writeln!(
-        output,
-        "Checkpoint {phase}: id=0x{id:x}, name={name}, result={result}"
-    )?;
-    for (key, label) in [
-        ("CHECKPOINT_WARNING", "warning"),
-        ("CHECKPOINT_ERROR", "error"),
+    output(Record::new(
+        if result == 0 {
+            Level::Debug
+        } else {
+            Level::Warning
+        },
+        "restored",
+        format!("Checkpoint {phase}: id=0x{id:x}, name={name}, result={result}"),
+    ));
+    for (key, level) in [
+        ("CHECKPOINT_WARNING", Level::Warning),
+        ("CHECKPOINT_ERROR", Level::Error),
     ] {
         if let Ok(text) = wire::string(message, &[key]) {
-            writeln!(output, "Checkpoint {label}: id=0x{id:x}, {text}")?;
+            // eCfg is device-generated data, not an IPSW firmware component.
+            // Preserve the device's warning; a successful checkpoint alone
+            // does not establish why this particular Mac has no eCfg record.
+            let missing_ecfg = key == "CHECKPOINT_WARNING"
+                && id == 0x1504
+                && name == "update_fdr_ean"
+                && result == 0
+                && wire::boolean(message, &["CHECKPOINT_COMPLETE"])
+                && wire::dictionary(message)?.get("CHECKPOINT_ERROR").is_none()
+                && text == "update_fdr_ean missing data for eCfg.";
+            output(Record::new(
+                level,
+                "restored",
+                if missing_ecfg {
+                    format!(
+                        "{name} (0x{id:x}): {text} Mac не вернул данные класса eCfg при переносе FDR в EAN; этап завершён с result=0"
+                    )
+                } else {
+                    format!("{name} (0x{id:x}): {text}")
+                },
+            ));
+        }
+    }
+    if !wire::boolean(message, &["CHECKPOINT_COMPLETE"]) {
+        let stage = match name {
+            "wait_for_storage" => Some("Проверка накопителя"),
+            "perform_main_os_prepare" => Some("Подготовка macOS"),
+            "perform_restore_installing" => Some("Установка macOS"),
+            "update_device_firmware" => Some("Обновление прошивки Mac"),
+            "recovery_os_restore" => Some("Установка recoveryOS"),
+            "populate_isc_preboot_volume" => Some("Подготовка загрузочных файлов"),
+            "seal_system_volume" => Some("Проверка системного тома"),
+            "cleanup_send_final_status" => Some("Завершение восстановления"),
+            _ => None,
+        };
+        if let Some(stage) = stage {
+            output(Record::new(Level::Info, "restore", stage));
         }
     }
     Ok((!wire::boolean(message, &["CHECKPOINT_COMPLETE"]))
@@ -166,6 +199,7 @@ pub(super) fn run(
     state: &mut ContextState,
     mut bootx_error: Option<anyhow::Error>,
     mut log: Option<File>,
+    mut attestation: Attestation,
 ) -> Result<()> {
     let ecid = state.device.ecid;
     let mut started = false;
@@ -216,18 +250,31 @@ pub(super) fn run(
                     "StatusMsg" => {
                         final_received = true;
                         fdr.stop();
-                        finish_final_status(&mut main, &message, || requests.finish())?;
-                        eprintln!("Restore service reported success for ECID {ecid:016x}");
-                        eprintln!("Waiting for the device to close the restore channel after ACK");
+                        finish_final_status(&mut main, &message, || {
+                            requests.finish()?;
+                            attestation.finish()
+                        })?;
+                        crate::log!(
+                            Info,
+                            "restore",
+                            "Mac подтвердил успешное восстановление, ECID {ecid:016x}"
+                        );
+                        crate::log!(
+                            Debug,
+                            "restore",
+                            "Ожидание закрытия канала восстановления после подтверждения"
+                        );
                         wait_for_restore_close(&mut main, &session, Duration::from_secs(60))?;
-                        eprintln!(
-                            "Restore channel closed after final ACK; restore attestation was not verified"
+                        crate::log!(
+                            Debug,
+                            "restore",
+                            "Канал восстановления закрыт после подтверждения"
                         );
                         return Ok(());
                     }
-                    "ProgressMsg" => log_progress(&message, std::io::stderr().lock())?.emit(),
+                    "ProgressMsg" => log_progress(&message, crate::logging::publish)?.emit(),
                     "CheckpointMsg" => {
-                        if let Some(event) = log_checkpoint(&message, std::io::stderr().lock())? {
+                        if let Some(event) = log_checkpoint(&message, crate::logging::publish)? {
                             event.emit();
                         }
                     }
@@ -236,10 +283,16 @@ pub(super) fn run(
                         wire::string(&message, &["Arguments", "RestoreProtocol"])? == "MuxSocket",
                         "device requested an unsupported restore transport"
                     ),
-                    "RestoreAttestation" => wire::send(&mut main, &attestation_reply(&message)?)?,
+                    "RestoreAttestation" => {
+                        if let Some(reply) = attestation.handle(&message)? {
+                            wire::send(&mut main, &reply)?;
+                        }
+                    }
                     "RestoredCrash" => bail!("restored crashed: {message:?}"),
-                    "PreviousRestoreLogMsg" => eprintln!(
-                        "Previous restore log: {}",
+                    "PreviousRestoreLogMsg" => crate::log!(
+                        Debug,
+                        "restore",
+                        "Предыдущий журнал восстановления: {}",
                         wire::string(&message, &["PreviousRestoreLog"]).unwrap_or("unavailable")
                     ),
                     name => {
@@ -254,8 +307,10 @@ pub(super) fn run(
             Ok(()) => return Ok(()),
             Err(error) if !final_received && session.disconnected() && attempt < 3 => {
                 session.cancel();
-                eprintln!(
-                    "USB removed ({error:#}); waiting for the same ECID. Pending transfers are discarded; restored must issue fresh data requests. StartRestore will not be repeated."
+                crate::log!(
+                    Warning,
+                    "restore",
+                    "USB-соединение потеряно: {error:#}. Ожидание Mac с тем же ECID; восстановление продолжится по новым запросам устройства"
                 );
             }
             Err(error) => return Err(error),

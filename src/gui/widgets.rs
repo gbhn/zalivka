@@ -87,17 +87,7 @@ pub(super) fn laptop(ui: &mut egui::Ui, connected: bool) {
         Stroke::new(2.0_f32, color),
     );
 }
-pub(super) fn human_bytes(bytes: u64) -> String {
-    if bytes >= 1073741824 {
-        format!("{:.2} ГиБ", bytes as f64 / 1073741824.0)
-    } else if bytes >= 1048576 {
-        format!("{:.1} МиБ", bytes as f64 / 1048576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} КиБ", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} Б")
-    }
-}
+pub(super) use zalivka::progress::human_bytes;
 pub(super) fn elapsed_text(seconds: u64) -> String {
     format!(
         "{:02}:{:02}:{:02}",

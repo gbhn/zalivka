@@ -9,6 +9,7 @@ pub mod fdr;
 pub mod firmware;
 pub mod img4;
 pub mod ipsw;
+pub mod logging;
 pub mod mux;
 pub mod net;
 pub mod progress;

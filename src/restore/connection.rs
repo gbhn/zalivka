@@ -31,12 +31,16 @@ pub(super) fn confirm_restore_service<T>(
     connect: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     if let Some(error) = &bootx_error {
-        eprintln!("{error:#}; checking whether the same device started restored");
+        crate::log!(
+            Debug,
+            "restore",
+            "{error:#}; проверка службы восстановления на том же Mac"
+        );
     }
     match connect() {
         Ok(service) => {
             if bootx_error.is_some() {
-                eprintln!("Restore service identity confirmed after bootx USB error; continuing");
+                crate::log!(Debug, "restore", "Служба восстановления подтверждена после ошибки USB при bootx; продолжение");
             }
             Ok(service)
         }
@@ -50,7 +54,7 @@ pub(super) fn confirm_restore_service<T>(
 }
 
 pub(super) fn wait_restored(device: &DeviceInfo) -> Result<(Session, MuxStream, u64)> {
-    eprintln!("Waiting for the restore service");
+    crate::log!(Info, "restore", "Ожидание службы восстановления Mac");
     let deadline = Instant::now() + Duration::from_secs(180);
     let mut last_error = None;
     let mut reported_error = None;
@@ -92,7 +96,11 @@ pub(super) fn wait_restored(device: &DeviceInfo) -> Result<(Session, MuxStream, 
                 Err(error) => {
                     let message = format!("{error:#}");
                     if reported_error.as_ref() != Some(&message) {
-                        eprintln!("Restore service connection pending: {message}");
+                        crate::log!(
+                            Debug,
+                            "restore",
+                            "Подключение к службе восстановления: {message}"
+                        );
                         reported_error = Some(message);
                     }
                     last_error = Some(error);

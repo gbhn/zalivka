@@ -2,26 +2,79 @@
 use crate::wire;
 use anyhow::{Context, Result, ensure};
 use plist::Value;
+use sha2::{Digest, Sha256};
 use std::{collections::HashSet, io::Cursor, ops::Range};
 
-/// Baobab's plist bundle contains a firmware digest rather than a hash of the
-/// serialized container. Matching metadata is not payload digest verification.
-pub fn tcon_metadata_matches(bytes: &[u8], digest: &[u8]) -> Result<bool> {
+/// Baobab's manifest digest identifies firmware inside a plist bundle. Verify
+/// the actual firmware and its panel configurations, not just their metadata.
+pub fn verify_tcon_digest(bytes: &[u8], digest: &[u8]) -> Result<()> {
+    ensure!(
+        bytes.len() <= 32 * 1024 * 1024,
+        "TCON metadata bundle exceeds 32 MiB"
+    );
     let value = Value::from_reader(Cursor::new(bytes)).context("reading TCON plist bundle")?;
-    for version in wire::dictionary(&value)?.values() {
+    let mut matched = false;
+    for (version_name, version) in wire::dictionary(&value)? {
         if wire::get(version, &["firmware", "Digest"])
             .ok()
             .and_then(Value::as_data)
-            == Some(digest)
-            && wire::get(version, &["firmware", "Payload"])
-                .ok()
-                .and_then(Value::as_data)
-                .is_some_and(|d| !d.is_empty())
+            != Some(digest)
         {
-            return Ok(true);
+            continue;
         }
+        verify_tcon_payload(wire::get(version, &["firmware"])?, true)
+            .with_context(|| format!("TCON {version_name} firmware digest mismatch"))?;
+        if let Some(panels) = wire::dictionary(version)?.get("device_id") {
+            for (panel, components) in wire::dictionary(panels)? {
+                for (name, component) in wire::dictionary(components)? {
+                    verify_tcon_payload(component, false).with_context(|| {
+                        format!("TCON {version_name}/{panel}/{name} digest mismatch")
+                    })?;
+                }
+            }
+        }
+        matched = true;
     }
-    Ok(false)
+    ensure!(matched, "TCON firmware digest does not match manifest");
+    Ok(())
+}
+
+fn verify_tcon_payload(component: &Value, firmware: bool) -> Result<()> {
+    let payload = wire::get(component, &["Payload"])?
+        .as_data()
+        .context("invalid TCON Payload")?;
+    let digest = wire::get(component, &["Digest"])?
+        .as_data()
+        .context("invalid TCON Digest")?;
+    ensure!(
+        !payload.is_empty() && digest.len() == 32,
+        "invalid TCON payload or SHA-256 digest"
+    );
+    if Sha256::digest(payload).as_slice() == digest {
+        return Ok(());
+    }
+    // DP855's 60 KiB flash image stores big-endian code/data lengths in its
+    // first eight bytes. The digest covers that header, code at 0x1000 and
+    // data at 0x9000, excluding flash padding. Checked against every DP855
+    // bundle in 26A434 (17 products, including X1769 for j313ap).
+    if firmware && payload.len() == 0xf000 {
+        let code_len = u32::from_be_bytes(payload[..4].try_into()?) as usize;
+        let data_len = u32::from_be_bytes(payload[4..8].try_into()?) as usize;
+        ensure!(
+            code_len > 0 && code_len <= 0x8000 && data_len > 0 && data_len <= 0x6000,
+            "invalid TCON DP855 code/data lengths"
+        );
+        let mut hash = Sha256::new();
+        hash.update(&payload[..8]);
+        hash.update(&payload[0x1000..0x1000 + code_len]);
+        hash.update(&payload[0x9000..0x9000 + data_len]);
+        ensure!(
+            hash.finalize().as_slice() == digest,
+            "TCON DP855 digest mismatch"
+        );
+        return Ok(());
+    }
+    anyhow::bail!("TCON payload digest mismatch")
 }
 
 pub(super) struct FtabEntry {

@@ -96,7 +96,7 @@ pub(super) fn key_exchange(
         let asynchronous =
             wire::string(&request, &["MsgType"]).is_ok_and(|kind| kind == "AsyncDataRequestMsg");
         let port = data_type.data_port(&request, asynchronous)?;
-        eprintln!("AEA requests {name}, DataPort={port}");
+        crate::log!(Debug, "aea", "Запрос ключа AEA: {name}, DataPort={port}");
         let response = reply(&request)?;
         if port != 0 {
             let mut service = session.connect_retry(port, Duration::from_secs(60))?;

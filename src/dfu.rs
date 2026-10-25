@@ -204,8 +204,12 @@ pub fn getenv(usb: &mut impl RecoveryTransport, name: &str) -> Result<String> {
 /// Its USB completion alone cannot confirm that the restore service has booted.
 pub fn boot_kernel(usb: &mut impl RecoveryTransport) -> Result<()> {
     if let Err(error) = usb.control_out(0x21, 1, 0, 0, &[]) {
-        eprintln!("Kernel transfer notification reported an error: {error:#}; sending bootx");
+        crate::log!(
+            Debug,
+            "boot",
+            "Ошибка уведомления о передаче ядра: {error:#}; отправка bootx"
+        );
     }
-    eprintln!("Executing iBoot bootx");
+    crate::log!(Debug, "boot", "Запуск ядра командой bootx");
     command(usb, "bootx", true)
 }

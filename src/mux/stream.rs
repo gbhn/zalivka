@@ -250,21 +250,27 @@ impl Drop for MuxStream {
         }
         if self.profile.bytes >= 1024 * 1024 || self.profile.errors != 0 {
             let p = &self.profile;
-            eprintln!(
-                "ZALIVKA_MUX_PROFILE {}",
-                serde_json::json!({
-                    "source_port": self.source, "destination_port": self.destination,
-                    "bytes": p.bytes, "write_calls": p.calls, "write_errors": p.errors,
-                    "write_seconds": p.elapsed.as_secs_f64(),
-                    "lock_wait_seconds": p.lock_wait.as_secs_f64(),
-                    "usb_out_seconds": p.usb_out.as_secs_f64(),
-                    "packet_prepare_seconds": p.packet_prepare.as_secs_f64(),
-                    "input_poll_seconds": p.input_poll.as_secs_f64(),
-                    "window_wait_seconds": p.window_wait.as_secs_f64(),
-                    "window_stalls": p.window_stalls, "empty_window_polls": p.empty_window_polls,
-                    "input_event_waits": p.event_waits, "input_event_wakeups": p.event_wakeups,
-                    "data_packets": p.packets, "short_data_packets": p.short_packets,
-                })
+            crate::log!(
+                Debug,
+                "usbmux",
+                "Профиль {} -> {}: bytes={}, calls={}, errors={}, elapsed={:.3}s, lock={:.3}s, usb={:.3}s, prepare={:.3}s, poll={:.3}s, window_wait={:.3}s, stalls={}, empty_polls={}, event_waits={}, wakeups={}, packets={}, short_packets={}",
+                self.source,
+                self.destination,
+                p.bytes,
+                p.calls,
+                p.errors,
+                p.elapsed.as_secs_f64(),
+                p.lock_wait.as_secs_f64(),
+                p.usb_out.as_secs_f64(),
+                p.packet_prepare.as_secs_f64(),
+                p.input_poll.as_secs_f64(),
+                p.window_wait.as_secs_f64(),
+                p.window_stalls,
+                p.empty_window_polls,
+                p.event_waits,
+                p.event_wakeups,
+                p.packets,
+                p.short_packets
             );
         }
     }

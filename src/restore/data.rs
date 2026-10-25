@@ -21,17 +21,21 @@ impl ContextState {
     ) -> Result<()> {
         let kind = wire::data_type(message)?;
         let data_type = DataType::parse(kind)?;
-        eprintln!("restored requests {kind}");
-        for key in [
+        let arguments = [
             "ImageName",
             "ImageType",
             "UpdaterName",
             "MessageArgUpdaterName",
-        ] {
-            if let Ok(value) = wire::string(message, &["Arguments", key]) {
-                eprintln!("  {key}: {value}");
-            }
-        }
+        ]
+        .into_iter()
+        .filter_map(|key| {
+            wire::string(message, &["Arguments", key])
+                .ok()
+                .map(|value| format!("{key}={value}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+        crate::log!(Debug, "restored", "Запрос {kind}: {arguments}");
         let port = data_type.data_port(message, false)?;
         if port != 0 {
             let mut service = session.connect_retry(port, Duration::from_secs(60))?;
@@ -176,7 +180,7 @@ impl ContextState {
             }
         };
         wire::send(out, &response).with_context(|| format!("sending restored response {kind}"))?;
-        eprintln!("restored response sent: {kind}");
+        crate::log!(Debug, "restored", "Ответ на запрос {kind} отправлен");
         Ok(())
     }
 

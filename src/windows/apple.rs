@@ -166,7 +166,9 @@ impl PendingRead {
                 // just as the nusb backend handles TransferError::Cancelled.
                 // BulkInput rearms it; Session still enforces explicit cancel,
                 // read deadlines, framing errors and final restore status.
-                eprintln!(
+                crate::log!(
+                    Debug,
+                    "usb",
                     "Apple USB IN request aborted (995); resuming reads on the same connection"
                 );
             }

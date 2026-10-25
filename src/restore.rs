@@ -1,4 +1,5 @@
 //! Firmware preparation and shared context for the restore service.
+mod attestation;
 mod boot;
 mod connection;
 mod data;
@@ -71,6 +72,7 @@ pub fn run(
     let usb = RecoveryUsb::open(ecid)?;
     ensure!(usb.info.mode == Mode::Dfu, "enter DFU before restoring");
     usb.check_reset_access()?;
+    crate::log!(Info, "ipsw", "Подготовка прошивки: {}", path.display());
     let mut ipsw = Ipsw::open(path)?;
     let identity = ipsw.select_behavior(&usb.info, identity_index, behavior)?;
     ipsw.preflight(&identity)?;
@@ -78,12 +80,17 @@ pub fn run(
     if let Some(id) = &recovery {
         ipsw.preflight_recovery(id)?;
     }
-    eprintln!(
-        "Personalizing {} for ECID {ecid:016x}",
+    crate::log!(
+        Info,
+        "restore",
+        "Получение подписей Apple для {}, ECID {ecid:016x}",
         wire::string(&identity.value, &["Info", "DeviceClass"])?
     );
     let ticket = tss::send(&tss::request(&usb.info, &identity)?)
         .context("personalizing restore firmware")?;
+    // BAA measures the manifest used to boot iBSS. A later nonce change can
+    // replace the restore ticket, so retain the bootstrap measurement now.
+    let attestation = attestation::Attestation::new(&identity, &usb.info, &ticket)?;
     // Validate personalization metadata before sending the first byte of firmware.
     for name in identity.manifest()?.keys() {
         img4::restore_info(&ticket, name, &identity.value)?;
@@ -108,7 +115,7 @@ pub fn run(
         let ticket = tss::send(&request).context("personalizing RecoveryOS root ticket")?;
         state.recovery = Some(SignedIdentity { identity, ticket });
     }
-    session::run(&mut state, bootx_error, log)
+    session::run(&mut state, bootx_error, log, attestation)
 }
 
 #[cfg(test)]

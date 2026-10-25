@@ -72,8 +72,10 @@ fn retry_download(error: &anyhow::Error, attempts: &mut u8, maximum: u8) -> bool
     }
     let delay = 1u64 << *attempts;
     *attempts += 1;
-    eprintln!(
-        "Download interrupted: {error:#}. Retrying in {delay}s; partial file and rolling checksum retained."
+    crate::log!(
+        Warning,
+        "download",
+        "Загрузка прервана: {error:#}. Повтор через {delay} с; загруженные данные сохранены"
     );
     std::thread::sleep(Duration::from_secs(delay));
     true
@@ -130,7 +132,12 @@ pub(super) fn download_from(
     // A crash can leave the whole verified file under its temporary name.
     if !download.verified() {
         if download.total > 0 {
-            eprintln!("Resuming firmware from {} MiB", download.total / 1048576);
+            crate::log!(
+                Info,
+                "download",
+                "Продолжение загрузки с {} МиБ",
+                download.total / 1048576
+            );
         }
         let mut attempts = 0;
         loop {

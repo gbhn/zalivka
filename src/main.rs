@@ -3,10 +3,11 @@ mod cli;
 mod gui;
 
 fn main() -> std::process::ExitCode {
+    zalivka::logging::init(false);
     match cli::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("Error: {e:#}");
+            zalivka::log!(Error, "app", "{e:#}");
             std::process::ExitCode::FAILURE
         }
     }

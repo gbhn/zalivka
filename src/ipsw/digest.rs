@@ -57,22 +57,19 @@ impl DigestInput {
 }
 
 /// Use only the inputs belonging to this component, for both streaming and RAM reads.
-/// false means that only TCON metadata matched; its payload digest remains unchecked.
 pub(super) fn verify_component_digest(
     inputs: impl IntoIterator<Item = DigestInput>,
     expected: &[u8],
     mut matches: impl FnMut(DigestInput) -> Result<bool>,
     tcon: Option<&[u8]>,
-) -> Result<bool> {
+) -> Result<()> {
     for input in inputs {
         if matches(input)? {
-            return Ok(true);
+            return Ok(());
         }
     }
-    if let Some(bytes) = tcon
-        && firmware::tcon_metadata_matches(bytes, expected)?
-    {
-        return Ok(false);
+    if let Some(bytes) = tcon {
+        return firmware::verify_tcon_digest(bytes, expected);
     }
     bail!("digest verification failed")
 }
