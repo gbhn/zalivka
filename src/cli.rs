@@ -12,7 +12,7 @@ use zalivka::{
 
 #[derive(Parser)]
 #[command(
-    version,
+    version = zalivka::VERSION,
     about = "Native Rust Mac DFU tools (experimental restore engine)"
 )]
 struct Cli {
@@ -106,7 +106,7 @@ enum Command {
         #[arg(long)]
         firmware_dir: Option<PathBuf>,
     },
-    /// Experimental erase restore. Requires device testing; see README limitations.
+    /// Experimental erase restore. See README.md and docs/validation.md for tested scenarios.
     Restore {
         #[command(flatten)]
         args: RestoreArgs,
@@ -509,7 +509,9 @@ pub(super) fn run() -> Result<()> {
                     "ecid": ecid.map(|n| format!("{n:016x}")), "hardware_checked": ecid.is_some(),
                     "identity": summary, "filesystem_bytes": ipsw.size(identity.path("OS")?)?,
                     "boot_components_verified": true, "hardware_restore_validated": false,
-                    "limitations": ["no physical Mac restore has been validated", "firmware updaters require explicit device requests or an unambiguous namespace with a verified plist payload bundle", "reconnection requires restored to continue and issue fresh data requests; no byte-offset replay"],
+                    "validation_scope": "this plan checks boot components; it does not perform a hardware restore",
+                    "hardware_validation_report": "docs/validation.md",
+                    "limitations": ["firmware updaters require explicit device requests or an unambiguous namespace with a verified plist payload bundle", "reconnection requires restored to continue and issue fresh data requests; no byte-offset replay"],
                     "iboot_firmware_stages": stages,
                     "runtime_operations_known": false
             }))?;

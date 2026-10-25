@@ -189,7 +189,7 @@ impl eframe::App for App {
                         },
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        caption(ui, format!("Zalivka {}", env!("CARGO_PKG_VERSION")));
+                        caption(ui, format!("Zalivka {}", zalivka::VERSION));
                     });
                 });
             });

@@ -233,6 +233,27 @@ fn wrong_ecid_ticket_boot_tag_security_domain_and_local_boot_measurements_fail()
     }
 }
 
+#[test]
+fn attested_modes_must_match_both_actual_fuse_bits_without_defaults() {
+    let original = device_identifiers(SYNTHETIC_LEAF).unwrap();
+    for fuse in 0..4 {
+        let mut proof = attestation(6);
+        proof.device.chip_fuse_mode = Some(fuse);
+        for reported in 0..4 {
+            let identity = format!("8103-123456789abcd-{:x}-a0000000", 1 | (reported << 2));
+            let mut properties = original.clone();
+            properties.insert(2, identity.as_bytes());
+            assert_eq!(
+                proof.verify_identifiers(&properties).is_ok(),
+                fuse == reported
+            );
+        }
+    }
+    let mut proof = attestation(6);
+    proof.device.chip_fuse_mode = None;
+    assert!(format!("{:#}", proof.verify_identifiers(&original).unwrap_err()).contains("CPFM"));
+}
+
 fn property(tag: u32, encoded: &[u8]) -> Vec<u8> {
     let header = Header::new(
         Class::ContextSpecific,

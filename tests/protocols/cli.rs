@@ -31,7 +31,31 @@ fn cli_inspection_and_offline_plan_run_without_usb() {
     assert_eq!(output["hardware_checked"], false);
     assert_eq!(output["boot_components_verified"], true);
     assert_eq!(output["runtime_operations_known"], false);
+    assert_eq!(output["hardware_restore_validated"], false);
+    assert_eq!(output["hardware_validation_report"], "docs/validation.md");
+    assert!(
+        !output["limitations"]
+            .to_string()
+            .contains("no physical Mac restore")
+    );
     assert!(output.get("stages").is_none());
+}
+
+#[test]
+fn executable_version_identifies_the_exact_build() {
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap().trim(),
+        format!("zalivka {}", zalivka::VERSION)
+    );
+    assert!(zalivka::VERSION.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")));
+    let fingerprint = zalivka::VERSION.rsplit('.').next().unwrap();
+    assert_eq!(fingerprint.len(), 12);
+    assert!(fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()));
 }
 
 #[test]

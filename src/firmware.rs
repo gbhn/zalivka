@@ -19,20 +19,18 @@ pub struct Update {
 impl Update {
     pub fn finish(self, mut response: Value) -> Result<Value> {
         for tag in &self.response_tags {
-            wire::get(&response, &[tag])
+            let value = wire::get(&response, &[tag])
                 .with_context(|| format!("Apple returned no requested firmware tag {tag}"))?;
+            if tag != "FirmwareData"
+                && wire::optional_boolean(&self.request, &[&format!("@{tag}")])? == Some(true)
+            {
+                anyhow::ensure!(
+                    value.as_data().is_some_and(|data| !data.is_empty()),
+                    "Apple returned an invalid or empty firmware ticket {tag}"
+                );
+            }
         }
         if let Some(payload) = self.payload {
-            let ticket = self
-                .response_tags
-                .first()
-                .context("missing namespace ticket tag")?;
-            anyhow::ensure!(
-                wire::get(&response, &[ticket])?
-                    .as_data()
-                    .is_some_and(|data| !data.is_empty()),
-                "Apple returned an invalid namespace ticket"
-            );
             let fields = response
                 .as_dictionary_mut()
                 .context("invalid updater response")?;
@@ -58,18 +56,7 @@ pub fn prepare(
         && wire::optional(arguments, &["DeviceGeneratedTags"])?.is_none()
     {
         let inferred = request::namespace_request(id, arguments)?;
-        let digest = wire::get(&id.value, &["Manifest", &inferred.component, "Digest"])?
-            .as_data()
-            .context("invalid bundle Digest")?;
-        anyhow::ensure!(
-            [20, 32, 48].contains(&digest.len()),
-            "namespace updater requires a nonempty supported manifest Digest"
-        );
-        let payload = ipsw.component(id, &inferred.component)?;
-        anyhow::ensure!(
-            verify_plist_bundle(&payload, digest)?.payloads > 0,
-            "namespace updater requires a verified plist payload bundle; payload layout is not described"
-        );
+        let payload = ipsw.plist_component(id, &inferred.component)?;
         return Ok(Update {
             request: inferred.request,
             response_tags: vec![inferred.ticket],

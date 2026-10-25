@@ -176,10 +176,13 @@ impl Attestation {
             security <= 255 && Some((security & 3) as u32) == self.device.security_domain,
             "attestation security domain mismatch"
         );
-        // Restore TSS requests require ApProductionMode and ApSecurityMode.
+        let fuse = self
+            .device
+            .chip_fuse_mode
+            .context("attestation requires device CPFM")?;
         ensure!(
-            security & 12 == 12,
-            "attestation is not in production security mode"
+            security & 12 == u64::from(fuse & 3) << 2,
+            "attestation production/security mode mismatch"
         );
         ensure!(
             required(1002)? == self.ticket_digest,

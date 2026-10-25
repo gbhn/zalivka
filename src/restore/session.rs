@@ -119,10 +119,6 @@ pub(super) fn log_progress(
         },
     ));
     Ok(crate::progress::Event::OperationProgress {
-        async_context: wire::string(message, &["AsyncContextUUID"])
-            .ok()
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned),
         operation,
         progress,
     })
@@ -147,46 +143,6 @@ pub(super) fn operation_weights(message: &Value) -> Option<Vec<(u64, u64)>> {
         .values()
         .any(|weight| *weight > 0)
         .then(|| operations.into_iter().collect())
-}
-
-#[derive(Default)]
-pub(super) struct ProgressOperations {
-    contexts: BTreeMap<String, u64>,
-}
-
-impl ProgressOperations {
-    pub(super) fn observe(&mut self, message: &Value, event: &crate::progress::Event) {
-        use crate::progress::Event;
-        if let Event::OperationProgress {
-            operation,
-            progress,
-            ..
-        } = event
-            && let Ok(context) = wire::string(message, &["AsyncContextUUID"])
-            && !context.is_empty()
-        {
-            if *progress < 100 {
-                self.contexts.insert(context.into(), *operation);
-            } else {
-                self.contexts.remove(context);
-            }
-        }
-    }
-
-    pub(super) fn for_request(&self, message: &Value) -> Option<u64> {
-        if let Ok(operation) = wire::get(message, &["Operation"]) {
-            return wire::number(operation).ok();
-        }
-        if let Ok(context) = wire::get(message, &["AsyncContextUUID"]) {
-            // An explicit context must never inherit a different foreground job
-            // or a legacy operation ID inferred from the requested data type.
-            return context
-                .as_string()
-                .and_then(|context| self.contexts.get(context))
-                .copied();
-        }
-        None
-    }
 }
 
 pub(super) fn log_checkpoint(
@@ -245,7 +201,6 @@ pub(super) fn run(
     let mut started = false;
     let mut final_received = false;
     let mut protocol = None;
-    let mut progress_operations = ProgressOperations::default();
     for attempt in 0..=3 {
         let (session, mut main, version) =
             confirm_restore_service(bootx_error.take(), || wait_restored(&state.device))?;
@@ -286,22 +241,8 @@ pub(super) fn run(
                     log.flush()?;
                 }
                 match wire::string(&message, &["MsgType"])? {
-                    "DataRequestMsg" => crate::progress::with_operation(
-                        progress_operations.for_request(&message),
-                        wire::string(&message, &["AsyncContextUUID"])
-                            .ok()
-                            .filter(|value| !value.is_empty())
-                            .map(str::to_owned),
-                        || state.serve(&session, &mut main, &message),
-                    )?,
-                    "AsyncDataRequestMsg" => crate::progress::with_operation(
-                        progress_operations.for_request(&message),
-                        wire::string(&message, &["AsyncContextUUID"])
-                            .ok()
-                            .filter(|value| !value.is_empty())
-                            .map(str::to_owned),
-                        || requests.spawn(state, message),
-                    )?,
+                    "DataRequestMsg" => state.serve(&session, &mut main, &message)?,
+                    "AsyncDataRequestMsg" => requests.spawn(state, message)?,
                     "StatusMsg" => {
                         final_received = true;
                         fdr.stop();
@@ -332,12 +273,10 @@ pub(super) fn run(
                             crate::progress::Event::OperationWeights { weights }.emit();
                         }
                         let event = log_progress(&message, crate::logging::publish)?;
-                        progress_operations.observe(&message, &event);
                         event.emit();
                     }
                     "CheckpointMsg" => {
                         let event = log_checkpoint(&message, crate::logging::publish)?;
-                        progress_operations.observe(&message, &event);
                         event.emit();
                     }
                     "AsyncWait" => {}

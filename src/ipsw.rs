@@ -110,20 +110,50 @@ impl Ipsw {
     }
 
     pub fn read(&mut self, path: &str) -> Result<Vec<u8>> {
+        self.read_limited(path, MAX_COMPONENT)
+    }
+
+    fn read_limited(&mut self, path: &str, limit: u64) -> Result<Vec<u8>> {
         validate_path(path)?;
         let entry = self
             .archive
             .by_name(path)
             .with_context(|| format!("missing IPSW component {path}"))?;
         ensure!(
-            entry.size() <= MAX_COMPONENT,
-            "IPSW entry exceeds memory limit {MAX_COMPONENT}"
+            entry.size() <= limit,
+            "IPSW entry exceeds memory limit {limit}"
         );
         crate::storage::read_limited(
             entry,
-            MAX_COMPONENT,
-            &format!("IPSW entry exceeds memory limit {MAX_COMPONENT}"),
+            limit,
+            &format!("IPSW entry exceeds memory limit {limit}"),
         )
+    }
+
+    /// Read and verify a namespace bundle once, with its limit checked before allocation.
+    pub(crate) fn plist_component(&mut self, id: &Identity, name: &str) -> Result<Vec<u8>> {
+        let entry = wire::get(&id.value, &["Manifest", name])?;
+        id.payload_type(name)?;
+        wire::optional_boolean(entry, &["Trusted"])?;
+        let expected = wire::get(entry, &["Digest"])?
+            .as_data()
+            .context("invalid bundle Digest")?;
+        ensure!(
+            [20, 32, 48].contains(&expected.len()),
+            "namespace updater requires a nonempty supported manifest Digest"
+        );
+        let data = self.read_limited(id.path(name)?, crate::firmware::MAX_PLIST_BUNDLE)?;
+        let report = crate::firmware::verify_plist_bundle(&data, expected)
+            .with_context(|| format!("checking component {name} payload bundle"))?;
+        ensure!(
+            report.payloads > 0,
+            "namespace updater requires a verified plist payload bundle; payload layout is not described"
+        );
+        ensure!(
+            report.manifest_digest || verify_digest(&data, expected).is_ok(),
+            "component {name} digest mismatch"
+        );
+        Ok(data)
     }
 
     pub fn component(&mut self, id: &Identity, name: &str) -> Result<Vec<u8>> {

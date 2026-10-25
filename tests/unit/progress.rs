@@ -35,32 +35,17 @@ fn dropped_streams_emit_one_terminal_event_without_claiming_all_bytes_were_sent(
 }
 
 #[test]
-fn transfer_identity_and_operation_are_stable_and_isolated_between_workers() {
-    let (first, second) = with_operation(Some(59), Some("first-context".into()), || {
+fn transfer_identity_is_stable_and_unique_between_workers() {
+    let progress = Progress::new("same component", Some(100), 0);
+    let first = progress.update(progress.started, false);
+    let second = std::thread::spawn(|| {
         let progress = Progress::new("same component", Some(100), 0);
-        let first = progress.update(progress.started, false);
-        let second = std::thread::spawn(|| {
-            assert_eq!(current_operation(), None);
-            assert_eq!(current_async_context(), None);
-            with_operation(Some(80), Some("second-context".into()), || {
-                let progress = Progress::new("same component", Some(100), 0);
-                progress.update(progress.started, false)
-            })
-        })
-        .join()
-        .unwrap();
-        assert_eq!(current_operation(), Some(59));
-        assert_eq!(current_async_context().as_deref(), Some("first-context"));
-        assert_eq!(first.id, progress.update(progress.started, true).id);
-        (first, second)
-    });
-    assert_eq!(current_operation(), None);
-    assert_eq!(current_async_context(), None);
+        progress.update(progress.started, false)
+    })
+    .join()
+    .unwrap();
     assert_ne!(first.id, second.id);
-    assert_eq!(first.operation, Some(59));
-    assert_eq!(second.operation, Some(80));
-    assert_eq!(first.async_context.as_deref(), Some("first-context"));
-    assert_eq!(second.async_context.as_deref(), Some("second-context"));
+    assert_eq!(first.id, progress.update(progress.started, true).id);
     let mut encoded = Vec::new();
     Event::Transfer(first.clone())
         .write_to(&mut encoded)
@@ -69,14 +54,6 @@ fn transfer_identity_and_operation_are_stable_and_isolated_between_workers() {
         Event::parse(std::str::from_utf8(&encoded).unwrap()),
         Some(Event::Transfer(first))
     );
-    let result = std::panic::catch_unwind(|| {
-        with_operation(Some(13), Some("failed-context".into()), || {
-            panic!("failed request")
-        })
-    });
-    assert!(result.is_err());
-    assert_eq!(current_operation(), None);
-    assert_eq!(current_async_context(), None);
 }
 
 #[test]
@@ -106,8 +83,8 @@ fn samples_measure_new_bytes_and_keep_resumed_offsets_out_of_the_rate() {
 #[test]
 fn malformed_progress_cannot_supply_a_fake_percentage() {
     for json in [
-        r#"{"id":1,"operation":null,"stage":"x","completed":20,"total":10,"bytes_per_second":1,"elapsed_seconds":1,"finished":false}"#,
-        r#"{"id":1,"operation":null,"stage":"x","completed":0,"total":10,"bytes_per_second":-1,"elapsed_seconds":1,"finished":false}"#,
+        r#"{"id":1,"stage":"x","completed":20,"total":10,"bytes_per_second":1,"elapsed_seconds":1,"finished":false}"#,
+        r#"{"id":1,"stage":"x","completed":0,"total":10,"bytes_per_second":-1,"elapsed_seconds":1,"finished":false}"#,
     ] {
         let json = json.replacen('{', r#"{"event":"transfer","#, 1);
         assert!(Event::parse(&format!("{EVENT_PREFIX}{json}")).is_none());

@@ -12,23 +12,6 @@ use anyhow::{Context, Result, ensure};
 use plist::{Dictionary, Value};
 use std::time::Duration;
 
-pub(super) fn request_name(message: &Value) -> Result<String> {
-    let kind = wire::data_type(message)?;
-    let detail = [
-        "ImageName",
-        "MessageArgUpdaterName",
-        "UpdaterName",
-        "ImageType",
-    ]
-    .into_iter()
-    .find_map(|key| {
-        wire::string(message, &["Arguments", key])
-            .ok()
-            .filter(|name| !name.is_empty())
-    });
-    Ok(detail.unwrap_or(kind).into())
-}
-
 impl ContextState {
     pub fn serve(
         &mut self,
@@ -70,13 +53,6 @@ impl ContextState {
         data_type: DataType,
     ) -> Result<()> {
         let kind = wire::data_type(message)?;
-        if let Some(operation) = crate::progress::current_operation() {
-            crate::progress::Event::OperationName {
-                operation,
-                name: request_name(message)?,
-            }
-            .emit();
-        }
         // Resolve firmware identity only for handlers that consume it. Network,
         // preflight and optional RecoveryOS probes do not depend on an identity.
         let restore = &self.restore.identity;

@@ -24,6 +24,9 @@ pub mod usb_internet;
 mod windows;
 pub mod wire;
 
+/// Package version, source revision and fingerprint of this exact build.
+pub const VERSION: &str = env!("ZALIVKA_VERSION");
+
 #[cfg(test)]
 #[path = "../tests/support/mux.rs"]
 mod test_mux;

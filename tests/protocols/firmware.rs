@@ -282,6 +282,35 @@ fn complete_device_requests_do_not_depend_on_controller_names_or_unused_info() {
 }
 
 #[test]
+fn requested_tickets_require_nonempty_data_and_structured_firmware_is_preserved() {
+    let file = fixture(None, false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let args = modern_updater_args("UnlistedUpdater");
+    for invalid in [
+        Value::Data(vec![]),
+        true.into(),
+        "invalid".into(),
+        wire::dict([("unexpected", true.into())]),
+    ] {
+        let update =
+            zalivka::firmware::prepare(&mut ipsw, &identity(), &device_info(), &args).unwrap();
+        let error = update
+            .finish(wire::dict([("Controller,Ticket", invalid)]))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("Controller,Ticket"));
+    }
+    let response = wire::dict([
+        ("Controller,Ticket", Value::Data(vec![42])),
+        (
+            "FirmwareData",
+            wire::dict([("FuturePayload", Value::Data(vec![1]))]),
+        ),
+    ]);
+    let update = zalivka::firmware::prepare(&mut ipsw, &identity(), &device_info(), &args).unwrap();
+    assert_eq!(update.finish(response.clone()).unwrap(), response);
+}
+
+#[test]
 fn ftab_roundtrip_preserves_entries_and_rejects_bad_offsets() {
     use zalivka::firmware::Ftab;
     let mut header = [0; 48];
@@ -1042,6 +1071,39 @@ fn namespace_payloads_require_a_valid_ticket_and_verified_bundle() {
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(ipsw.component(&id, "New,ArbitraryComponent").is_ok());
     assert!(zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).is_err());
+}
+
+#[test]
+fn namespace_bundle_limit_is_checked_before_reading_and_raw_manifest_hashes_are_supported() {
+    let (mut id, args, bundle) = namespace_bundle("New");
+    manifest_mut(&mut id)
+        .get_mut("New,ArbitraryComponent")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .insert(
+            "Digest".into(),
+            Value::Data(sha2::Sha256::digest(&bundle).to_vec()),
+        );
+    let file = fixture_files(
+        Some(id.clone()),
+        false,
+        &[("arbitrary/path.plist", &bundle)],
+    );
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    assert!(zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).is_ok());
+    let oversized = vec![0; 32 * 1024 * 1024 + 1];
+    let file = fixture_compression(
+        Some(id.clone()),
+        false,
+        &[("arbitrary/path.plist", &oversized)],
+        zip::CompressionMethod::Deflated,
+    );
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let error = zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args)
+        .err()
+        .unwrap();
+    assert!(format!("{error:#}").contains("exceeds memory limit"));
 }
 
 fn centauri_table(entries: Vec<([u8; 4], Vec<u8>, u32)>) -> Vec<u8> {

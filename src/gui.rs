@@ -267,7 +267,7 @@ impl App {
                     format!(
                         "Начало: {}; Zalivka {}{}",
                         action.title(),
-                        env!("CARGO_PKG_VERSION"),
+                        zalivka::VERSION,
                         if self.setup.ecid.is_empty() {
                             String::new()
                         } else {

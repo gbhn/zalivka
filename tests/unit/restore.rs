@@ -3,8 +3,8 @@ use super::connection::confirm_restore_service;
 use super::file_data::{FILE_DATA_BATCH, FileDataWriter, send_file_data};
 use super::keys::{ImagePrefix, key_exchange};
 use super::session::{
-    ProgressOperations, acknowledge_final_status, finish_final_status, log_checkpoint,
-    log_progress, operation_weights, wait_for_restore_close,
+    acknowledge_final_status, finish_final_status, log_checkpoint, log_progress, operation_weights,
+    wait_for_restore_close,
 };
 use super::*;
 use crate::mux::Session;
@@ -355,7 +355,6 @@ fn signed_progress_survives_xml_and_binary_plist_framing() {
             assert_eq!(
                 event,
                 crate::progress::Event::OperationProgress {
-                    async_context: None,
                     operation: 28,
                     progress
                 }
@@ -384,168 +383,6 @@ fn malformed_progress_reports_the_field_without_inventing_a_percentage() {
             assert!(format!("{error:#}").contains(key), "{error:#}");
             assert!(output.is_empty());
         }
-    }
-}
-
-#[test]
-fn requests_never_infer_operation_ids_from_data_types_or_previous_foreground_progress() {
-    let mut operations = ProgressOperations::default();
-    let progress = wire::dict([("Operation", 999u64.into()), ("Progress", 0i64.into())]);
-    operations.observe(&progress, &log_progress(&progress, |_| {}).unwrap());
-    for kind in [
-        "SystemImageData",
-        "RecoveryOSASRImage",
-        "RecoveryOSImage",
-        "SourceBootObjectV4",
-        "URLAsset",
-    ] {
-        for message_type in ["DataRequestMsg", "AsyncDataRequestMsg"] {
-            assert_eq!(
-                operations.for_request(&wire::dict([
-                    ("MsgType", message_type.into()),
-                    ("DataType", kind.into())
-                ])),
-                None
-            );
-        }
-    }
-}
-
-#[test]
-fn request_operation_metadata_overrides_legacy_ids_and_foreground_progress() {
-    let mut operations = ProgressOperations::default();
-    for (operation, context) in [
-        (1001u64, None),
-        (1002, Some("image")),
-        (1003, Some("firmware")),
-    ] {
-        let mut message = wire::dict([("Operation", operation.into()), ("Progress", 20i64.into())]);
-        if let Some(context) = context {
-            message
-                .as_dictionary_mut()
-                .unwrap()
-                .insert("AsyncContextUUID".into(), context.into());
-        }
-        operations.observe(&message, &log_progress(&message, |_| {}).unwrap());
-    }
-    for kind in ["SystemImageData", "RecoveryOSImage", "SourceBootObjectV4"] {
-        for asynchronous in [false, true] {
-            let mut request = wire::dict([
-                (
-                    "MsgType",
-                    if asynchronous {
-                        "AsyncDataRequestMsg"
-                    } else {
-                        "DataRequestMsg"
-                    }
-                    .into(),
-                ),
-                ("DataType", kind.into()),
-                ("AsyncContextUUID", "image".into()),
-            ]);
-            assert_eq!(operations.for_request(&request), Some(1002));
-            request
-                .as_dictionary_mut()
-                .unwrap()
-                .insert("AsyncContextUUID".into(), "firmware".into());
-            assert_eq!(operations.for_request(&request), Some(1003));
-            request
-                .as_dictionary_mut()
-                .unwrap()
-                .insert("AsyncContextUUID".into(), "unknown".into());
-            assert_eq!(operations.for_request(&request), None);
-            request
-                .as_dictionary_mut()
-                .unwrap()
-                .insert("Operation".into(), 1004u64.into());
-            assert_eq!(operations.for_request(&request), Some(1004));
-            for malformed in ["".into(), Value::Boolean(true), (-1i64).into()] {
-                request.as_dictionary_mut().unwrap().remove("Operation");
-                request
-                    .as_dictionary_mut()
-                    .unwrap()
-                    .insert("AsyncContextUUID".into(), malformed.clone());
-                assert_eq!(operations.for_request(&request), None);
-                request
-                    .as_dictionary_mut()
-                    .unwrap()
-                    .insert("AsyncContextUUID".into(), "firmware".into());
-                request
-                    .as_dictionary_mut()
-                    .unwrap()
-                    .insert("Operation".into(), malformed);
-                assert_eq!(operations.for_request(&request), None);
-            }
-        }
-    }
-    let complete = wire::dict([
-        ("Operation", 1002u64.into()),
-        ("Progress", 100i64.into()),
-        ("AsyncContextUUID", "image".into()),
-    ]);
-    operations.observe(&complete, &log_progress(&complete, |_| {}).unwrap());
-    let image = wire::dict([
-        ("Operation", 13u64.into()),
-        ("Progress", 50i64.into()),
-        ("AsyncContextUUID", "checkpoint-image".into()),
-    ]);
-    operations.observe(&image, &log_progress(&image, |_| {}).unwrap());
-    operations.observe(
-        &wire::dict([] as [(&str, Value); 0]),
-        &crate::progress::Event::Checkpoint {
-            name: "perform_restore_installing".into(),
-            complete: true,
-        },
-    );
-    assert_eq!(
-        operations.for_request(&wire::dict([
-            ("DataType", "SystemImageData".into()),
-            ("AsyncContextUUID", "checkpoint-image".into()),
-        ])),
-        Some(13)
-    );
-    assert_eq!(
-        operations.for_request(&wire::dict([
-            ("DataType", "SystemImageData".into()),
-            ("AsyncContextUUID", "image".into()),
-        ])),
-        None
-    );
-    assert_eq!(
-        operations.for_request(&wire::dict([
-            ("MsgType", "DataRequestMsg".into()),
-            ("DataType", "SourceBootObjectV4".into()),
-        ])),
-        None
-    );
-}
-
-#[test]
-fn request_names_come_from_device_metadata_for_unlisted_components_and_updaters() {
-    for (kind, arguments, expected) in [
-        (
-            "SourceBootObjectV4",
-            wire::dict([("ImageName", "New,Component".into())]),
-            "New,Component",
-        ),
-        (
-            "FirmwareUpdaterDataV2",
-            wire::dict([("MessageArgUpdaterName", "NewController".into())]),
-            "NewController",
-        ),
-        (
-            "ImageData",
-            wire::dict([("ImageType", "NewImageType".into())]),
-            "NewImageType",
-        ),
-        (
-            "NewDataType",
-            wire::dict([("ImageName", "".into())]),
-            "NewDataType",
-        ),
-    ] {
-        let message = wire::dict([("DataType", kind.into()), ("Arguments", arguments)]);
-        assert_eq!(super::data::request_name(&message).unwrap(), expected);
     }
 }
 

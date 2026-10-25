@@ -236,7 +236,6 @@ impl Job {
                     .collect();
                 self.update_overall();
             }
-            progress::Event::OperationName { .. } => {}
             progress::Event::OperationProgress {
                 operation,
                 progress,

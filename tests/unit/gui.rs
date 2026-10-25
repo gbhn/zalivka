@@ -257,9 +257,7 @@ fn structured_journal_filters_details_and_saves_each_record_once() {
     send_worker(
         &mut app,
         progress::Event::Transfer(progress::Update {
-            async_context: None,
             id: 1,
-            operation: None,
             stage: "ASR".into(),
             completed: 0,
             total: Some(100),
@@ -412,7 +410,6 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
     send_worker(
         &mut app,
         progress::Event::OperationProgress {
-            async_context: None,
             operation: 28,
             progress: 50,
         },
@@ -421,7 +418,6 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
     send_worker(
         &mut app,
         progress::Event::OperationProgress {
-            async_context: None,
             operation: 28,
             progress: -1,
         },
@@ -475,9 +471,7 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
     let mut app = App::new();
     app.job = Some(job(Action::Restore));
     let update = progress::Update {
-        async_context: None,
         id: 1,
-        operation: None,
         stage: "ASR".into(),
         completed: 100,
         total: Some(100),
@@ -490,7 +484,6 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
     send_worker(
         &mut app,
         progress::Event::OperationProgress {
-            async_context: None,
             operation: 28,
             progress: 50,
         },
@@ -551,11 +544,9 @@ fn active_job_labels(app: &mut App, theme: egui::Theme) -> (Vec<String>, usize) 
     (labels, cards)
 }
 
-fn transfer(id: u64, operation: Option<u64>, stage: &str) -> progress::Update {
+fn transfer(id: u64, stage: &str) -> progress::Update {
     progress::Update {
-        async_context: None,
         id,
-        operation,
         stage: stage.into(),
         completed: 60,
         total: Some(100),
@@ -570,17 +561,12 @@ fn only_current_transfers_render_cards_regardless_of_device_progress_order() {
     for transfer_first in [false, true] {
         let mut app = App::new();
         app.job = Some(job(Action::Restore));
-        let mut update = transfer(1, None, "Передача файловой системы ASR");
+        let mut update = transfer(1, "Передача файловой системы ASR");
         let mut events = vec![
             progress::Event::Transfer(update.clone()),
             progress::Event::OperationProgress {
                 operation: 13,
                 progress: 9,
-                async_context: Some("device-context".into()),
-            },
-            progress::Event::OperationName {
-                operation: 13,
-                name: "Device operation".into(),
             },
         ];
         if !transfer_first {
@@ -611,9 +597,11 @@ fn only_current_transfers_render_cards_regardless_of_device_progress_order() {
             );
             assert!(labels.iter().any(|label| label == "Скорость"));
             assert!(labels.iter().any(|label| label == "До конца передачи"));
-            assert!(!labels.iter().any(|label| label == "9%"
-                || label == "Операция 13"
-                || label == "Device operation"));
+            assert!(
+                !labels
+                    .iter()
+                    .any(|label| label == "9%" || label == "Операция 13")
+            );
         }
         // The transfer ends independently of the device's current percentage.
         update.finished = true;
@@ -626,14 +614,13 @@ fn only_current_transfers_render_cards_regardless_of_device_progress_order() {
 }
 
 #[test]
-fn identical_names_operations_and_contexts_never_merge_transfers_or_hide_retries() {
+fn identical_names_never_merge_transfers_or_hide_retries() {
     let mut app = App::new();
     app.job = Some(job(Action::Restore));
-    let mut first = transfer(1, Some(13), "Одинаковое имя");
-    first.async_context = Some("shared-context".into());
+    let mut first = transfer(1, "Одинаковое имя");
     let mut second = first.clone();
     second.id = 2;
-    let third = transfer(3, None, "Одинаковое имя");
+    let third = transfer(3, "Одинаковое имя");
     for update in [&first, &second, &third] {
         send_worker(&mut app, progress::Event::Transfer(update.clone()));
     }
@@ -643,7 +630,7 @@ fn identical_names_operations_and_contexts_never_merge_transfers_or_hide_retries
     }
     first.finished = true;
     send_worker(&mut app, progress::Event::Transfer(first.clone()));
-    let retry = transfer(4, Some(13), "Одинаковое имя");
+    let retry = transfer(4, "Одинаковое имя");
     send_worker(&mut app, progress::Event::Transfer(retry.clone()));
     send_worker(&mut app, progress::Event::Transfer(first));
     let transfers = &app.job.as_ref().unwrap().transfers;
@@ -669,7 +656,6 @@ fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
     send_worker(
         &mut app,
         progress::Event::OperationProgress {
-            async_context: None,
             operation: 13,
             progress: 25,
         },
@@ -678,7 +664,6 @@ fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
     send_worker(
         &mut app,
         progress::Event::OperationProgress {
-            async_context: None,
             operation: 55,
             progress: 100,
         },
@@ -690,7 +675,6 @@ fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
         send_worker(
             &mut app,
             progress::Event::OperationProgress {
-                async_context: None,
                 operation,
                 progress,
             },
@@ -708,7 +692,6 @@ fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
     send_worker(
         &mut app,
         progress::Event::OperationProgress {
-            async_context: None,
             operation: 12,
             progress: 100,
         },
@@ -717,7 +700,6 @@ fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
     send_worker(
         &mut app,
         progress::Event::OperationProgress {
-            async_context: None,
             operation: 13,
             progress: 100,
         },
@@ -764,7 +746,7 @@ fn checkpoints_and_operation_completion_preserve_an_active_transfer() {
     );
     send_worker(
         &mut app,
-        progress::Event::Transfer(transfer(1, Some(999), "Current transfer")),
+        progress::Event::Transfer(transfer(1, "Current transfer")),
     );
     for complete in [false, true] {
         send_worker(
@@ -782,7 +764,6 @@ fn checkpoints_and_operation_completion_preserve_an_active_transfer() {
         progress::Event::OperationProgress {
             operation: 999,
             progress: 100,
-            async_context: None,
         },
     );
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.99));
@@ -939,9 +920,7 @@ fn stalled_transfer_hides_speed_and_eta() {
     let now = Instant::now();
     let mut t = worker::Transfer {
         update: progress::Update {
-            async_context: None,
             id: 1,
-            operation: None,
             stage: "BaseSystem".into(),
             completed: 1048576,
             total: Some(3145728),
