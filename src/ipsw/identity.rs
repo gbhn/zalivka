@@ -8,15 +8,21 @@ use std::collections::{HashMap, HashSet};
 
 fn recovery_variant(value: &Value) -> Result<Option<&str>> {
     let info = wire::dictionary(wire::get(value, &["Info"])?)?;
-    info.get("MacOSVariant")
-        .or_else(|| info.get("RecoveryVariant"))
-        .map(|value| {
-            value
+    let mut selected = None;
+    for key in ["MacOSVariant", "RecoveryVariant"] {
+        if let Some(value) = info.get(key) {
+            let variant = value
                 .as_string()
                 .filter(|value| !value.is_empty())
-                .context("invalid recoveryOS variant name")
-        })
-        .transpose()
+                .with_context(|| format!("invalid recoveryOS variant name in {key}"))?;
+            ensure!(
+                selected.is_none_or(|previous| previous == variant),
+                "conflicting MacOSVariant and RecoveryVariant"
+            );
+            selected = Some(variant);
+        }
+    }
+    Ok(selected)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -103,6 +109,7 @@ impl Identity {
         })
     }
     pub fn is_macos(&self) -> Result<bool> {
+        recovery_variant(&self.value)?;
         Ok(wire::optional(&self.value, &["Info", "MacOSVariant"])?
             .map(|value| {
                 value
@@ -134,6 +141,7 @@ impl Identity {
 
 impl IdentitySummary {
     fn from_value(index: usize, value: &Value) -> Result<Self> {
+        recovery_variant(value)?;
         let info = |key| wire::get(value, &["Info", key]);
         Ok(Self {
             index,

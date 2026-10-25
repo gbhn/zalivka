@@ -153,16 +153,29 @@ impl<'a> Request<'a> {
     }
 
     pub fn signing_request(&self, id: &Identity, device: &DeviceInfo) -> Result<Value> {
-        let mut request = tss::updater_fields(device)?;
+        let common = tss::updater_fields(device)?;
+        let mut request = common.clone();
         let identity = wire::dictionary(&id.value)?;
         // BuildIdentityTags selects available fields; it is not a required-field
-        // schema. DeviceGeneratedRequest remains authoritative, including types.
+        // schema. Preserve device-generated types while checking AP consistency.
         for name in &self.build_identity_tags {
             if let Some(value) = self.generated.get(name).or_else(|| identity.get(name)) {
                 request.insert((*name).into(), value.clone());
             }
         }
         request.extend(self.generated.clone());
+        for (name, expected) in common {
+            let value = &request[&name];
+            let matches = if let Some(expected) = expected.as_boolean() {
+                value.as_boolean() == Some(expected)
+            } else if let Some(expected) = expected.as_unsigned_integer() {
+                wire::number(value).with_context(|| format!("invalid updater AP field {name}"))?
+                    == expected
+            } else {
+                continue;
+            };
+            ensure!(matches, "updater field {name} disagrees with connected AP");
+        }
         Ok(Value::Dictionary(request))
     }
 }

@@ -35,11 +35,8 @@ pub struct DeviceInfo {
 impl DeviceInfo {
     pub fn parse(serial: &str, mode: Mode) -> Result<Self> {
         let hex_field = |name: &str| -> Result<Option<u64>> {
-            field(serial, name)
-                .map(|raw| {
-                    u64::from_str_radix(raw.trim_start_matches("0x"), 16)
-                        .with_context(|| format!("invalid {name}: {raw}"))
-                })
+            field(serial, name)?
+                .map(|raw| hex_number(raw).with_context(|| format!("invalid {name}: {raw}")))
                 .transpose()
         };
         let required =
@@ -62,7 +59,7 @@ impl DeviceInfo {
 
     pub fn set_nonces(&mut self, s: &str) -> Result<()> {
         let nonce = |name| {
-            field(s, name)
+            field(s, name)?
                 .map(decode_hex)
                 .transpose()
                 .map(Option::unwrap_or_default)
@@ -72,11 +69,26 @@ impl DeviceInfo {
     }
 }
 
-fn field<'a>(s: &'a str, key: &str) -> Option<&'a str> {
-    s.split_ascii_whitespace().find_map(|s| {
+fn field<'a>(s: &'a str, key: &str) -> Result<Option<&'a str>> {
+    let mut values = s.split_ascii_whitespace().filter_map(|s| {
         let (k, v) = s.split_once(':')?;
         (k == key).then_some(v)
-    })
+    });
+    let value = values.next();
+    ensure!(values.next().is_none(), "duplicate USB serial field {key}");
+    Ok(value)
+}
+
+fn hex_number(value: &str) -> Result<u64> {
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    ensure!(
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "expected hexadecimal digits"
+    );
+    Ok(u64::from_str_radix(digits, 16)?)
 }
 
 pub fn decode_hex(s: &str) -> Result<Vec<u8>> {
@@ -88,11 +100,7 @@ pub fn encode_hex(data: &[u8]) -> String {
 }
 
 pub fn parse_ecid(s: &str) -> std::result::Result<u64, String> {
-    let s = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    let n = u64::from_str_radix(s, 16).map_err(|e| e.to_string())?;
+    let n = hex_number(s).map_err(|error| error.to_string())?;
     if n == 0 {
         return Err("ECID must be nonzero".into());
     }

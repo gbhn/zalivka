@@ -1,4 +1,32 @@
 use super::*;
+
+#[test]
+fn metadata_variant_aliases_must_be_well_typed_and_consistent() {
+    for alias in [true.into(), "DifferentCompanion".into()] {
+        let mut id = identity();
+        id.value
+            .as_dictionary_mut()
+            .unwrap()
+            .get_mut("Info")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("RecoveryVariant".into(), alias);
+        assert!(id.summary().is_err());
+        assert!(id.is_macos().is_err());
+    }
+    let mut id = identity();
+    id.value
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("Info")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("RecoveryVariant".into(), "macOS Customer".into());
+    assert!(id.summary().is_ok());
+    assert!(id.is_macos().unwrap());
+}
 use zalivka::ipsw::Behavior;
 
 #[test]

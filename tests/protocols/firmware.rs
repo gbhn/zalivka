@@ -1,8 +1,77 @@
 use super::*;
 
 #[test]
+fn metadata_updater_cannot_contradict_connected_ap_fields() {
+    let file = fixture(None, false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    for (key, value) in [
+        ("ApChipID", 0xffffu64.into()),
+        ("ApBoardID", 0xffu64.into()),
+        ("ApProductionMode", false.into()),
+        ("ApSecurityMode", false.into()),
+    ] {
+        let mut args = modern_updater_args("UnknownController");
+        args.as_dictionary_mut()
+            .unwrap()
+            .get_mut("DeviceGeneratedRequest")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(key.into(), value);
+        assert!(
+            zalivka::firmware::prepare(&mut ipsw, &identity(), &device_info(), &args).is_err(),
+            "accepted conflicting {key}"
+        );
+    }
+    let mut args = modern_updater_args("UnknownController");
+    let generated = args
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("DeviceGeneratedRequest")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap();
+    generated.insert("ApChipID".into(), "0X8103".into());
+    generated.insert("ApBoardID".into(), "0x0A".into());
+    let update = zalivka::firmware::prepare(&mut ipsw, &identity(), &device_info(), &args).unwrap();
+    assert_eq!(
+        wire::string(&update.request, &["ApChipID"]).unwrap(),
+        "0X8103"
+    );
+    assert_eq!(
+        wire::string(&update.request, &["ApBoardID"]).unwrap(),
+        "0x0A"
+    );
+    args.as_dictionary_mut()
+        .unwrap()
+        .get_mut("DeviceGeneratedRequest")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .remove("ApChipID");
+    args.as_dictionary_mut()
+        .unwrap()
+        .get_mut("DeviceGeneratedTags")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .insert(
+            "BuildIdentityTags".into(),
+            Value::Array(vec!["ApChipID".into()]),
+        );
+    let mut id = identity();
+    id.value
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("ApChipID".into(), 0xffffu64.into());
+    assert!(zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).is_err());
+}
+
+#[test]
 fn all_updaters_forward_explicit_requests_and_preserve_complete_service_payloads() {
     let id = identity();
+    let mut device = device_info();
+    device.chip_fuse_mode = Some(1);
     let file = fixture(None, false);
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     for name in [
@@ -46,7 +115,7 @@ fn all_updaters_forward_explicit_requests_and_preserve_complete_service_payloads
             Value::Data(vec![1, 2, 3]),
             wire::dict([("new payload shape", true.into())]),
         ] {
-            let update = zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).unwrap();
+            let update = zalivka::firmware::prepare(&mut ipsw, &id, &device, &args).unwrap();
             let request = wire::dictionary(&update.request).unwrap();
             assert_eq!(
                 request["UniqueBuildID"],
@@ -69,7 +138,7 @@ fn all_updaters_forward_explicit_requests_and_preserve_complete_service_payloads
             ]);
             assert_eq!(update.finish(response.clone()).unwrap(), response);
         }
-        let update = zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).unwrap();
+        let update = zalivka::firmware::prepare(&mut ipsw, &id, &device, &args).unwrap();
         let error = update
             .finish(wire::dict([("Controller,Ticket", Value::Data(vec![42]))]))
             .unwrap_err();
@@ -773,7 +842,7 @@ fn modern_updater_args(name: &str) -> Value {
         wire::dict([
             ("@Controller,Ticket", true.into()),
             ("Controller,Nonce", Value::Data(vec![1, 2])),
-            ("ApChipID", 0x8112u64.into()),
+            ("ApChipID", u64::from(device_info().chip_id).into()),
         ]),
     );
     args.as_dictionary_mut()

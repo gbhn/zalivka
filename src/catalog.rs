@@ -7,6 +7,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use plist::Value;
 use std::{
+    collections::BTreeMap,
     io::Cursor,
     path::{Path, PathBuf},
 };
@@ -84,18 +85,27 @@ pub fn resolve(catalog: &Value, device: &DeviceInfo) -> Result<Release> {
         catalog,
         &["MobileDeviceSoftwareVersionsByVersion"],
     )?)?;
-    let mut selected = None;
+    let mut schemas = BTreeMap::new();
     for (version, value) in versions {
         let version = version
             .parse::<u64>()
             .context("invalid Apple catalog schema version")?;
-        if selected.is_none_or(|(current, _)| version > current)
-            && let Ok(release) = wire::get(value, &["MobileDeviceSoftwareVersions", product_type])
-        {
-            selected = Some((version, release));
+        if let Some(previous) = schemas.insert(version, value) {
+            ensure!(
+                previous == value,
+                "conflicting Apple catalog schema version {version}"
+            );
         }
     }
-    let (_, release) = selected.context("Apple catalog has no firmware releases for this model")?;
+    let mut selected = None;
+    for value in schemas.values() {
+        if let Some(release) =
+            wire::optional(value, &["MobileDeviceSoftwareVersions", product_type])?
+        {
+            selected = Some(release);
+        }
+    }
+    let release = selected.context("Apple catalog has no firmware releases for this model")?;
     let restore = wire::get(release, &["Unknown", "Universal", "Restore"])
         .context("Apple catalog has no current universal restore for this model")?;
     let url = wire::string(restore, &["FirmwareURL"])?;

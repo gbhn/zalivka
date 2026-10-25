@@ -123,10 +123,7 @@ fn apple_catalog_selects_the_highest_matching_schema_without_skipping_invalid_ve
         schema("https://updates.cdn-apple.com/older.ipsw"),
     );
     versions.insert("10".into(), schema(newest));
-    versions.insert(
-        "010".into(),
-        schema("https://updates.cdn-apple.com/tied.ipsw"),
-    );
+    versions.insert("010".into(), schema(newest));
     // A newer schema that only lists other models must not hide this model.
     versions.insert("11".into(), wire::dict([] as [(&str, Value); 0]));
     assert_eq!(catalog::resolve(&data, &device).unwrap().url, newest);
@@ -153,6 +150,52 @@ fn apple_catalog_selects_the_highest_matching_schema_without_skipping_invalid_ve
         )]),
     );
     assert!(catalog::resolve(&data, &device).is_err());
+}
+
+#[test]
+fn metadata_catalog_never_falls_back_from_malformed_newer_schema_or_conflicting_alias() {
+    let mut device = device_info();
+    device.board_id = 0x26;
+    let base = catalog_fixture(
+        "637567235",
+        "MacBookAir10,1",
+        &"ab".repeat(20),
+        "https://updates.cdn-apple.com/restore.ipsw",
+    );
+    for invalid in [
+        true.into(),
+        wire::dict([("MobileDeviceSoftwareVersions", true.into())]),
+    ] {
+        let mut value = base.clone();
+        value
+            .as_dictionary_mut()
+            .unwrap()
+            .get_mut("MobileDeviceSoftwareVersionsByVersion")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("2".into(), invalid);
+        assert!(catalog::resolve(&value, &device).is_err());
+    }
+    let mut value = base.clone();
+    let alternate = catalog_fixture(
+        "637567235",
+        "MacBookAir10,1",
+        &"ab".repeat(20),
+        "https://updates.cdn-apple.com/conflicting.ipsw",
+    );
+    let schema = wire::get(&alternate, &["MobileDeviceSoftwareVersionsByVersion", "1"])
+        .unwrap()
+        .clone();
+    value
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("MobileDeviceSoftwareVersionsByVersion")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("01".into(), schema);
+    assert!(catalog::resolve(&value, &device).is_err());
 }
 
 #[test]

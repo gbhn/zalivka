@@ -52,6 +52,36 @@ fn parse_dfu_serial_and_nonces() {
 }
 
 #[test]
+fn metadata_usb_identifiers_reject_duplicates_and_share_hex_syntax_with_cli() {
+    let serial = "CPID:8103 BDID:0A ECID:12 SDOM:1 CPFM:3 IBFL:10";
+    for field in [
+        "CPID:8103",
+        "BDID:0A",
+        "ECID:12",
+        "SDOM:1",
+        "CPFM:3",
+        "IBFL:10",
+    ] {
+        assert!(
+            DeviceInfo::parse(&format!("{serial} {field}"), Mode::Dfu).is_err(),
+            "duplicate {field}"
+        );
+    }
+    let parsed = DeviceInfo::parse("CPID:0X8103 BDID:0X0A ECID:0X12", Mode::Dfu).unwrap();
+    assert_eq!(parsed.ecid, device::parse_ecid("0X12").unwrap());
+    for invalid in ["+12", "0x0x12", "0X0X12"] {
+        assert!(device::parse_ecid(invalid).is_err());
+        assert!(
+            DeviceInfo::parse(&format!("CPID:8103 BDID:0A ECID:{invalid}"), Mode::Dfu).is_err()
+        );
+    }
+    let mut device = device_info();
+    let before = device.clone();
+    assert!(device.set_nonces("NONC:1122 NONC:3344 SNON:5566").is_err());
+    assert_eq!(device, before);
+}
+
+#[test]
 fn optional_usb_fields_default_only_when_absent() {
     let serial = "CPID:8103 BDID:0A ECID:12";
     let device = DeviceInfo::parse(serial, Mode::Dfu).unwrap();
