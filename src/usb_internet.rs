@@ -43,8 +43,8 @@ pub struct Status {
     pub product_id: u16,
     pub bus: String,
     pub ports: Vec<u8>,
-    pub control_interface: u8,
-    pub data_interface: u8,
+    pub control_interface: Option<u8>,
+    pub data_interface: Option<u8>,
     pub accessible: bool,
     pub error: Option<String>,
 }
@@ -146,10 +146,7 @@ pub fn prepare_elevated(serial: &str, restore: bool) -> Result<()> {
 pub fn status() -> Result<Vec<Status>> {
     let mut result = vec![];
     for info in nusb::list_devices().wait()?.filter(mac) {
-        let device = info.open().wait()?;
-        let selected = ncm_interface(device.active_configuration()?)?;
-        let access = link::claim_pair(&device, selected).map(drop);
-        result.push(Status {
+        let mut status = Status {
             serial: info
                 .serial_number()
                 .unwrap_or_default()
@@ -158,11 +155,21 @@ pub fn status() -> Result<Vec<Status>> {
             product_id: info.product_id(),
             bus: info.bus_id().into(),
             ports: info.port_chain().to_vec(),
-            control_interface: selected.control,
-            data_interface: selected.data,
-            accessible: access.is_ok(),
-            error: access.err().map(|e| e.to_string()),
-        });
+            control_interface: None,
+            data_interface: None,
+            accessible: false,
+            error: None,
+        };
+        let access = (|| -> Result<()> {
+            let device = info.open().wait()?;
+            let selected = ncm_interface(device.active_configuration()?)?;
+            status.control_interface = Some(selected.control);
+            status.data_interface = Some(selected.data);
+            link::claim_pair(&device, selected).map(drop)
+        })();
+        status.accessible = access.is_ok();
+        status.error = access.err().map(|error| format!("{error:#}"));
+        result.push(status);
     }
     Ok(result)
 }

@@ -1,4 +1,30 @@
 use super::*;
+
+#[test]
+fn cancelled_or_expired_connects_do_not_allocate_channels_or_write_syn() {
+    let state = Arc::new(Mutex::new(State::default()));
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(crate::test_mux::version_packet());
+    let session = Session::new(EventUsb(state.clone(), InputReady::new(|_| Ok(false)))).unwrap();
+    let writes = state.lock().unwrap().output.len();
+    assert!(session.connect_until(12345, Instant::now()).is_err());
+    session.cancel();
+    assert!(session.connect(12345).is_err());
+    assert_eq!(state.lock().unwrap().output.len(), writes);
+    let link = session.lock().unwrap();
+    assert!(link.channels.is_empty());
+    assert_eq!(link.next_port, 1);
+}
+
+#[test]
+fn mux_header_rejects_usize_overflow_without_touching_the_buffer() {
+    let mut bytes = vec![42];
+    assert!(crate::mux::packet::encode_header(&mut bytes, 6, 2, 0, 0, usize::MAX).is_err());
+    assert_eq!(bytes, [42]);
+}
 use crate::mux::{InputReady, Link, PacketTransport, SYN, decode_packet, encode_packet};
 use anyhow::ensure;
 use std::sync::Weak;

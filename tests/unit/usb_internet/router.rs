@@ -262,6 +262,35 @@ fn udp_dns_is_local_and_other_datagrams_are_not_forwarded() {
     assert_eq!(udp.payload(), response);
     assert_eq!(router.bytes(), (0, 0));
 }
+
+#[test]
+fn fragments_and_spoofed_dns_sources_cannot_allocate_names_or_flows() {
+    for source in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST, GATEWAY] {
+        let mut router = Router::new();
+        router.receive(frame_udp(source, 50000, GATEWAY, 53, DNS_QUERY));
+        router.connect_tcp(Flow {
+            source,
+            source_port: 50000,
+            destination: GATEWAY,
+            destination_port: 53,
+        });
+        assert!(router.transmit().is_empty());
+        assert!(router.tcp.is_empty());
+        assert!(router.dns.host(Ipv4Addr::new(198, 18, 0, 1)).is_none());
+    }
+    for offset in [0, 8] {
+        let mut frame = frame_udp(CLIENT, 50000, GATEWAY, 53, DNS_QUERY);
+        let mut ethernet = EthernetFrame::new_unchecked(&mut frame);
+        let mut ip = Ipv4Packet::new_unchecked(ethernet.payload_mut());
+        ip.set_more_frags(true);
+        ip.set_frag_offset(offset);
+        ip.fill_checksum();
+        let mut router = Router::new();
+        router.receive(frame);
+        assert!(router.transmit().is_empty());
+        assert!(router.dns.host(Ipv4Addr::new(198, 18, 0, 1)).is_none());
+    }
+}
 #[test]
 fn tcp_dns_to_the_gateway_or_a_hard_coded_server_stays_local() {
     for destination in [GATEWAY, Ipv4Addr::new(8, 8, 8, 8)] {

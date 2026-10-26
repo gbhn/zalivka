@@ -24,7 +24,7 @@ pub(super) struct Parameters {
 impl Parameters {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         ensure!(
-            bytes.len() >= 28 && word(bytes, 0)? >= 28,
+            bytes.len() >= 28 && (28..=bytes.len()).contains(&word(bytes, 0)?),
             "short NCM parameters"
         );
         ensure!(word(bytes, 2)? & 1 != 0, "NCM NTB16 format is unavailable");

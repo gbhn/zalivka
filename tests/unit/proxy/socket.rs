@@ -1,7 +1,53 @@
 use super::*;
 use std::{net::TcpListener, thread};
+
+#[test]
+fn empty_tls_read_does_not_start_a_handshake_or_touch_the_socket() {
+    let listener = listener();
+    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let connection =
+        ClientConnection::new(tls_config(), ServerName::try_from("localhost").unwrap()).unwrap();
+    let mut stream = Stream {
+        transport: Transport::Tls(Box::new(StreamOwned::new(connection, socket))),
+        shutdown_pending: false,
+        write_closed: false,
+    };
+    assert_eq!(stream.read(&mut []).unwrap(), 0);
+    assert_eq!(
+        peer.read(&mut [0]).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
 fn listener() -> TcpListener {
     TcpListener::bind("127.0.0.1:0").unwrap()
+}
+
+#[test]
+fn ipv6_targets_use_socks_address_bytes_with_local_and_remote_resolution() {
+    for protocol in ["socks5", "socks5h"] {
+        let listener = listener();
+        let proxy =
+            Proxy::new(&format!("{protocol}://{}", listener.local_addr().unwrap())).unwrap();
+        let server = thread::spawn(move || {
+            let mut socket = accept(listener);
+            let mut greeting = [0; 3];
+            socket.read_exact(&mut greeting).unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            socket.write_all(&[5, 0]).unwrap();
+            let mut request = [0; 22];
+            socket.read_exact(&mut request).unwrap();
+            assert_eq!(&request[..4], &[5, 1, 0, 4]);
+            assert_eq!(&request[4..20], &std::net::Ipv6Addr::LOCALHOST.octets());
+            assert_eq!(&request[20..], &443u16.to_be_bytes());
+            socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).unwrap();
+        });
+        let mut stream = connect_blocking("[::1]", 443, Some(proxy)).unwrap();
+        assert_eq!(stream.read(&mut []).unwrap(), 0);
+        server.join().unwrap();
+    }
 }
 fn accept(listener: TcpListener) -> TcpStream {
     listener.set_nonblocking(true).unwrap();

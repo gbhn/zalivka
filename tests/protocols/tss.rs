@@ -633,3 +633,59 @@ fn unmatched_signing_rules_still_require_well_formed_actions() {
         assert!(entry.is_empty());
     }
 }
+#[test]
+fn signing_rules_validate_the_resulting_trust_and_digest() {
+    for (trusted, digest) in [
+        ("yes".into(), Value::Data(vec![1; 48])),
+        (true.into(), Value::Data(vec![])),
+        (true.into(), Value::Data(vec![1; 17])),
+    ] {
+        let mut id = identity();
+        let entry = manifest_mut(&mut id)
+            .get_mut("iBSS")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap();
+        entry.insert("Trusted".into(), false.into());
+        entry
+            .get_mut("Info")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(
+                "RestoreRequestRules".into(),
+                Value::Array(vec![wire::dict([
+                    ("Conditions", wire::dict([] as [(&str, Value); 0])),
+                    (
+                        "Actions",
+                        wire::dict([("Trusted", trusted), ("Digest", digest)]),
+                    ),
+                ])]),
+            );
+        assert!(tss::request(&device_info(), &id).is_err());
+    }
+}
+
+#[test]
+fn manifest_components_cannot_replace_device_signing_fields() {
+    for name in ["ApNonce", "ApECID", "@ApImg4Ticket", "@FutureTicket"] {
+        let mut id = identity();
+        let entry = manifest_mut(&mut id)["iBSS"].clone();
+        manifest_mut(&mut id).insert(name.into(), entry);
+        assert!(tss::request(&device_info(), &id).is_err(), "{name}");
+    }
+}
+
+#[test]
+fn signing_rejects_an_identity_for_other_hardware_or_security_domain() {
+    for key in ["ApChipID", "ApBoardID", "ApSecurityDomain"] {
+        let mut id = identity();
+        id.value
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(key.into(), 0xffffu64.into());
+        for request in [tss::request, tss::recovery_request] {
+            assert!(request(&device_info(), &id).is_err(), "{key}");
+        }
+    }
+}

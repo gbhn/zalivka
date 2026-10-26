@@ -1,6 +1,6 @@
 [package]
 name = "zalivka"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.89"
 description = "Experimental native Rust DFU restore client for Apple Silicon and T2 Macs"
@@ -8,7 +8,7 @@ license = "MIT"
 
 [features]
 default = []
-gui = ["dep:eframe", "dep:rfd"]
+gui = ["dep:eframe", "dep:rfd", "dep:winresource"]
 
 [dependencies]
 anyhow = "1"
@@ -54,6 +54,7 @@ windows-sys = { version = "0.61", features = ["Win32_Devices_DeviceAndDriverInst
 
 [build-dependencies]
 sha2 = "0.10"
+winresource = { version = "0.1", optional = true, default-features = false }
 
 [profile.release]
 lto = "fat"

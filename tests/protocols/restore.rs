@@ -2203,16 +2203,15 @@ fn cpio_names_must_be_nonempty_relative_archive_paths() {
 
 #[test]
 fn bootability_rejects_colliding_or_reserved_names_before_streaming_any_bytes() {
-    for reserved in [false, true] {
+    for reserved in [None, Some("TRAILER!!!"), Some("TRAILER!!!/")] {
         let mut files = vec![(
             "BootabilityBundle/Restore/Bootability/file",
             b"first".as_slice(),
         )];
-        files.push(if reserved {
-            (
-                "BootabilityBundle/Restore/Bootability/TRAILER!!!",
-                b"hidden".as_slice(),
-            )
+        let reserved_path;
+        files.push(if let Some(name) = reserved {
+            reserved_path = format!("BootabilityBundle/Restore/Bootability/{name}");
+            (reserved_path.as_str(), b"hidden".as_slice())
         } else {
             (
                 "BootabilityBundleV2/Restore/Bootability/file",

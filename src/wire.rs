@@ -126,7 +126,10 @@ pub fn boolean(v: &Value, path: &[&str]) -> bool {
 
 pub fn xml(v: &Value) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    v.to_writer_xml(&mut out)?;
+    v.to_writer_xml(LimitedWriter {
+        bytes: &mut out,
+        remaining: MAX_PLIST,
+    })?;
     Ok(out)
 }
 
@@ -161,13 +164,16 @@ pub(crate) fn append_binary(bytes: &mut Vec<u8>, v: &impl serde::Serialize) -> R
 
 fn append_frame(
     bytes: &mut Vec<u8>,
-    encode: impl FnOnce(&mut Vec<u8>) -> std::result::Result<(), plist::Error>,
+    encode: impl FnOnce(&mut LimitedWriter<'_>) -> std::result::Result<(), plist::Error>,
     length_prefix: fn(u32) -> [u8; 4],
 ) -> Result<()> {
     let start = bytes.len();
     bytes.extend_from_slice(&[0; 4]);
     let result = (|| {
-        encode(bytes)?;
+        encode(&mut LimitedWriter {
+            bytes,
+            remaining: MAX_PLIST,
+        })?;
         let length = bytes.len() - start - 4;
         ensure!(length <= MAX_PLIST, "outgoing plist too large");
         bytes[start..start + 4].copy_from_slice(&length_prefix(length as u32));
@@ -177,6 +183,28 @@ fn append_frame(
         bytes.truncate(start);
     }
     result
+}
+
+/// Enforce the frame limit during encoding, before a large value can grow the
+/// output allocation beyond the protocol's bound.
+struct LimitedWriter<'a> {
+    bytes: &'a mut Vec<u8>,
+    remaining: usize,
+}
+
+impl Write for LimitedWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(std::io::Error::other("outgoing plist too large"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        self.remaining -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn send_frame(w: &mut impl Write, bytes: &[u8]) -> Result<()> {
@@ -232,6 +260,7 @@ pub fn receive_xml(r: &mut impl BufRead) -> Result<Value> {
                     "ASR XML root is not plist"
                 );
                 depth += 1;
+                ensure!(depth <= 256, "ASR XML nested too deeply");
             }
             Event::End(_) => {
                 depth = depth

@@ -7,6 +7,23 @@ use super::session::{
     record_message, wait_for_restore_close,
 };
 use super::*;
+
+#[test]
+fn reconnection_rechecks_hardware_and_security_before_sending_firmware() {
+    let device =
+        DeviceInfo::parse("ECID:1234 CPID:8103 BDID:0a SDOM:01 CPFM:03", Mode::Dfu).unwrap();
+    super::boot::validate_reconnected_device(&device, &device).unwrap();
+    for changed in [
+        "ECID:1235 CPID:8103 BDID:0a SDOM:01 CPFM:03",
+        "ECID:1234 CPID:8104 BDID:0a SDOM:01 CPFM:03",
+        "ECID:1234 CPID:8103 BDID:0b SDOM:01 CPFM:03",
+        "ECID:1234 CPID:8103 BDID:0a SDOM:02 CPFM:03",
+        "ECID:1234 CPID:8103 BDID:0a SDOM:01 CPFM:01",
+    ] {
+        let changed = DeviceInfo::parse(changed, Mode::Recovery).unwrap();
+        assert!(super::boot::validate_reconnected_device(&device, &changed).is_err());
+    }
+}
 use crate::mux::Session;
 use crate::mux::{self, PacketTransport};
 use crate::test_mux::{self, version_packet};

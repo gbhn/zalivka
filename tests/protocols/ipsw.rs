@@ -1,6 +1,87 @@
 use super::*;
 
 #[test]
+fn reopening_an_ipsw_rejects_a_replaced_build_manifest() {
+    let file = fixture(None, false);
+    let ipsw = Ipsw::open(file.path()).unwrap();
+    assert_eq!(ipsw.reopen().unwrap().manifest, ipsw.manifest);
+    let replacement = fixture(Some(recovery_identity()), false);
+    std::fs::copy(replacement.path(), file.path()).unwrap();
+    assert!(
+        ipsw.reopen()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("BuildManifest changed")
+    );
+}
+
+#[test]
+fn empty_identity_lists_and_noncanonical_archive_paths_are_rejected() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
+    zip.start_file(
+        "BuildManifest.plist",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.write_all(
+        &wire::xml(&wire::dict([
+            ("BuildIdentities", Value::Array(vec![])),
+            (
+                "SupportedProductTypes",
+                Value::Array(vec!["MacBookAir10,1".into()]),
+            ),
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    zip.finish().unwrap();
+    assert!(
+        Ipsw::open(file.path())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("nonempty array")
+    );
+    for path in ["a//b", "a///", "//server/file"] {
+        assert!(zalivka::ipsw::validate_path(path).is_err());
+    }
+}
+
+#[test]
+fn preflight_rejects_directory_components_and_empty_filesystems() {
+    for (path, bytes) in [
+        ("Firmware/directory/", b"".as_slice()),
+        ("Firmware/empty", b"".as_slice()),
+    ] {
+        let mut id = identity();
+        manifest_mut(&mut id).insert("OS".into(), component_entry(path, bytes));
+        let file = fixture_files(Some(id.clone()), false, &[(path, bytes)]);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        assert!(ipsw.preflight_recovery(&mut id).is_err());
+    }
+}
+
+#[test]
+fn recovery_variant_must_have_the_requested_restore_behavior() {
+    let mut recovery = recovery_identity();
+    recovery.value.as_dictionary_mut().unwrap()["Info"]
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("RestoreBehavior".into(), "Update".into());
+    let file = fixture(Some(recovery), false);
+    let ipsw = Ipsw::open(file.path()).unwrap();
+    assert!(ipsw.recovery_identity(&device_info(), &identity()).is_err());
+    let mut id = identity();
+    id.value.as_dictionary_mut().unwrap()["Info"]
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("DeviceClass".into(), "".into());
+    assert!(id.summary().is_err());
+}
+
+#[test]
 fn metadata_variant_aliases_must_be_well_typed_and_consistent() {
     for alias in [true.into(), "DifferentCompanion".into()] {
         let mut id = identity();
@@ -833,7 +914,13 @@ fn zip64_streams_five_gib_with_bounded_memory() {
         .compression_method(zip::CompressionMethod::Stored)
         .large_file(true);
     let manifest = wire::dict([
-        ("BuildIdentities", Value::Array(vec![])),
+        (
+            "BuildIdentities",
+            Value::Array(vec![wire::dict([(
+                "Manifest",
+                wire::dict([] as [(&str, Value); 0]),
+            )])]),
+        ),
         (
             "SupportedProductTypes",
             Value::Array(vec!["MacBookAir10,1".into()]),

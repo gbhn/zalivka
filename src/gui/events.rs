@@ -1,14 +1,23 @@
 //! Apply background events and finish jobs only after their logs are drained.
 use super::theme::Tone;
 use super::worker::{Job, Output};
-use super::{App, Event, Level, Notice, Picker, Record, SCAN_INTERVAL, worker};
+use super::{
+    App, Event, Level, Notice, Picker, Record, SCAN_INTERVAL, UI_REFRESH_INTERVAL, worker,
+};
 use eframe::egui;
 use std::time::Instant;
 use zalivka::progress;
 
 impl App {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
-        while let Ok(event) = self.rx.try_recv() {
+        // Leave time for rendering and input even during a burst of log records.
+        for index in 0..256 {
+            let Ok(event) = self.rx.try_recv() else { break };
+            // This frame already displays the events it consumes. Schedule
+            // another only when a full batch may have left queued events.
+            if index == 255 {
+                ctx.request_repaint_after(UI_REFRESH_INTERVAL);
+            }
             match event {
                 Event::Scan { devices, host } => {
                     self.scanning = false;

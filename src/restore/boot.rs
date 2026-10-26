@@ -1,7 +1,7 @@
 //! iBoot preparation and the explicitly requested RAM-only boot-state probe.
 use super::{ContextState, options::behavior_boot_arguments};
 use crate::{
-    device::Mode,
+    device::{DeviceInfo, Mode},
     dfu, img4,
     ipsw::{Behavior, Identity, Ipsw},
     tss,
@@ -102,7 +102,7 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         );
         ipsw.resolve_types(&mut identity)?;
         let name = identity.require_component_type(b"ibss")?;
-        let component = ipsw.component(&identity, name)?;
+        let component = ipsw.verify_boot_component(&identity, name)?;
         let ticket = tss::send(&tss::request(&usb.info, &identity)?)
             .context("personalizing diagnostic iBSS")?;
         let bytes = img4::personalize_with_metadata(name, &component, &ticket, &identity.value)?;
@@ -221,10 +221,8 @@ impl ContextState {
         let mode = self.restore.identity.is_macos()?.then_some(Mode::Recovery);
         let mut usb =
             reconnect_after_ibss(upload, mode, |mode| wait_recovery(self.device.ecid, mode))?;
-        ensure!(
-            usb.info.chip_id == self.device.chip_id && usb.info.board_id == self.device.board_id,
-            "hardware identity changed after iBSS"
-        );
+        validate_reconnected_device(&self.device, &usb.info)
+            .context("hardware identity changed after iBSS")?;
         if usb.info.ap_nonce != self.device.ap_nonce || usb.info.sep_nonce != self.device.sep_nonce
         {
             crate::log!(
@@ -258,6 +256,8 @@ impl ContextState {
         }
         drop(usb);
         let mut usb = wait_recovery(self.device.ecid, Some(Mode::Recovery))?;
+        validate_reconnected_device(&self.device, &usb.info)
+            .context("hardware identity changed after iBEC")?;
         self.send_iboot_firmware(&mut usb, false, &stages[1])?;
         self.send_boot_object(&mut usb, b"rdsk")?;
         dfu::command(&mut usb, "ramdisk", false)?;
@@ -297,6 +297,24 @@ impl ContextState {
         }
         Ok(())
     }
+}
+
+pub(super) fn validate_reconnected_device(
+    expected: &DeviceInfo,
+    actual: &DeviceInfo,
+) -> Result<()> {
+    ensure!(
+        expected.ecid == actual.ecid
+            && expected.chip_id == actual.chip_id
+            && expected.board_id == actual.board_id,
+        "USB hardware identifiers do not match"
+    );
+    ensure!(
+        expected.security_domain == actual.security_domain
+            && expected.chip_fuse_mode == actual.chip_fuse_mode,
+        "USB security domain or fuse mode changed"
+    );
+    Ok(())
 }
 
 pub(super) fn reconnect_after_ibss<T>(

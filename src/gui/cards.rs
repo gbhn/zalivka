@@ -52,7 +52,7 @@ impl App {
                         self.detect(ctx);
                     }
                     if self.scanning {
-                        ui.add(egui::Spinner::new().size(18.0).color(BLUE));
+                        caption(ui, "Поиск…");
                     }
                     if let Some(d) = self.target() {
                         pill(
@@ -244,7 +244,7 @@ impl App {
         card(ui.ctx()).show(ui, |ui| {
             let Some(job) = self.job.as_ref() else { return };
             ui.horizontal(|ui| {
-                ui.add(egui::Spinner::new().size(24.0).color(BLUE));
+                pill(ui, "В работе", BLUE);
                 ui.label(RichText::new(job.action.title()).size(21.0).strong());
             });
             let now = Instant::now();

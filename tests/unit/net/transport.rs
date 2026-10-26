@@ -342,3 +342,22 @@ fn post_redirects_preserve_307_payload_and_drop_credentials_on_host_change() {
         }
     }
 }
+#[test]
+fn apple_hostnames_require_valid_dns_labels() {
+    for host in [
+        ".apple.com",
+        "x..apple.com",
+        "-x.apple.com",
+        "x-.apple.com",
+        "_.apple.com",
+    ] {
+        assert!(
+            super::validate_apple_url(&format!("https://{host}/")).is_err(),
+            "{host}"
+        );
+    }
+    assert!(super::validate_apple_url(&format!("https://{}.apple.com/", "a".repeat(64))).is_err());
+    for host in ["apple.com", "a-b.apple.com", "updates.cdn-apple.com"] {
+        super::validate_apple_url(&format!("https://{host}/")).unwrap();
+    }
+}

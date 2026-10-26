@@ -61,7 +61,17 @@ pub fn validate_apple_url(url: &str) -> Result<()> {
 }
 
 pub(crate) fn is_apple_host(host: &str) -> bool {
-    host == "apple.com" || host.ends_with(".apple.com") || host.ends_with(".cdn-apple.com")
+    host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        && (host == "apple.com" || host.ends_with(".apple.com") || host.ends_with(".cdn-apple.com"))
 }
 
 /// Return the validated URI so callers can use it without parsing again.

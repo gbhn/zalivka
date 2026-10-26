@@ -11,6 +11,8 @@ fn bulk_endpoint<'a>(
 ) -> Option<EndpointDescriptor<'a>> {
     interface.endpoints().find(|endpoint| {
         endpoint.transfer_type() == TransferType::Bulk
+            && endpoint.address() & 0x0f != 0
+            && endpoint.address() & 0x70 == 0
             && (endpoint.address() & 0x80 != 0) == input
             && endpoint.max_packet_size() != 0
     })

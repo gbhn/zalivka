@@ -25,7 +25,7 @@ pub(super) fn encode_header(
 ) -> Result<()> {
     let header_size = if version >= 2 { 16 } else { 8 };
     ensure!(
-        payload_len + header_size <= MTU,
+        payload_len <= MTU - header_size,
         "USB mux packet exceeds MTU"
     );
     bytes.clear();

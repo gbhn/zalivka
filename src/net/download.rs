@@ -140,6 +140,7 @@ pub(super) fn download_from(
             );
         }
         let mut attempts = 0;
+        let mut restarts = 0;
         loop {
             let step = match request(download.total) {
                 Ok(response) => download.receive(response, directory)?,
@@ -148,6 +149,13 @@ pub(super) fn download_from(
             match step {
                 DownloadStep::Complete => break,
                 DownloadStep::More => {}
+                DownloadStep::Restart => {
+                    restarts += 1;
+                    ensure!(
+                        restarts <= 1,
+                        "firmware server repeatedly rejected resume; retry the download later"
+                    );
+                }
                 DownloadStep::Interrupted(error) => {
                     if !retry_download(&error, &mut attempts, maximum_retries) {
                         return Err(error);
@@ -165,6 +173,7 @@ pub(super) fn download_from(
 
 enum DownloadStep {
     More,
+    Restart,
     Complete,
     Interrupted(anyhow::Error),
 }
@@ -181,6 +190,14 @@ struct PartialDownload<'a> {
 impl<'a> PartialDownload<'a> {
     fn open(path: &Path, expected: &'a [u8]) -> Result<Self> {
         let mut hash = download_hasher(expected)?;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => ensure!(
+                metadata.file_type().is_file(),
+                "partial download is not a regular file"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("checking .part file"),
+        }
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -190,6 +207,10 @@ impl<'a> PartialDownload<'a> {
             .context("opening .part file")?;
         file.try_lock()
             .map_err(|error| anyhow::anyhow!("firmware download is locked: {error}"))?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "partial download is not a regular file"
+        );
         let total = hash_file(&mut file, hash.as_mut())?;
         Ok(Self {
             file,
@@ -225,7 +246,7 @@ impl<'a> PartialDownload<'a> {
             StatusCode::OK | StatusCode::PARTIAL_CONTENT => {}
             StatusCode::RANGE_NOT_SATISFIABLE if self.total > 0 => {
                 self.reset()?;
-                return Ok(DownloadStep::More);
+                return Ok(DownloadStep::Restart);
             }
             _ => {
                 return Ok(DownloadStep::Interrupted(
@@ -244,14 +265,18 @@ impl<'a> PartialDownload<'a> {
         let content_length = response
             .headers()
             .get("content-length")
-            .map(|v| -> Result<u64> { Ok(v.to_str()?.parse()?) })
+            .map(|v| decimal(v.to_str()?, "Content-Length"))
             .transpose()?;
+        ensure!(
+            status != StatusCode::OK || !response.headers().contains_key("content-range"),
+            "full firmware response contains Content-Range"
+        );
         if self.total > 0 && status == StatusCode::OK {
             // Some Apple servers return 200 with the original length but only
             // the requested suffix. Restart without Range rather than consume it.
             // Validate full-response metadata before discarding a usable partial.
             self.reset()?;
-            return Ok(DownloadStep::More);
+            return Ok(DownloadStep::Restart);
         }
         let (expected_end, expected_length) = if status == StatusCode::PARTIAL_CONTENT {
             let range = response
@@ -286,6 +311,7 @@ impl<'a> PartialDownload<'a> {
         let read_error = loop {
             let n = match reader.read(&mut buffer) {
                 Ok(n) => n,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => break Some(error),
             };
             if n == 0 {
@@ -339,10 +365,20 @@ fn content_range(value: &str) -> Result<(u64, u64, u64)> {
         .split_once('-')
         .context("invalid Content-Range interval")?;
     let (start, end, length) = (
-        start.parse::<u64>()?,
-        end.parse::<u64>()?,
-        length.parse::<u64>()?,
+        decimal(start, "Content-Range start")?,
+        decimal(end, "Content-Range end")?,
+        decimal(length, "Content-Range length")?,
     );
     ensure!(start <= end && end < length, "invalid Content-Range bounds");
     Ok((start, end, length))
+}
+
+fn decimal(value: &str, field: &str) -> Result<u64> {
+    ensure!(
+        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+        "invalid firmware {field}"
+    );
+    value
+        .parse()
+        .with_context(|| format!("invalid firmware {field}"))
 }

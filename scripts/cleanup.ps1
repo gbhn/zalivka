@@ -136,6 +136,6 @@ try {
     if ($taskRoot -and (Test-Path -LiteralPath $taskRoot)) {
         Save-Json ([pscustomobject]@{Success=$false; Error=$_.Exception.Message; Detail=($_ | Out-String)}) 'error.json'
     }
-    Write-Error $_
+    Write-Error $_ -ErrorAction Continue
     exit 1
 }

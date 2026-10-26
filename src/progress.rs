@@ -181,6 +181,7 @@ pub struct Progress {
 
 impl Progress {
     pub fn new(stage: impl Into<String>, total: Option<u64>, completed: u64) -> Self {
+        let total = total.filter(|total| *total >= completed);
         let now = Instant::now();
         let progress = Self {
             id: NEXT_TRANSFER.fetch_add(1, Ordering::Relaxed),
@@ -211,7 +212,11 @@ impl Progress {
     }
 
     pub fn advance(&mut self, bytes: u64) {
+        if self.finished {
+            return;
+        }
         self.completed = self.completed.saturating_add(bytes);
+        self.total = self.total.filter(|total| *total >= self.completed);
         let now = Instant::now();
         if now.duration_since(self.sampled_at) >= INTERVAL {
             let update = self.update(now, false);
@@ -230,6 +235,9 @@ impl Progress {
     }
 
     pub fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
         self.finished = true;
         let update = self.update(Instant::now(), true);
         crate::logging::emit(
@@ -241,7 +249,9 @@ impl Progress {
     }
 
     pub fn report(&self) {
-        Event::Transfer(self.update(Instant::now(), false)).emit();
+        if !self.finished {
+            Event::Transfer(self.update(Instant::now(), false)).emit();
+        }
     }
 
     fn level(&self) -> crate::logging::Level {

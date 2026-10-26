@@ -238,6 +238,11 @@ impl Router {
                 let Ok(header) = Ipv4Repr::parse(&ip, &checksums) else {
                     return;
                 };
+                // This gateway has no IPv4 reassembly. Never interpret a
+                // fragment's bytes as a fresh TCP SYN or DNS/DHCP datagram.
+                if ip.more_frags() || ip.frag_offset() != 0 {
+                    return;
+                }
                 let flow = |source_port, destination_port| Flow {
                     source: header.src_addr,
                     source_port,
@@ -294,7 +299,9 @@ impl Router {
     }
 
     fn connect_tcp(&mut self, key: Flow) {
-        if key.destination_port == 0
+        if key.source != CLIENT
+            || key.source_port == 0
+            || key.destination_port == 0
             || self.tcp.contains_key(&key)
             || self.tcp.len() >= MAX_FLOWS
             || (key.destination_port != 53 && !permitted(key.destination))
@@ -377,7 +384,9 @@ impl Router {
         }
         // Intercept even a hard-coded external DNS address. Other UDP (including
         // QUIC and multicast discovery) cannot bypass the TCP proxy policy.
-        if key.destination_port == 53
+        if key.source == CLIENT
+            && key.source_port != 0
+            && key.destination_port == 53
             && let Some(reply) = self.dns.reply(bytes)
         {
             self.ethernet.reply_udp(key, mac, &reply);

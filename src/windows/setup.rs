@@ -80,14 +80,9 @@ fn apple_driver_installed() -> Result<bool> {
             .to_string_lossy()
             .to_ascii_lowercase()
             .starts_with(&prefix)
-            && [
-                "AppleUsb.inf",
-                "appleusb.cat",
-                "AppleUsbFilter.dll",
-                "AppleKmdfFilter.sys",
-            ]
-            .iter()
-            .all(|name| entry.path().join(name).is_file())
+            && super::package::FILES
+                .iter()
+                .all(|name| entry.path().join(name).is_file())
         {
             return Ok(true);
         }

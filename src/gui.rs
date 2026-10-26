@@ -27,10 +27,21 @@ use zalivka::{
 };
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
+// Progress arrives twice per second. Background work must not drive the GPU
+// at the display's refresh rate; egui still repaints immediately for user input.
+const UI_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+
+fn logo_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo.png"))
+        .expect("embedded logo must be a valid PNG")
+}
 
 pub fn run() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!(
+                "../assets/window-icon.png"
+            ))?)
             .with_inner_size([1020.0, 800.0])
             .with_min_inner_size([700.0, 640.0]),
         ..Default::default()
@@ -82,6 +93,7 @@ struct Confirmation {
 }
 
 struct App {
+    logo: Option<egui::TextureHandle>,
     setup: Setup,
     devices: Vec<DeviceInfo>,
     scanning: bool,
@@ -107,6 +119,7 @@ impl App {
     fn new() -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
+            logo: None,
             setup: Setup::default(),
             devices: vec![],
             scanning: false,

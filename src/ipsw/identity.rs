@@ -149,6 +149,7 @@ impl IdentitySummary {
             board_id: wire::number(wire::get(value, &["ApBoardID"])?)?,
             device_class: info("DeviceClass")?
                 .as_string()
+                .filter(|value| !value.is_empty())
                 .context("invalid DeviceClass")?
                 .into(),
             variant: info("Variant")?
@@ -257,11 +258,12 @@ impl Ipsw {
             if index.is_some_and(|index| summary.index != index) {
                 continue;
             }
-            if let Some(variant) = variant {
-                if summary.variant != variant {
-                    continue;
-                }
-            } else if summary.restore_behavior != behavior.name() {
+            if let Some(variant) = variant
+                && summary.variant != variant
+            {
+                continue;
+            }
+            if summary.restore_behavior != behavior.name() {
                 continue;
             }
             matches.push((i, value, summary));

@@ -128,7 +128,7 @@ fn windows_inf(name: &str) -> Result<Vec<u16>> {
     Ok(wide(windows_directory()?.join("INF").join(name)))
 }
 fn ncm_guids(original: Option<&(u32, Vec<u8>)>) -> Vec<u8> {
-    let mut guids = original
+    let guids = original
         .filter(|(ty, bytes)| matches!(*ty, REG_MULTI_SZ | REG_SZ) && bytes.len().is_multiple_of(2))
         .map(|(_, bytes)| {
             bytes
@@ -137,15 +137,22 @@ fn ncm_guids(original: Option<&(u32, Vec<u8>)>) -> Vec<u8> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    while guids.last() == Some(&0) {
-        guids.pop();
+    let mut result = Vec::new();
+    let mut registered = false;
+    for name in guids
+        .split(|unit| *unit == 0)
+        .filter(|name| !name.is_empty())
+    {
+        registered |=
+            String::from_utf16(name).is_ok_and(|name| name.eq_ignore_ascii_case(GUID_TEXT));
+        result.extend_from_slice(name);
+        result.push(0);
     }
-    if !guids.is_empty() {
-        guids.push(0);
+    if !registered {
+        result.extend(wide(GUID_TEXT));
     }
-    guids.extend(wide(GUID_TEXT));
-    guids.push(0);
-    guids.into_iter().flat_map(u16::to_le_bytes).collect()
+    result.push(0);
+    result.into_iter().flat_map(u16::to_le_bytes).collect()
 }
 
 fn original_property(value: &[u16], ty: u32, size: u32) -> Result<String> {
@@ -195,7 +202,12 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
     let key = parameters(instance)?;
     let path = backup_path(instance)?;
     let backup = if path.exists() {
-        serde_json::from_slice::<Backup>(&std::fs::read(&path)?)?
+        let bytes = crate::storage::read_limited(
+            std::fs::File::open(&path)?,
+            1024 * 1024,
+            "saved NCM driver settings exceed 1 MiB",
+        )?;
+        serde_json::from_slice::<Backup>(&bytes)?
     } else {
         ensure!(!restore, "no saved NCM driver settings for this interface");
         let property = |key| -> Result<Option<String>> {

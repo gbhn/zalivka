@@ -1,6 +1,20 @@
 use super::*;
 use nusb::descriptors::ConfigurationDescriptor;
 
+#[test]
+fn unusable_endpoint_numbers_do_not_hide_a_later_ncm_interface() {
+    for address in [0x80, 0x91, 0xf1] {
+        let mut bytes = configuration(0);
+        let offset = bytes
+            .windows(3)
+            .position(|bytes| bytes == [7, 5, 0x81])
+            .unwrap();
+        bytes[offset + 2] = address;
+        let selected = ncm_interface(ConfigurationDescriptor::new(&bytes).unwrap()).unwrap();
+        assert_eq!(selected.control, 2);
+    }
+}
+
 fn configuration(first: u8) -> Vec<u8> {
     let mut bytes = vec![9, 2, 0, 0, 4, 1, 0, 0x80, 50];
     for (control, input, output) in [(first, 0x81, 0x02), (first + 2, 0x83, 0x04)] {

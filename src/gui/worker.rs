@@ -1,6 +1,6 @@
 //! Child-process lifetime, progress and completion for one GUI operation.
 use super::widgets::elapsed_text;
-use super::{Action, Event, Level, Notice, Record, Setup, Tone, progress};
+use super::{Action, Event, Level, Notice, Record, Setup, Tone, UI_REFRESH_INTERVAL, progress};
 use anyhow::{Context, Result};
 use eframe::egui;
 use std::{
@@ -410,7 +410,7 @@ impl Job {
                         {
                             break;
                         }
-                        ctx.request_repaint();
+                        ctx.request_repaint_after(UI_REFRESH_INTERVAL);
                     }
                     let _ = tx.send(Event::Worker(id, Output::Closed));
                     ctx.request_repaint();

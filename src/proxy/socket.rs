@@ -48,6 +48,9 @@ impl Stream {
 }
 impl Read for Stream {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
         match &mut self.transport {
             Transport::Tcp(s) => s.read(out),
             Transport::Tls(s) => s.read(out),
@@ -104,9 +107,15 @@ pub(crate) fn connect(host: &str, port: u16) -> Result<Stream> {
     let uri = super::target_uri(host, port)?;
     connect_via(host, port, super::for_url(&uri)?)
 }
+fn socket_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
 fn tcp_connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
     let deadline = Instant::now() + timeout;
-    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let host = socket_host(host);
     let addresses = (host, port)
         .to_socket_addrs()
         .context("resolving upstream on the Windows host")?;
@@ -191,6 +200,7 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
     Ok(stream)
 }
 fn tls_transport(tcp: TcpStream, host: &str, config: Arc<ClientConfig>) -> Result<Transport> {
+    let host = socket_host(host);
     let name = ServerName::try_from(host.to_owned()).context("invalid HTTPS proxy hostname")?;
     let mut tls = StreamOwned::new(ClientConnection::new(config, name)?, tcp);
     while tls.conn.is_handshaking() {
@@ -247,6 +257,7 @@ fn http_connect(
     Ok(())
 }
 fn socks_connect(stream: &mut Stream, host: &str, port: u16, proxy: &Proxy) -> Result<()> {
+    let host = socket_host(host);
     let target = if proxy.resolve_target() {
         Some(
             (host, port)

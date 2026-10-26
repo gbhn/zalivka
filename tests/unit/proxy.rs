@@ -185,3 +185,24 @@ fn tunnel_hosts_cannot_change_authority_path_or_port() {
         );
     }
 }
+#[test]
+fn proxy_environment_trims_addresses_and_falls_back_from_empty_uppercase_bypass() {
+    let read = |name: &str| match name {
+        "HTTPS_PROXY" => Some("  http://proxy.invalid:8080  ".into()),
+        "NO_PROXY" => Some("  ".into()),
+        "no_proxy" => Some(", ,gs.apple.com,,".into()),
+        _ => None,
+    };
+    assert!(
+        environment_proxy(&"https://gs.apple.com/".parse().unwrap(), read)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        environment_proxy(&"https://mesu.apple.com/".parse().unwrap(), read)
+            .unwrap()
+            .unwrap()
+            .host(),
+        "proxy.invalid"
+    );
+}

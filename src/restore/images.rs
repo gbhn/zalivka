@@ -53,16 +53,19 @@ impl ContextState {
                 continue;
             }
             ensure!(
-                name != "TRAILER!!!" && names.insert(name.trim_end_matches('/').to_owned()),
+                name.trim_end_matches('/') != "TRAILER!!!"
+                    && names.insert(name.trim_end_matches('/').to_owned()),
                 "duplicate or reserved Bootability entry {name}"
             );
             let mode = self.ipsw.unix_mode(&path)?;
             let size = self.ipsw.size(&path)?;
-            entries.push((name.to_owned(), path, mode, size));
+            let mut header = Vec::new();
+            cpio_header(&mut header, name, mode, size)?;
+            entries.push((header, path, size));
         }
         ensure!(!entries.is_empty(), "IPSW has no BootabilityBundle");
-        for (name, path, mode, size) in entries {
-            cpio_header(out, &name, mode, size)?;
+        for (header, path, size) in entries {
+            out.write_all(&header)?;
             ensure!(
                 self.ipsw.stream(&path, out)? == size,
                 "truncated Bootability entry"

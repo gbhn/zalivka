@@ -66,7 +66,6 @@ pub(super) fn metric(ui: &mut egui::Ui, label: &str, value: &str) {
 pub(super) fn progress_bar(ui: &mut egui::Ui, fraction: Option<f32>) {
     let bar = egui::ProgressBar::new(fraction.unwrap_or_default())
         .fill(super::theme::BLUE)
-        .animate(fraction.is_none())
         .desired_height(10.0);
     ui.add(bar);
     if let Some(value) = fraction {

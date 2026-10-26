@@ -221,7 +221,9 @@ impl Session {
 
     fn connect_until(&self, destination: u16, deadline: Instant) -> Result<MuxStream> {
         ensure!(destination != 0, "zero service port");
+        ensure!(!self.1.load(Ordering::Acquire), "USB mux session cancelled");
         let mut link = self.lock()?;
+        ensure!(Instant::now() < deadline, "service connection timed out");
         ensure!(link.channels.len() < 64, "too many mux connections");
         let source = loop {
             let p = link.next_port;

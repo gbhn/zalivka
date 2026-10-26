@@ -54,7 +54,7 @@ fn truncated_and_cyclic_questions_are_bounded() {
     let mut cycle = q[..12].to_vec();
     cycle.extend([0xc0, 12, 0, 1, 0, 1]);
     assert_eq!(dns.reply(&cycle).unwrap()[3] & 15, 1);
-    for name in ["localhost", "wpad", "service.local"] {
+    for name in ["localhost", "app.localhost", "WPAD", "service.local"] {
         assert_eq!(dns.reply(&query(name, 1)).unwrap()[3] & 15, 5);
     }
 }

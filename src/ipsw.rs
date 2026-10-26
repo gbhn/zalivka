@@ -28,6 +28,7 @@ pub(crate) fn component_path(entry: &Value) -> Result<Option<&str>> {
     };
     let path = path.as_string().context("invalid component path")?;
     validate_path(path)?;
+    ensure!(!path.ends_with('/'), "component path names a directory");
     Ok(Some(path))
 }
 
@@ -64,11 +65,13 @@ impl Ipsw {
     /// Independent file cursor and ZIP reader for a concurrent restore request.
     /// File::try_clone shares the seek position and cannot be used here.
     pub fn reopen(&self) -> Result<Self> {
-        Ok(Self {
-            path: self.path.clone(),
-            archive: Self::open_archive(&self.path)?,
-            manifest: self.manifest.clone(),
-        })
+        let mut reopened = Self::open(&self.path)?;
+        ensure!(
+            reopened.manifest == self.manifest,
+            "IPSW BuildManifest changed while restoring"
+        );
+        reopened.manifest = self.manifest.clone();
+        Ok(reopened)
     }
 
     fn open_archive(path: &Path) -> Result<ZipArchive<BufReader<File>>> {
@@ -108,8 +111,8 @@ impl Ipsw {
         ensure!(
             wire::get(&manifest, &["BuildIdentities"])?
                 .as_array()
-                .is_some(),
-            "BuildIdentities is not an array"
+                .is_some_and(|identities| !identities.is_empty()),
+            "BuildIdentities must be a nonempty array"
         );
         let products = wire::get(&manifest, &["SupportedProductTypes"])?
             .as_array()
@@ -286,7 +289,7 @@ impl Ipsw {
         self.preflight_paths(id)
     }
 
-    pub(crate) fn verify_boot_component(&mut self, id: &Identity, name: &str) -> Result<()> {
+    pub(crate) fn verify_boot_component(&mut self, id: &Identity, name: &str) -> Result<Vec<u8>> {
         ensure!(
             wire::get(&id.value, &["Manifest", name, "Digest"])?
                 .as_data()
@@ -300,10 +303,10 @@ impl Ipsw {
             rest.is_empty() && img4::payload_type(&bytes).is_some(),
             "boot component {name} is not a complete IM4P payload"
         );
-        Ok(())
+        Ok(bytes)
     }
 
-    fn preflight_paths(&self, id: &Identity) -> Result<()> {
+    fn preflight_paths(&mut self, id: &Identity) -> Result<()> {
         wire::optional_boolean(&id.value, &["Info", "RequiresUIDMode"])?;
         wire::optional_boolean(&id.value, &["Info", "RequiresNonceSlot"])?;
         for (name, entry) in id.manifest()? {
@@ -346,7 +349,18 @@ impl Ipsw {
             if let Some(path) = component_path(entry)
                 .with_context(|| format!("invalid manifest component {name}"))?
             {
-                ensure!(self.contains(path), "IPSW is missing {name}: {path}");
+                let file = self
+                    .archive
+                    .by_name(path)
+                    .with_context(|| format!("IPSW is missing {name}: {path}"))?;
+                ensure!(
+                    !file.is_dir(),
+                    "IPSW component {name} is a directory: {path}"
+                );
+                ensure!(
+                    name != "OS" || file.size() != 0,
+                    "IPSW filesystem image is empty: {path}"
+                );
             }
         }
         Ok(())
@@ -420,7 +434,10 @@ impl Seek for ImageReader {
 
 pub fn validate_path(path: &str) -> Result<()> {
     ensure!(
-        !path.is_empty() && !path.contains(['\\', ':', '\0']) && !path.starts_with('/'),
+        !path.is_empty()
+            && !path.contains(['\\', ':', '\0'])
+            && !path.starts_with('/')
+            && !path.contains("//"),
         "unsafe archive path {path:?}"
     );
     ensure!(

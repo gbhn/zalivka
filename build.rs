@@ -36,11 +36,19 @@ fn hash_path(path: &Path, hash: &mut Sha256) {
 }
 
 fn main() {
+    #[cfg(feature = "gui")]
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        winresource::WindowsResource::new()
+            .set_icon("assets/logo.ico")
+            .compile()
+            .expect("embedding the Windows application icon");
+    }
     let inputs = [
         "build.rs",
         "Cargo.toml",
         "Cargo.lock",
         "src",
+        "assets",
         "certs",
         "packaging",
     ];
@@ -80,6 +88,9 @@ fn main() {
     // Source paths and HEAD cover source changes, staging and commits. Merely
     // refreshing Git's stat cache must not rebuild the executable.
     if let Some(path) = git(&["rev-parse", "--git-path", "HEAD"]) {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    if let Some(path) = git(&["rev-parse", "--git-path", "packed-refs"]) {
         println!("cargo:rerun-if-changed={path}");
     }
     if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"])

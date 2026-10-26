@@ -12,6 +12,134 @@ fn job(action: Action) -> Job {
     Job::new(7, action, child, tempfile::tempfile().unwrap())
 }
 
+fn render_app(app: &mut App, ctx: &egui::Context, frame: u32) -> egui::FullOutput {
+    ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1020.0, 800.0),
+            )),
+            time: Some(f64::from(frame) / 60.0),
+            ..Default::default()
+        },
+        |ctx| eframe::App::update(app, ctx, &mut eframe::Frame::_new_kittest()),
+    )
+}
+
+#[test]
+fn active_operations_wait_for_updates_instead_of_redrawing_at_monitor_refresh_rate() {
+    for action in [
+        Action::Restore,
+        Action::Download,
+        Action::Verify,
+        Action::UsbInternet,
+    ] {
+        for fraction in [None, Some(0.5)] {
+            let mut app = App::new();
+            let mut job = job(action);
+            job.overall_fraction = fraction;
+            let mut update = transfer(1, "Файловая система");
+            update.total = fraction.map(|_| 100);
+            job.output(Output::State(progress::Event::Transfer(update)));
+            app.job = Some(job);
+            app.journal_open = true;
+            app.journal_line(Record::new(Level::Info, "test", "Передача идёт"));
+            let ctx = egui::Context::default();
+            configure(&ctx);
+            for frame in 0..12 {
+                let output = render_app(&mut app, &ctx, frame);
+                if frame == 11 {
+                    let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+                    assert!(
+                        delay >= Duration::from_millis(400),
+                        "{action:?}, fraction={fraction:?}: redraw in {delay:?}"
+                    );
+                    assert!(
+                        delay <= Duration::from_millis(500),
+                        "active progress must still refresh: {delay:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn scanning_devices_does_not_start_a_continuous_animation() {
+    let mut app = App::new();
+    app.scanning = true;
+    let ctx = egui::Context::default();
+    configure(&ctx);
+    for frame in 0..12 {
+        let output = render_app(&mut app, &ctx, frame);
+        if frame == 11 {
+            assert!(
+                output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
+                    >= Duration::from_millis(400)
+            );
+        }
+    }
+}
+
+#[test]
+fn throttled_background_paints_do_not_delay_input_or_drop_worker_updates() {
+    let mut app = App::new();
+    app.job = Some(job(Action::Restore));
+    let ctx = egui::Context::default();
+    configure(&ctx);
+    let mut journal_button = None;
+    for frame in 0..12 {
+        let output = render_app(&mut app, &ctx, frame);
+        journal_button = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == "Журнал" => {
+                Some(text.pos + egui::vec2(4.0, 4.0))
+            }
+            _ => None,
+        });
+    }
+    let pos = journal_button.expect("journal button");
+    app.tx
+        .send(Event::Worker(
+            7,
+            Output::State(progress::Event::Checkpoint {
+                name: "writing_filesystem".into(),
+                complete: false,
+            }),
+        ))
+        .unwrap();
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1020.0, 800.0),
+            )),
+            time: Some(12.0 / 60.0),
+            events: vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| eframe::App::update(&mut app, ctx, &mut eframe::Frame::_new_kittest()),
+    );
+    assert!(
+        app.journal_open,
+        "clicks must be applied in the input frame"
+    );
+    assert_eq!(app.job.as_ref().unwrap().phase, "Этап: writing filesystem");
+}
+
 fn worker_line(event: progress::Event) -> String {
     let mut line = Vec::new();
     event.write_to(&mut line).unwrap();
@@ -23,6 +151,24 @@ fn send_worker(app: &mut App, event: progress::Event) {
         .send(Event::Worker(7, Output::parse(worker_line(event), true)))
         .unwrap();
     app.poll(&egui::Context::default());
+}
+
+#[test]
+fn a_log_burst_leaves_time_for_rendering_without_losing_records() {
+    let mut app = App::new();
+    app.job = Some(job(Action::Doctor));
+    for index in 0..600 {
+        app.tx
+            .send(Event::Worker(7, Output::Line(format!("line {index}"))))
+            .unwrap();
+    }
+    let ctx = egui::Context::default();
+    app.poll(&ctx);
+    assert_eq!(app.logs.len(), 256);
+    app.poll(&ctx);
+    app.poll(&ctx);
+    assert_eq!(app.logs.len(), 600);
+    assert_eq!(app.logs.back().unwrap().message, "line 599");
 }
 fn device(ecid: u64, mode: Mode) -> DeviceInfo {
     DeviceInfo {

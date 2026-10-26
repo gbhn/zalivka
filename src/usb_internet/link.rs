@@ -199,6 +199,10 @@ impl Link {
             if sent.status == Err(TransferError::Stall) {
                 recover_stall(&mut self.output, &mut self.output_recovery)
                     .context("writing Mac USB network")?;
+                ensure!(
+                    sent.actual_len == 0,
+                    "USB network write stalled after partial delivery; cannot replay the NTB"
+                );
                 buffer = sent.buffer;
                 continue;
             }

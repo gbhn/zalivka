@@ -60,6 +60,12 @@ fn truncated_parameters_and_unbounded_word_offsets_return_errors() {
     for offset in [0, 1, usize::MAX - 1, usize::MAX] {
         assert!(word(&[0], offset).is_err());
     }
+    let mut bytes = vec![
+        28, 0, 3, 0, 0, 32, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 0, 32, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0,
+    ];
+    assert!(Parameters::parse(&bytes).is_ok());
+    bytes[..2].copy_from_slice(&32u16.to_le_bytes());
+    assert!(Parameters::parse(&bytes).is_err());
 }
 
 #[test]

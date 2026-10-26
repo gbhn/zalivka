@@ -92,7 +92,11 @@ impl Resolver {
 
     fn address(&mut self, name: &str) -> Result<Ipv4Addr, Rcode> {
         let key = name.to_ascii_lowercase();
-        if key == "localhost" || key == "wpad" || key.ends_with(".local") {
+        if key == "localhost"
+            || key.ends_with(".localhost")
+            || key == "wpad"
+            || key.ends_with(".local")
+        {
             return Err(Rcode::REFUSED);
         }
         if let Some(ip) = self.addresses.get(&key) {

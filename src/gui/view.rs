@@ -1,9 +1,7 @@
 //! Main window layout, journal and frame updates.
-use super::theme::BLUE;
 use super::widgets::{caption, card, tint};
-use super::{App, Level, Picker, SCAN_INTERVAL};
+use super::{App, Level, Picker, SCAN_INTERVAL, UI_REFRESH_INTERVAL};
 use eframe::egui::{self, Color32, RichText, Vec2};
-use std::time::Duration;
 
 impl App {
     pub(super) fn header(&mut self, ctx: &egui::Context) {
@@ -15,14 +13,21 @@ impl App {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(30.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 9, BLUE);
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "Z",
-                        egui::FontId::proportional(21.0),
-                        Color32::WHITE,
+                    let logo = self.logo.get_or_insert_with(|| {
+                        let icon = super::logo_icon();
+                        ctx.load_texture(
+                            "zalivka-logo",
+                            egui::ColorImage::from_rgba_unmultiplied(
+                                [icon.width as usize, icon.height as usize],
+                                &icon.rgba,
+                            ),
+                            egui::TextureOptions::LINEAR,
+                        )
+                    });
+                    ui.add(
+                        egui::Image::new(&*logo)
+                            .fit_to_exact_size(Vec2::new(56.0, 44.0))
+                            .alt_text("Логотип Zalivka"),
                     );
                     ui.label(RichText::new("Zalivka").size(20.0).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -134,10 +139,10 @@ impl eframe::App for App {
         if self.job.is_none() && !self.picking && self.last_scan.elapsed() >= SCAN_INTERVAL {
             self.detect(ctx);
         }
-        ctx.request_repaint_after(if self.job.is_some() || self.scanning {
-            Duration::from_millis(100)
+        ctx.request_repaint_after(if self.job.is_some() {
+            UI_REFRESH_INTERVAL
         } else {
-            Duration::from_secs(1)
+            SCAN_INTERVAL
         });
         if ctx.input(|i| i.viewport().close_requested())
             && let Some(job) = &mut self.job

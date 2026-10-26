@@ -31,7 +31,7 @@ fn environment_proxy(uri: &Uri, read: impl Fn(&str) -> Option<String>) -> Result
     }) else {
         return Ok(None);
     };
-    let proxy = Proxy::new(&address)
+    let proxy = Proxy::new(address.trim())
         .with_context(|| format!("invalid {name}; direct fallback is disabled"))?;
     let mut builder = Proxy::builder(proxy.protocol())
         .host(proxy.host())
@@ -43,9 +43,16 @@ fn environment_proxy(uri: &Uri, read: impl Fn(&str) -> Option<String>) -> Result
     if let Some(password) = proxy.password() {
         builder = builder.password(password);
     }
-    if let Some(bypass) = read("NO_PROXY").or_else(|| read("no_proxy")) {
-        for pattern in bypass.split(',') {
-            builder = builder.no_proxy(pattern.trim());
+    if let Some(bypass) = read("NO_PROXY")
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| read("no_proxy"))
+    {
+        for pattern in bypass
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            builder = builder.no_proxy(pattern);
         }
     }
     let proxy = builder.build()?;

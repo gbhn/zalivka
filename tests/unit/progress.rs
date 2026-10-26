@@ -12,6 +12,9 @@ fn dropped_streams_emit_one_terminal_event_without_claiming_all_bytes_were_sent(
         let mut retry = Progress::new("download", Some(100), 40);
         retry.advance(60);
         retry.finish();
+        retry.finish();
+        retry.advance(10);
+        retry.report();
         return;
     }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -109,4 +112,26 @@ fn duplicate_operation_weights_cannot_change_the_meaning_of_a_worker_event() {
             .unwrap();
         assert!(Event::parse(std::str::from_utf8(&line).unwrap()).is_none());
     }
+}
+#[test]
+fn completed_progress_is_terminal_and_finish_is_idempotent() {
+    let mut progress = Progress::new("x", Some(10), 0);
+    progress.advance(10);
+    progress.finish();
+    progress.advance(5);
+    progress.finish();
+    assert_eq!(progress.completed, 10);
+    assert!(progress.finished);
+}
+
+#[test]
+fn inaccurate_totals_do_not_hide_measured_progress() {
+    let mut progress = Progress::new("x", Some(10), 11);
+    assert!(progress.update(Instant::now(), false).valid());
+    assert_eq!(progress.total, None);
+    progress.total = Some(12);
+    progress.advance(2);
+    let update = progress.update(Instant::now(), false);
+    assert_eq!((update.completed, update.total), (13, None));
+    assert!(update.valid());
 }

@@ -52,6 +52,12 @@ fn device_fields(device: &DeviceInfo) -> Result<Dictionary> {
 
 fn base(device: &DeviceInfo, id: &Identity) -> Result<Dictionary> {
     let mut d = device_fields(device)?;
+    for name in ["ApChipID", "ApBoardID", "ApSecurityDomain"] {
+        ensure!(
+            wire::number(wire::get(&id.value, &[name])?)? == wire::number(&d[name])?,
+            "signing identity {name} disagrees with connected device"
+        );
+    }
     if let Some(fields) = id.value.as_dictionary() {
         wire::copy_keys(
             &mut d,
@@ -139,6 +145,10 @@ fn firmware_request(device: &DeviceInfo, id: &Identity, chain: BootChain) -> Res
         let entry = component
             .request(&parameters)
             .with_context(|| format!("preparing signing component {name}"))?;
+        ensure!(
+            !parameters.contains_key(name) && !name.starts_with('@'),
+            "signing component {name} conflicts with request parameters"
+        );
         components.insert(name.clone(), Value::Dictionary(entry));
     }
     // Every component sees the same device parameters. A previously prepared
@@ -179,16 +189,29 @@ impl<'a> Component<'a> {
         if let Some(rules) = self.info.and_then(|info| info.get("RestoreRequestRules")) {
             apply_rules(&mut entry, rules, parameters)?;
         }
+        let trusted = entry
+            .get("Trusted")
+            .map(|value| {
+                value
+                    .as_boolean()
+                    .context("invalid signing Trusted flag after rules")
+            })
+            .transpose()?
+            .unwrap_or(false);
         let digest = entry
             .get("Digest")
             .map(|value| value.as_data().context("invalid signing Digest"))
             .transpose()?;
-        if self.trusted && self.path.is_some() {
+        ensure!(
+            digest.is_none_or(|digest| digest.is_empty() || [20, 32, 48].contains(&digest.len())),
+            "unsupported signing Digest size"
+        );
+        if trusted && self.path.is_some() {
             ensure!(
                 digest.is_some_and(|digest| !digest.is_empty()),
                 "strict restore requires a nonempty Digest for a trusted file"
             );
-        } else if self.trusted && digest.is_none() {
+        } else if trusted && digest.is_none() {
             ensure!(
                 self.info
                     .is_some_and(|info| info.contains_key("RestoreRequestRules")),

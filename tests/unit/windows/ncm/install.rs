@@ -70,6 +70,26 @@ fn adding_ncm_registration_preserves_both_registry_string_types() {
 }
 
 #[test]
+fn ncm_registration_does_not_duplicate_its_guid_or_hide_it_after_empty_records() {
+    let existing = format!("\0{GUID_TEXT}\0\0");
+    let bytes: Vec<_> = existing.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let merged = ncm_guids(Some(&(REG_MULTI_SZ, bytes)));
+    let units: Vec<_> = merged
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect();
+    let names: Vec<_> = units
+        .split(|unit| *unit == 0)
+        .take_while(|name| !name.is_empty())
+        .map(|name| String::from_utf16(name).unwrap())
+        .collect();
+    assert_eq!(names, [GUID_TEXT]);
+    assert_eq!(ncm_guids(Some(&(REG_MULTI_SZ, merged.clone()))), merged);
+    let empty = vec![0, 0, 0, 0];
+    assert_eq!(ncm_guids(Some(&(REG_MULTI_SZ, empty))), merged);
+}
+
+#[test]
 fn saved_inf_names_cannot_name_directories_or_escape_the_windows_inf_folder() {
     for name in [
         "",

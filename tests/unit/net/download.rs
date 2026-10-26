@@ -1,5 +1,39 @@
 use super::*;
 
+#[test]
+fn interrupted_body_read_retries_without_an_http_retry_or_losing_bytes() {
+    struct InterruptedOnce {
+        interrupted: bool,
+        input: std::io::Cursor<Vec<u8>>,
+    }
+    impl Read for InterruptedOnce {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            self.input.read(out)
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("restore.ipsw");
+    let mut calls = 0;
+    download_from(&destination, &Sha256::digest(b"abc"), 0, |offset| {
+        calls += 1;
+        assert_eq!(offset, 0);
+        Ok(Response::builder()
+            .status(200)
+            .header("Content-Length", "3")
+            .body(ureq::Body::builder().reader(InterruptedOnce {
+                interrupted: false,
+                input: std::io::Cursor::new(b"abc".to_vec()),
+            }))?)
+    })
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(std::fs::read(destination).unwrap(), b"abc");
+}
+
 fn firmware_server(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -315,4 +349,76 @@ fn encoded_responses_and_changing_range_totals_preserve_the_verified_prefix() {
         assert!(!destination.exists());
         server.join().unwrap();
     }
+}
+#[test]
+fn repeated_resume_rejections_stop_instead_of_restarting_forever() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("restore.ipsw");
+    std::fs::write(directory.path().join("restore.ipsw.part"), b"a").unwrap();
+    let (url, server) = firmware_server(vec![
+        "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        "HTTP/1.1 206 Partial Content\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/2\r\nConnection: close\r\n\r\na".into(),
+        "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+    ]);
+    let error = test_download(&url, &destination, &Sha256::digest(b"ab")).unwrap_err();
+    assert!(
+        error.to_string().contains("repeatedly rejected resume"),
+        "{error:#}"
+    );
+    assert!(!destination.exists());
+    assert_eq!(server.join().unwrap().len(), 3);
+}
+
+#[test]
+fn contradictory_full_response_metadata_preserves_partial_bytes() {
+    for (header, value) in [("content-range", "bytes 1-2/3"), ("content-length", "+2")] {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("restore.ipsw");
+        let part = directory.path().join("restore.ipsw.part");
+        std::fs::write(&part, b"a").unwrap();
+        let (url, server) = firmware_server(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nbc".into(),
+        ]);
+        let result = download_from(&destination, &Sha256::digest(b"abc"), 0, |offset| {
+            let mut response = send_http(&agent(), &firmware_request(&url, offset)?)?;
+            response.headers_mut().insert(header, value.parse()?);
+            Ok(response)
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(part).unwrap(), b"a");
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn range_numbers_cannot_contain_signs() {
+    for range in ["bytes +1-2/3", "bytes 1-+2/3", "bytes 1-2/+3"] {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("restore.ipsw");
+        let part = directory.path().join("restore.ipsw.part");
+        std::fs::write(&part, b"a").unwrap();
+        let (url, server) = firmware_server(vec![format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: {range}\r\nConnection: close\r\n\r\nbc"
+        )]);
+        assert!(test_download(&url, &destination, &Sha256::digest(b"abc")).is_err());
+        assert_eq!(std::fs::read(part).unwrap(), b"a");
+        server.join().unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_partial_symlink_cannot_truncate_an_unrelated_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let original = directory.path().join("original");
+    std::fs::write(&original, b"preserve me").unwrap();
+    let destination = directory.path().join("restore.ipsw");
+    std::os::unix::fs::symlink(&original, directory.path().join("restore.ipsw.part")).unwrap();
+    assert!(
+        download_from(&destination, &Sha256::digest(b"abc"), 0, |_| panic!(
+            "symlink used"
+        ))
+        .is_err()
+    );
+    assert_eq!(std::fs::read(original).unwrap(), b"preserve me");
 }

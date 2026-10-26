@@ -11,7 +11,7 @@ const X64_CAB: &[u8] = include_bytes!("../../packaging/apple-usb/apple-usb-x64.c
 const ARM64_CAB: &[u8] = include_bytes!("../../packaging/apple-usb/apple-usb-arm64.cab");
 const X64_SHA256: &str = "8ae3b3001e3733f24ef0178f149c6534f94e57d16e8a0d75647ab979e03151ca";
 const ARM64_SHA256: &str = "2d7040ff12724ce300534888aa5727b415f6439896916f602d5605d0737192b4";
-const FILES: [&str; 5] = [
+pub(super) const FILES: [&str; 5] = [
     "AppleUsb.inf",
     "appleusb.cat",
     "AppleUsbFilter.dll",

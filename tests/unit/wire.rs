@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn xml_depth_is_bounded_before_decoding_nested_values() {
+    let xml = format!(
+        "<plist>{}{}{}",
+        "<array>".repeat(300),
+        "</array>".repeat(300),
+        "</plist>"
+    );
+    assert!(
+        receive_xml(&mut xml.as_bytes())
+            .unwrap_err()
+            .to_string()
+            .contains("nested too deeply")
+    );
+}
+
+#[test]
+fn plist_writer_refuses_growth_past_its_budget_without_partial_writes() {
+    let mut bytes = Vec::new();
+    let mut writer = LimitedWriter {
+        bytes: &mut bytes,
+        remaining: 3,
+    };
+    writer.write_all(b"ab").unwrap();
+    assert!(writer.write_all(b"cd").is_err());
+    writer.write_all(b"c").unwrap();
+    assert!(writer.write_all(b"d").is_err());
+    assert_eq!(bytes, b"abc");
+}
+
+#[test]
 fn optional_metadata_distinguishes_absence_from_malformed_present_values() {
     let missing = dict([] as [(&str, Value); 0]);
     assert_eq!(optional(&missing, &["Arguments", "Flag"]).unwrap(), None);

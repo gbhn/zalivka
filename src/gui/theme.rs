@@ -131,15 +131,19 @@ impl Tone {
 }
 
 fn preference_file() -> Option<PathBuf> {
-    let root = if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
+    fn absolute_env(name: &str) -> Option<PathBuf> {
+        std::env::var_os(name)
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .filter(|path| path.is_absolute())
+    }
+    let root = if cfg!(windows) {
+        absolute_env("LOCALAPPDATA")
+            .or_else(|| absolute_env("USERPROFILE").map(|path| path.join("AppData").join("Local")))
+    } else {
+        absolute_env("XDG_CONFIG_HOME")
+            .or_else(|| absolute_env("HOME").map(|home| home.join(".config")))
     }?;
-    root.is_absolute()
-        .then(|| root.join("zalivka").join("theme"))
+    Some(root.join("zalivka").join("theme"))
 }
 
 fn read_preference(path: &Path) -> egui::ThemePreference {
@@ -165,16 +169,27 @@ pub(super) fn save_preference(preference: egui::ThemePreference) -> Result<()> {
 }
 
 fn write_preference(path: &Path, preference: egui::ThemePreference) -> Result<()> {
-    std::fs::create_dir_all(path.parent().context("Некорректный путь настроек")?)?;
-    std::fs::write(
-        path,
-        match preference {
-            egui::ThemePreference::Dark => "dark",
-            egui::ThemePreference::Light => "light",
-            egui::ThemePreference::System => "system",
-        },
-    )
-    .context("Не удалось сохранить тему оформления")
+    use std::io::Write;
+    let directory = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(directory)?;
+    let mut saved = tempfile::NamedTempFile::new_in(directory)?;
+    saved
+        .write_all(
+            match preference {
+                egui::ThemePreference::Dark => "dark",
+                egui::ThemePreference::Light => "light",
+                egui::ThemePreference::System => "system",
+            }
+            .as_bytes(),
+        )
+        .context("Не удалось сохранить тему оформления")?;
+    saved
+        .persist(path)
+        .context("Не удалось сохранить тему оформления")?;
+    Ok(())
 }
 
 #[cfg(test)]
