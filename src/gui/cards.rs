@@ -291,7 +291,6 @@ impl App {
             ui.add_space(12.0);
             ui.label(RichText::new(&job.phase).size(16.0));
             if job.action.writes_device() {
-                caption(ui, "Общий прогресс восстановления (оценка)");
                 progress_bar(ui, job.overall_fraction);
             } else if internet_speed.is_none() && job.transfers.is_empty() {
                 progress_bar(ui, None);

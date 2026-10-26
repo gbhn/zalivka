@@ -112,7 +112,11 @@ pub(super) fn log_progress(
     output(Record::new(
         Level::Debug,
         "restored",
-        if progress < 0 {
+        if progress == -1 {
+            format!(
+                "Операция {operation}: без промежуточного процента; полный вклад в общий прогресс"
+            )
+        } else if progress < 0 {
             format!("Операция {operation}: процент выполнения недоступен ({progress})")
         } else {
             format!("Операция {operation}: {progress}%")
@@ -125,7 +129,7 @@ pub(super) fn log_progress(
 }
 
 /// These optional weights are progress hints, not a condition for restoring.
-pub(super) fn operation_weights(message: &Value) -> Option<Vec<(u64, u64)>> {
+pub(super) fn operation_weights(message: &Value) -> Option<crate::progress::Event> {
     let weights =
         wire::dictionary(wire::get(message, &["OperationWeights", "operation_weights"]).ok()?)
             .ok()?;
@@ -142,7 +146,26 @@ pub(super) fn operation_weights(message: &Value) -> Option<Vec<(u64, u64)>> {
     operations
         .values()
         .any(|weight| *weight > 0)
-        .then(|| operations.into_iter().collect())
+        .then_some(())?;
+    let mut progresses = BTreeMap::new();
+    if let Some(values) =
+        wire::optional(message, &["OperationWeights", "operation_progresses"]).ok()?
+    {
+        for (key, value) in wire::dictionary(values).ok()? {
+            let operation = wire::number(ids.get(key)?).ok()?;
+            let weight = operations.get(&operation)?;
+            // Apple's PRProgressDecodeWeights stores completed weight units.
+            // Values above the operation's weight are capped by its decoder.
+            let completed = wire::number(value).ok()?.min(*weight);
+            if progresses.insert(operation, completed).is_some() {
+                return None;
+            }
+        }
+    }
+    Some(crate::progress::Event::OperationWeights {
+        weights: operations.into_iter().collect(),
+        progresses: progresses.into_iter().collect(),
+    })
 }
 
 pub(super) fn log_checkpoint(
@@ -288,8 +311,8 @@ pub(super) fn run(
                         return Ok(());
                     }
                     "ProgressMsg" => {
-                        if let Some(weights) = operation_weights(&message) {
-                            crate::progress::Event::OperationWeights { weights }.emit();
+                        if let Some(event) = operation_weights(&message) {
+                            event.emit();
                         }
                         let event = log_progress(&message, crate::logging::publish)?;
                         event.emit();

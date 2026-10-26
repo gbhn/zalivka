@@ -815,7 +815,7 @@ fn only_current_transfers_render_cards_regardless_of_device_progress_order() {
             let (labels, cards) = active_job_labels(&mut app, theme);
             assert_eq!(cards, 2, "summary plus one transfer: {theme:?}");
             assert!(
-                labels
+                !labels
                     .iter()
                     .any(|label| label == "Общий прогресс восстановления (оценка)")
             );
@@ -885,6 +885,7 @@ fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
         &mut app,
         progress::Event::OperationWeights {
             weights: vec![(12, 1), (13, 8), (55, 1)],
+            progresses: vec![],
         },
     );
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.0));
@@ -905,8 +906,8 @@ fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
     );
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.3));
     assert!(app.job.as_ref().unwrap().transfers.is_empty());
-    // New, indeterminate and restarted subtasks cannot make the total regress.
-    for (operation, progress) in [(79, 0), (13, -1), (13, 5), (55, 0)] {
+    // New, invalid and restarted subtasks cannot make the total regress.
+    for (operation, progress) in [(79, 0), (13, -2), (13, 5), (55, 0)] {
         send_worker(
             &mut app,
             progress::Event::OperationProgress {
@@ -984,25 +985,138 @@ fn overall_progress_keeps_updates_received_before_their_weights() {
     send_worker(
         &mut app,
         progress::Event::OperationWeights {
-            weights: vec![(28, 1), (99, 1)],
+            weights: vec![(28, 100), (99, 100)],
+            progresses: vec![],
         },
     );
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.4));
     send_worker(
         &mut app,
         progress::Event::OperationWeights {
-            weights: vec![(99, 1)],
+            weights: vec![(99, 100)],
+            progresses: vec![],
         },
     );
     send_worker(
         &mut app,
         progress::Event::OperationWeights {
-            weights: vec![(28, 1)],
+            weights: vec![(28, 100)],
+            progresses: vec![],
         },
     );
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.8));
     send_worker(&mut app, progress::Event::RestoreCompleted);
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(1.0));
+}
+
+#[test]
+fn overall_progress_uses_completed_weight_units_and_apples_integer_rounding() {
+    let mut app = App::new();
+    app.job = Some(job(Action::Restore));
+    send_worker(
+        &mut app,
+        progress::Event::OperationWeights {
+            weights: vec![(13, 1800), (18, 200)],
+            progresses: vec![(13, 450)],
+        },
+    );
+    // 450 / 2000 is 22.5%; Apple truncates the overall percentage to 22.
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.22));
+    for progress in [0, 10, -2, 101] {
+        send_worker(
+            &mut app,
+            progress::Event::OperationProgress {
+                operation: 13,
+                progress,
+            },
+        );
+        assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.22));
+    }
+    send_worker(
+        &mut app,
+        progress::Event::OperationProgress {
+            operation: 18,
+            progress: -1,
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.32));
+    assert!(!app.job.as_ref().unwrap().restore_completed);
+    send_worker(
+        &mut app,
+        progress::Event::OperationProgress {
+            operation: 13,
+            progress: 26,
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.33));
+
+    // Each contribution is truncated before the sum, not after it.
+    let mut app = App::new();
+    app.job = Some(job(Action::Restore));
+    send_worker(
+        &mut app,
+        progress::Event::OperationWeights {
+            weights: vec![(1, 3), (2, 7)],
+            progresses: vec![],
+        },
+    );
+    for operation in [1, 2] {
+        send_worker(
+            &mut app,
+            progress::Event::OperationProgress {
+                operation,
+                progress: 50,
+            },
+        );
+    }
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.4));
+}
+
+#[test]
+fn overall_progress_replays_real_mac_messages_without_inventing_missing_operations() {
+    let traces: std::collections::BTreeMap<String, Vec<progress::Event>> =
+        serde_json::from_str(include_str!("../fixtures/restored-progress-26A434.json")).unwrap();
+    for (name, action, expected) in [
+        ("erase", Action::Restore, 0.99),
+        // The device advertises operations 13 and 14 during this Revive, but
+        // never reports their progress. They must not be guessed complete.
+        ("update", Action::Revive, 0.41),
+    ] {
+        let mut app = App::new();
+        app.job = Some(job(action));
+        for event in &traces[name] {
+            send_worker(&mut app, event.clone());
+        }
+        let job = app.job.as_ref().unwrap();
+        assert_eq!(job.overall_fraction, Some(expected), "{name}");
+        assert!(!job.restore_completed);
+        assert!(!job.can_stop());
+        send_worker(&mut app, progress::Event::RestoreCompleted);
+        assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(1.0));
+    }
+}
+
+#[test]
+fn atomic_progress_received_before_weights_is_retained_without_confirming_success() {
+    let mut app = App::new();
+    app.job = Some(job(Action::Restore));
+    send_worker(
+        &mut app,
+        progress::Event::OperationProgress {
+            operation: 12,
+            progress: -1,
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, None);
+    send_worker(
+        &mut app,
+        progress::Event::OperationWeights {
+            weights: vec![(12, 300), (18, 200)],
+            progresses: vec![],
+        },
+    );
+    assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.6));
+    assert!(!app.job.as_ref().unwrap().restore_completed);
 }
 
 #[test]
@@ -1013,6 +1127,7 @@ fn checkpoints_and_operation_completion_preserve_an_active_transfer() {
         &mut app,
         progress::Event::OperationWeights {
             weights: vec![(999, 1)],
+            progresses: vec![],
         },
     );
     send_worker(

@@ -34,6 +34,9 @@ pub enum Event {
     },
     OperationWeights {
         weights: Vec<(u64, u64)>,
+        /// Completed weight units from restored, not percentages.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        progresses: Vec<(u64, u64)>,
     },
     OperationProgress {
         operation: u64,
@@ -49,10 +52,24 @@ impl Event {
         }
         match &event {
             Self::Transfer(update) if !update.valid() => None,
-            Self::OperationWeights { weights }
-                if weights.iter().all(|(_, weight)| *weight == 0) || {
+            Self::OperationWeights {
+                weights,
+                progresses,
+            } if weights.iter().all(|(_, weight)| *weight == 0)
+                || {
                     let mut seen = std::collections::HashSet::new();
                     weights.iter().any(|(operation, _)| !seen.insert(operation))
+                }
+                || {
+                    let weights: std::collections::BTreeMap<_, _> =
+                        weights.iter().copied().collect();
+                    let mut seen = std::collections::HashSet::new();
+                    progresses.iter().any(|(operation, completed)| {
+                        !seen.insert(operation)
+                            || weights
+                                .get(operation)
+                                .is_none_or(|weight| completed > weight)
+                    })
                 } =>
             {
                 None

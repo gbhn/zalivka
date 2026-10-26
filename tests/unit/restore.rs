@@ -465,15 +465,18 @@ fn optional_operation_weights_preserve_the_device_ids_without_blocking_restore()
         let received = wire::receive(&mut std::io::Cursor::new(framed)).unwrap();
         assert_eq!(
             operation_weights(&received).unwrap(),
-            vec![
-                (12, 300),
-                (13, 1800),
-                (14, 10),
-                (15, 100),
-                (18, 200),
-                (55, 1000),
-                (81, 225),
-            ]
+            crate::progress::Event::OperationWeights {
+                weights: vec![
+                    (12, 300),
+                    (13, 1800),
+                    (14, 10),
+                    (15, 100),
+                    (18, 200),
+                    (55, 1000),
+                    (81, 225),
+                ],
+                progresses: vec![],
+            }
         );
     }
     let mut missing = message.clone();
@@ -497,6 +500,47 @@ fn optional_operation_weights_preserve_the_device_ids_without_blocking_restore()
             .as_dictionary_mut()
             .unwrap()
             .insert("id_13".into(), invalid);
+        assert!(operation_weights(&malformed).is_none());
+        assert!(log_progress(&malformed, |_| {}).is_ok());
+    }
+}
+
+#[test]
+fn operation_weight_snapshots_preserve_completed_units_and_cap_them_to_the_weight() {
+    let mut message: Value =
+        serde_json::from_str(include_str!("../fixtures/restored-operation-weights.json")).unwrap();
+    message.as_dictionary_mut().unwrap()["OperationWeights"]
+        .as_dictionary_mut()
+        .unwrap()
+        .insert(
+            "operation_progresses".into(),
+            wire::dict([("id_13", 450u64.into()), ("id_18", 999u64.into())]),
+        );
+    for binary in [false, true] {
+        let mut framed = Vec::new();
+        if binary {
+            wire::send_binary(&mut framed, &message).unwrap();
+        } else {
+            wire::send(&mut framed, &message).unwrap();
+        }
+        let received = wire::receive(&mut std::io::Cursor::new(framed)).unwrap();
+        let Some(crate::progress::Event::OperationWeights { progresses, .. }) =
+            operation_weights(&received)
+        else {
+            panic!("missing progress snapshot");
+        };
+        assert_eq!(progresses, vec![(13, 450), (18, 200)]);
+    }
+    for value in [
+        true.into(),
+        wire::dict([("id_13", (-1i64).into())]),
+        wire::dict([("unknown_id", 1u64.into())]),
+    ] {
+        let mut malformed = message.clone();
+        malformed.as_dictionary_mut().unwrap()["OperationWeights"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("operation_progresses".into(), value);
         assert!(operation_weights(&malformed).is_none());
         assert!(log_progress(&malformed, |_| {}).is_ok());
     }

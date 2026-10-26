@@ -107,12 +107,40 @@ fn malformed_progress_cannot_supply_a_fake_percentage() {
 fn duplicate_operation_weights_cannot_change_the_meaning_of_a_worker_event() {
     for weights in [vec![(1, 1), (1, 2)], vec![(1, 1), (1, 0)]] {
         let mut line = Vec::new();
-        Event::OperationWeights { weights }
-            .write_to(&mut line)
-            .unwrap();
+        Event::OperationWeights {
+            weights,
+            progresses: vec![],
+        }
+        .write_to(&mut line)
+        .unwrap();
         assert!(Event::parse(std::str::from_utf8(&line).unwrap()).is_none());
     }
 }
+
+#[test]
+fn operation_progress_snapshots_reject_unknown_duplicate_and_excessive_contributions() {
+    for progresses in [vec![(13, 1801)], vec![(99, 1)], vec![(13, 1), (13, 2)]] {
+        let mut line = Vec::new();
+        Event::OperationWeights {
+            weights: vec![(13, 1800)],
+            progresses,
+        }
+        .write_to(&mut line)
+        .unwrap();
+        assert!(Event::parse(std::str::from_utf8(&line).unwrap()).is_none());
+    }
+    let event = Event::OperationWeights {
+        weights: vec![(13, 1800)],
+        progresses: vec![(13, 450)],
+    };
+    let mut line = Vec::new();
+    event.write_to(&mut line).unwrap();
+    assert_eq!(
+        Event::parse(std::str::from_utf8(&line).unwrap()),
+        Some(event)
+    );
+}
+
 #[test]
 fn completed_progress_is_terminal_and_finish_is_idempotent() {
     let mut progress = Progress::new("x", Some(10), 0);

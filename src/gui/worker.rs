@@ -26,11 +26,27 @@ pub(super) struct Job {
     pub(super) restore_completed: bool,
     internet: Internet,
     pub(super) transfers: BTreeMap<u64, Transfer>,
-    // Weights advertised by restored and each operation's highest known fraction.
-    overall_operations: BTreeMap<u64, (u64, f32)>,
+    overall_operations: BTreeMap<u64, Operation>,
     pub(super) overall_fraction: Option<f32>,
     pub(super) phase: String,
     pub(super) last_activity: Instant,
+}
+
+#[derive(Default)]
+struct Operation {
+    weight: u64,
+    percent: u64,
+    completed: u64,
+}
+
+impl Operation {
+    fn advance(&mut self, percent: u64) {
+        self.percent = self.percent.max(percent);
+        // PRProgressComputeOverallProgress truncates each weighted contribution
+        // to whole units before summing. Keep the multiply wide enough for u64.
+        let completed = (u128::from(self.weight) * u128::from(self.percent) / 100) as u64;
+        self.completed = self.completed.max(completed);
+    }
 }
 
 pub(super) struct Transfer {
@@ -237,14 +253,26 @@ impl Job {
                     self.phase = format!("Этап: {}", name.replace('_', " "));
                 }
             }
-            progress::Event::OperationWeights { weights } => {
+            progress::Event::OperationWeights {
+                weights,
+                progresses,
+            } => {
                 // Weights can arrive after progress, or temporarily omit an
-                // operation. Retain its measured fraction across both cases.
-                for (weight, _) in self.overall_operations.values_mut() {
-                    *weight = 0;
+                // operation. Retain its measured progress across both cases.
+                for operation in self.overall_operations.values_mut() {
+                    operation.weight = 0;
                 }
-                for (operation, weight) in weights {
-                    self.overall_operations.entry(operation).or_default().0 = weight;
+                for (id, weight) in weights {
+                    let operation = self.overall_operations.entry(id).or_default();
+                    operation.weight = weight;
+                    operation.completed = operation.completed.min(weight);
+                    operation.advance(operation.percent);
+                }
+                for (id, completed) in progresses {
+                    if let Some(operation) = self.overall_operations.get_mut(&id) {
+                        operation.completed =
+                            operation.completed.max(completed.min(operation.weight));
+                    }
                 }
                 self.update_overall();
             }
@@ -253,35 +281,39 @@ impl Job {
                 progress,
                 ..
             } => {
-                if progress >= 0 {
-                    self.advance_overall(operation, (progress as f32 / 100.0).min(1.0));
-                }
+                // Apple's progress accumulator counts -1 as the full weight
+                // of this operation. This is not a successful restore status.
+                let percent = match progress {
+                    -1 => 100,
+                    0..=100 => progress as u64,
+                    _ => return None,
+                };
+                self.overall_operations
+                    .entry(operation)
+                    .or_default()
+                    .advance(percent);
+                self.update_overall();
             }
         }
         None
-    }
-
-    fn advance_overall(&mut self, operation: u64, fraction: f32) {
-        let (_, previous) = self.overall_operations.entry(operation).or_default();
-        *previous = previous.max(fraction);
-        self.update_overall();
     }
 
     fn update_overall(&mut self) {
         let total: f64 = self
             .overall_operations
             .values()
-            .map(|(weight, _)| *weight as f64)
+            .map(|operation| operation.weight as f64)
             .sum();
         if total > 0.0 && !self.restore_completed {
             let completed: f64 = self
                 .overall_operations
                 .values()
-                .map(|(weight, fraction)| *weight as f64 * f64::from(*fraction))
+                .map(|operation| operation.completed.min(operation.weight) as f64)
                 .sum();
             // The device advertises weights for selected operations only. Keep
             // this estimate monotonic and reserve 100% for RestoreCompleted.
-            let fraction = ((completed / total) as f32).min(0.99);
+            let percent = ((completed / total) as f32 * 100.0).trunc().min(99.0);
+            let fraction = percent / 100.0;
             self.overall_fraction = Some(self.overall_fraction.unwrap_or_default().max(fraction));
         }
     }
