@@ -20,6 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zalivka::{
+    catalog,
     device::{DeviceInfo, Mode, parse_ecid},
     drivers,
     logging::{Level, Record},
@@ -77,6 +78,7 @@ enum Event {
         host: std::result::Result<Option<drivers::HostStatus>, String>,
     },
     Worker(u64, Output),
+    Firmware(u64, std::result::Result<catalog::Release, String>),
     Picked(Picker, Option<PathBuf>),
     Saved(std::result::Result<PathBuf, String>),
 }
@@ -92,10 +94,27 @@ struct Confirmation {
     accepted: bool,
 }
 
+struct FirmwareSelection {
+    device: DeviceInfo,
+    request: u64,
+    release: Option<std::result::Result<catalog::Release, String>>,
+}
+
+impl FirmwareSelection {
+    fn matches(&self, device: &DeviceInfo) -> bool {
+        self.device.ecid == device.ecid
+            && self.device.chip_id == device.chip_id
+            && self.device.board_id == device.board_id
+            && self.device.mode == device.mode
+    }
+}
+
 struct App {
     logo: Option<egui::TextureHandle>,
     setup: Setup,
     devices: Vec<DeviceInfo>,
+    firmware: Option<FirmwareSelection>,
+    next_firmware_request: u64,
     scanning: bool,
     scan_error: Option<String>,
     host: std::result::Result<Option<drivers::HostStatus>, String>,
@@ -122,6 +141,8 @@ impl App {
             logo: None,
             setup: Setup::default(),
             devices: vec![],
+            firmware: None,
+            next_firmware_request: 0,
             scanning: false,
             scan_error: None,
             host: Ok(None),
@@ -236,6 +257,35 @@ impl App {
         }) {
             self.scanning = false;
             self.scan_error = Some(e.to_string());
+        }
+    }
+    fn refresh_firmware(&mut self, ctx: &egui::Context, retry: bool) {
+        let Some(device) = self.target().cloned() else {
+            self.firmware = None;
+            return;
+        };
+        if !retry
+            && self
+                .firmware
+                .as_ref()
+                .is_some_and(|firmware| firmware.matches(&device))
+        {
+            return;
+        }
+        self.next_firmware_request += 1;
+        let request = self.next_firmware_request;
+        self.firmware = Some(FirmwareSelection {
+            device: device.clone(),
+            request,
+            release: None,
+        });
+        if let Err(error) = self.background(ctx, "firmware", move || {
+            Event::Firmware(
+                request,
+                catalog::latest(&device).map_err(|e| format!("{e:#}")),
+            )
+        }) {
+            self.firmware.as_mut().unwrap().release = Some(Err(error.to_string()));
         }
     }
     fn pick(&mut self, picker: Picker, ctx: &egui::Context) {

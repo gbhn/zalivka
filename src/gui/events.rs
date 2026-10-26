@@ -35,6 +35,22 @@ impl App {
                             self.scan_error = Some(e);
                         }
                     }
+                    if self.firmware.as_ref().is_some_and(|firmware| {
+                        self.target().is_none_or(|device| !firmware.matches(device))
+                    }) {
+                        self.firmware = None;
+                    }
+                }
+                Event::Firmware(request, release) => {
+                    if let Some(firmware) = &self.firmware
+                        && firmware.request == request
+                    {
+                        if self.target().is_some_and(|device| firmware.matches(device)) {
+                            self.firmware.as_mut().unwrap().release = Some(release);
+                        } else {
+                            self.firmware = None;
+                        }
+                    }
                 }
                 Event::Worker(id, output) => {
                     let Some(job) = &mut self.job else { continue };

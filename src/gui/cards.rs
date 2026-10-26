@@ -20,7 +20,7 @@ impl App {
                 ui.vertical(|ui| {
                     let title = self
                         .target()
-                        .map(|device| format!("Mac · CPID {:04x}", device.chip_id))
+                        .map(|device| format!("Mac (CPID {:04x})", device.chip_id))
                         .unwrap_or_else(|| {
                             if self.devices.is_empty() {
                                 "Mac не подключён"
@@ -120,12 +120,48 @@ impl App {
             });
             ui.add_space(5.0);
             if self.setup.automatic {
+                self.refresh_firmware(ctx, false);
+                let mut retry = false;
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.strong("Совместимая версия от Apple");
-                        caption(ui, "Загрузка начнётся вместе с операцией");
+                        match self.firmware.as_ref().map(|firmware| &firmware.release) {
+                            None => {
+                                ui.strong("Прошивка ещё не выбрана");
+                                caption(
+                                    ui,
+                                    if self.devices.is_empty() {
+                                        "Подключите Mac для подбора прошивки"
+                                    } else {
+                                        "Выберите Mac для подбора прошивки"
+                                    },
+                                );
+                            }
+                            Some(None) => {
+                                ui.strong("Подбираем прошивку…");
+                                caption(ui, "Проверяем каталог Apple для выбранного Mac");
+                            }
+                            Some(Some(Ok(release))) => {
+                                ui.strong(format!(
+                                    "Версия {}, сборка {}",
+                                    release.version, release.build
+                                ));
+                                caption(ui, &release.product_type);
+                            }
+                            Some(Some(Err(error))) => {
+                                ui.strong("Не удалось подобрать прошивку")
+                                    .on_hover_text(error);
+                                caption(ui, "Проверьте интернет и повторите поиск");
+                            }
+                        }
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self
+                            .firmware
+                            .as_ref()
+                            .is_some_and(|firmware| matches!(firmware.release, Some(Err(_))))
+                        {
+                            retry = ui.button("Повторить").clicked();
+                        }
                         if ui
                             .add_enabled(
                                 self.target().is_some(),
@@ -137,6 +173,9 @@ impl App {
                         }
                     });
                 });
+                if retry {
+                    self.refresh_firmware(ctx, true);
+                }
             } else {
                 ui.horizontal(|ui| {
                     ui.allocate_ui_with_layout(

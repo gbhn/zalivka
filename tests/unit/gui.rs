@@ -1289,3 +1289,131 @@ fn usb_internet_can_start_without_dfu_or_firmware_and_only_follows_erase_restore
             .contains(&OsString::from("--share-internet"))
     );
 }
+
+fn firmware_card_text(app: &mut App, ctx: &egui::Context) -> String {
+    let output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(700.0, 640.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.firmware_card(ui, ctx));
+        },
+    );
+    output
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) => Some(text.galley.text()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn selected_release() -> catalog::Release {
+    catalog::Release {
+        product_type: "MacBookAir10,1".into(),
+        version: "26.0.1".into(),
+        build: "25A362".into(),
+        url: "https://updates.cdn-apple.com/restore.ipsw".into(),
+        sha1: [0xab; 20],
+    }
+}
+
+#[test]
+fn automatic_firmware_shows_selection_and_clears_it_after_disconnect() {
+    let ctx = egui::Context::default();
+    configure(&ctx);
+    let mut app = App::new();
+    assert!(firmware_card_text(&mut app, &ctx).contains("Подключите Mac"));
+    assert!(app.firmware.is_none());
+    assert_eq!(app.next_firmware_request, 0);
+
+    app.setup.ecid = "2a".into();
+    app.devices.push(device(42, Mode::Dfu));
+    app.next_firmware_request = 1;
+    app.firmware = Some(FirmwareSelection {
+        device: app.devices[0].clone(),
+        request: 1,
+        release: None,
+    });
+    assert!(firmware_card_text(&mut app, &ctx).contains("Подбираем прошивку"));
+    app.tx
+        .send(Event::Firmware(1, Ok(selected_release())))
+        .unwrap();
+    app.poll(&ctx);
+    let text = firmware_card_text(&mut app, &ctx);
+    for value in ["26.0.1", "25A362", "MacBookAir10,1"] {
+        assert!(text.contains(value), "missing {value}: {text}");
+    }
+    // USB scanning can refresh nonces without changing the firmware model.
+    app.devices[0].ap_nonce = vec![1; 32];
+    app.tx
+        .send(Event::Scan {
+            devices: Ok(app.devices.clone()),
+            host: Ok(None),
+        })
+        .unwrap();
+    app.poll(&ctx);
+    assert!(firmware_card_text(&mut app, &ctx).contains("26.0.1"));
+    assert_eq!(app.next_firmware_request, 1);
+
+    app.tx
+        .send(Event::Scan {
+            devices: Ok(vec![]),
+            host: Ok(None),
+        })
+        .unwrap();
+    app.poll(&ctx);
+    assert!(app.firmware.is_none());
+    let text = firmware_card_text(&mut app, &ctx);
+    assert!(text.contains("Подключите Mac"));
+    assert!(!text.contains("26.0.1"));
+    app.tx
+        .send(Event::Firmware(1, Ok(selected_release())))
+        .unwrap();
+    app.poll(&ctx);
+    assert!(app.firmware.is_none());
+}
+
+#[test]
+fn firmware_lookup_ignores_superseded_requests_and_surfaces_network_failure() {
+    let ctx = egui::Context::default();
+    configure(&ctx);
+    let mut app = App::new();
+    app.setup.ecid = "2a".into();
+    app.devices.push(device(42, Mode::Dfu));
+    app.next_firmware_request = 2;
+    app.firmware = Some(FirmwareSelection {
+        device: app.devices[0].clone(),
+        request: 2,
+        release: None,
+    });
+    app.tx
+        .send(Event::Firmware(1, Ok(selected_release())))
+        .unwrap();
+    app.poll(&ctx);
+    assert!(app.firmware.as_ref().unwrap().release.is_none());
+    app.tx
+        .send(Event::Firmware(2, Err("offline".into())))
+        .unwrap();
+    app.poll(&ctx);
+    let text = firmware_card_text(&mut app, &ctx);
+    assert!(text.contains("Не удалось подобрать прошивку"));
+    assert!(text.contains("Повторить"));
+    assert!(!text.contains("26.0.1"));
+    assert_eq!(app.next_firmware_request, 2);
+
+    // A result for the previous hardware must not be applied after a mode change,
+    // even if no new lookup has started yet (for example, while using local IPSW).
+    app.devices[0].mode = Mode::Recovery;
+    app.tx
+        .send(Event::Firmware(2, Ok(selected_release())))
+        .unwrap();
+    app.poll(&ctx);
+    assert!(app.firmware.is_none());
+}

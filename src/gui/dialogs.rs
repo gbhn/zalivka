@@ -51,7 +51,7 @@ impl App {
                     if erase {
                         "Я согласен на удаление всех данных с этого Mac"
                     } else {
-                        "Я понимаю экспериментальный статус инструмента"
+                        "Я согласен на обновление прошивки и recoveryOS"
                     },
                 );
                 if target.is_none_or(|d| d.ecid != pending.ecid || d.mode != Mode::Dfu) {
