@@ -192,3 +192,81 @@ fn window_event_wait_releases_link_and_rechecks_ack_timeout_cancel_and_error() {
         }
     }
 }
+
+#[test]
+fn fatal_input_errors_cancel_all_services_and_fin_requires_the_expected_sequence() {
+    use crate::test_mux::{tcp as packet, version_packet};
+    for bad in [
+        vec![0; 8],
+        packet(12345, 1, 99, 1, ACK | 1, &[]),
+        packet(12345, 1, 99, 1, ACK, b"out of order"),
+    ] {
+        let state = Arc::new(Mutex::new(State::default()));
+        state.lock().unwrap().input = [
+            version_packet(),
+            packet(12345, 1, 0, 1, SYN | ACK, &[]),
+            bad,
+        ]
+        .into();
+        let session = Session::new(EventUsb(state, InputReady::new(|_| Ok(false)))).unwrap();
+        let mut stream = session.connect(12345).unwrap();
+        assert!(stream.read(&mut [0]).is_err());
+        assert!(session.1.load(Ordering::Acquire));
+        assert!(stream.write_all(b"must not continue").is_err());
+    }
+}
+
+#[test]
+fn closed_mux_channels_cannot_accept_payload_after_eof() {
+    use crate::test_mux::{tcp as packet, version_packet};
+    let state = Arc::new(Mutex::new(State::default()));
+    state.lock().unwrap().input = [
+        version_packet(),
+        packet(12345, 1, 0, 1, SYN | ACK, &[]),
+        packet(12345, 1, 1, 1, ACK | 1, &[]),
+        packet(12345, 1, 2, 1, ACK, b"late data"),
+    ]
+    .into();
+    let session = Session::new(EventUsb(state, InputReady::new(|_| Ok(false)))).unwrap();
+    let mut stream = session.connect(12345).unwrap();
+    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    assert!(session.lock().unwrap().pump().unwrap());
+    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    assert!(!session.1.load(Ordering::Acquire));
+}
+
+#[test]
+fn a_failed_window_ack_does_not_discard_bytes_already_read() {
+    use crate::test_mux::{tcp as packet, version_packet};
+    struct FailingAck {
+        packets: VecDeque<Vec<u8>>,
+        writes: usize,
+    }
+    impl PacketTransport for FailingAck {
+        fn write_packet(&mut self, _: &[u8]) -> Result<()> {
+            self.writes += 1;
+            ensure!(self.writes != 6, "injected window ACK failure");
+            Ok(())
+        }
+        fn read_packet(&mut self) -> Result<Vec<u8>> {
+            Ok(self.packets.pop_front().unwrap_or_default())
+        }
+    }
+    let payload = vec![0x5a; 16384];
+    let session = Session::new(FailingAck {
+        packets: [
+            version_packet(),
+            packet(12345, 1, 0, 1, SYN | ACK, &[]),
+            packet(12345, 1, 1, 1, ACK, &payload),
+        ]
+        .into(),
+        writes: 0,
+    })
+    .unwrap();
+    let mut stream = session.connect(12345).unwrap();
+    let mut output = vec![0; payload.len()];
+    assert_eq!(stream.read(&mut output).unwrap(), payload.len());
+    assert_eq!(output, payload);
+    assert!(stream.read(&mut [0]).is_err());
+    assert!(session.1.load(Ordering::Acquire));
+}

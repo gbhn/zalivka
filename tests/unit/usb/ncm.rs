@@ -63,12 +63,15 @@ fn ncm_selection_skips_non_bulk_pairs_and_rejects_broken_unions_or_directions() 
     let mut bytes = configuration(0);
     let output = bytes.windows(3).position(|b| b == [7, 5, 0x02]).unwrap();
     bytes[output + 2] = 0x82; // Two IN pipes cannot supply an OUT pipe.
-    assert!(
+    assert_eq!(
         ncm_interface(ConfigurationDescriptor::new(&bytes).unwrap())
-            .unwrap_err()
-            .to_string()
-            .contains("OUT endpoint missing")
+            .unwrap()
+            .control,
+        2
     );
+    let output = bytes.windows(3).position(|b| b == [7, 5, 0x04]).unwrap();
+    bytes[output + 2] = 0x84;
+    assert!(ncm_interface(ConfigurationDescriptor::new(&bytes).unwrap()).is_err());
 }
 
 #[test]
@@ -88,4 +91,25 @@ fn ncm_selection_checks_later_alternates_of_the_same_data_interface() {
     assert_eq!(selected.control, 0);
     assert_eq!(selected.data, 1);
     assert_eq!(selected.alternate, 4);
+}
+
+#[test]
+fn unusable_ncm_directions_and_self_references_do_not_hide_later_pairs() {
+    for self_reference in [false, true] {
+        let mut bytes = configuration(0);
+        if self_reference {
+            let union = bytes.windows(3).position(|b| b == [5, 0x24, 6]).unwrap();
+            bytes[union + 4] = 0;
+            let data = bytes
+                .windows(6)
+                .position(|b| b == [9, 4, 1, 3, 2, 0x0a])
+                .unwrap();
+            bytes[data + 2] = 0;
+        } else {
+            let output = bytes.windows(3).position(|b| b == [7, 5, 0x02]).unwrap();
+            bytes[output + 2] = 0x82;
+        }
+        let selected = ncm_interface(ConfigurationDescriptor::new(&bytes).unwrap()).unwrap();
+        assert_eq!((selected.control, selected.data), (2, 3));
+    }
 }

@@ -2180,3 +2180,59 @@ fn identity_independent_requests_do_not_require_recovery_firmware() {
         );
     }
 }
+
+#[test]
+fn cpio_names_must_be_nonempty_relative_archive_paths() {
+    for name in [
+        "",
+        "../escape",
+        "/absolute",
+        "a/../b",
+        "a\\b",
+        "C:/boot",
+        "nul\0name",
+    ] {
+        let mut output = vec![];
+        assert!(
+            restore::cpio_header(&mut output, name, 0o100644, 0).is_err(),
+            "{name:?}"
+        );
+        assert!(output.is_empty());
+    }
+}
+
+#[test]
+fn bootability_rejects_colliding_or_reserved_names_before_streaming_any_bytes() {
+    for reserved in [false, true] {
+        let mut files = vec![(
+            "BootabilityBundle/Restore/Bootability/file",
+            b"first".as_slice(),
+        )];
+        files.push(if reserved {
+            (
+                "BootabilityBundle/Restore/Bootability/TRAILER!!!",
+                b"hidden".as_slice(),
+            )
+        } else {
+            (
+                "BootabilityBundleV2/Restore/Bootability/file",
+                b"second".as_slice(),
+            )
+        });
+        let file = fixture_files(None, false, &files);
+        let mut state = restore_state(file.path());
+        let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
+        let session = Session::new(usb).unwrap();
+        let mut main = session.connect(62078).unwrap();
+        assert!(
+            state
+                .serve(
+                    &session,
+                    &mut main,
+                    &wire::dict([("DataType", "BootabilityBundle".into())])
+                )
+                .is_err()
+        );
+        assert!(mux_output(&output, 62078).into_inner().is_empty());
+    }
+}

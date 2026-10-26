@@ -388,3 +388,55 @@ fn fdr_v2_and_v1_fallback_open_sync_channels_and_answer_ping() {
         assert_eq!(payload, expected, "FDR version {version}");
     }
 }
+
+#[test]
+fn closing_fdr_control_retires_idle_children_without_cancelling_restored() {
+    let (input, incoming) = mpsc::channel();
+    let (output, outgoing) = mpsc::channel();
+    let port = 45678u16;
+    let mut control = frame(&wire::dict([("ConnPort", u64::from(port).into())]));
+    control.extend([1, 0, 0, 0]);
+    input.send(version_packet()).unwrap();
+    input.send(tcp(62078, 1, 0, 1, 0x12, &[])).unwrap();
+    input.send(tcp(1082, 2, 0, 1, 0x12, &[])).unwrap();
+    input.send(tcp(1082, 2, 1, 1, 0x10, &control)).unwrap();
+    let session = Session::new(LiveMux {
+        input: incoming,
+        output,
+    })
+    .unwrap();
+    let mut main = session.connect(62078).unwrap();
+    let fdr = zalivka::fdr::Fdr::start(&session).unwrap();
+    loop {
+        let bytes = outgoing.recv_timeout(Duration::from_secs(3)).unwrap();
+        let Ok(packet) = mux::decode_packet(&bytes, 2) else {
+            continue;
+        };
+        if packet.protocol != 6 || packet.payload[2..4] != port.to_be_bytes() {
+            continue;
+        }
+        if packet.payload[13] == 2 {
+            input.send(tcp(port, 3, 0, 1, 0x12, &[])).unwrap();
+        }
+        if packet.payload.get(20..) == Some(b"HelloConn\0".as_slice()) {
+            let hello = frame(&wire::dict([("Command", "HelloConn".into())]));
+            input.send(tcp(port, 3, 1, 1, 0x10, &hello)).unwrap();
+            input
+                .send(tcp(1082, 2, control.len() as u32 + 1, 1, 4, &[]))
+                .unwrap();
+            break;
+        }
+    }
+    loop {
+        let bytes = outgoing.recv_timeout(Duration::from_secs(3)).unwrap();
+        if let Ok(packet) = mux::decode_packet(&bytes, 2)
+            && packet.protocol == 6
+            && packet.payload[2..4] == port.to_be_bytes()
+            && packet.payload[13] & 4 != 0
+        {
+            break;
+        }
+    }
+    fdr.check().unwrap();
+    main.write_all(b"restored remains available").unwrap();
+}

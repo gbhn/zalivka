@@ -33,7 +33,8 @@ pub(super) fn serve_asr(ipsw: &mut Ipsw, id: &Identity, stream: &mut MuxStream) 
 
 impl ContextState {
     pub(super) fn bootability(&mut self, out: &mut impl Write) -> Result<()> {
-        let mut count = 0;
+        let mut entries = Vec::new();
+        let mut names = std::collections::HashSet::new();
         for path in self.ipsw.files()? {
             let Some(relative) = path
                 .strip_prefix("BootabilityBundle/")
@@ -51,21 +52,28 @@ impl ContextState {
             if name.is_empty() {
                 continue;
             }
+            ensure!(
+                name != "TRAILER!!!" && names.insert(name.trim_end_matches('/').to_owned()),
+                "duplicate or reserved Bootability entry {name}"
+            );
             let mode = self.ipsw.unix_mode(&path)?;
             let size = self.ipsw.size(&path)?;
-            cpio_header(out, name, mode, size)?;
+            entries.push((name.to_owned(), path, mode, size));
+        }
+        ensure!(!entries.is_empty(), "IPSW has no BootabilityBundle");
+        for (name, path, mode, size) in entries {
+            cpio_header(out, &name, mode, size)?;
             ensure!(
                 self.ipsw.stream(&path, out)? == size,
                 "truncated Bootability entry"
             );
-            count += 1;
         }
-        ensure!(count > 0, "IPSW has no BootabilityBundle");
         cpio_header(out, "TRAILER!!!", 0, 0)
     }
 }
 
 pub fn cpio_header(out: &mut impl Write, name: &str, mode: u32, size: u64) -> Result<()> {
+    crate::ipsw::validate_path(name).context("unsafe CPIO entry name")?;
     ensure!(
         name.len() < 0o777777 && size <= 0o77777777777 && mode <= 0o777777,
         "CPIO entry exceeds odc field sizes"

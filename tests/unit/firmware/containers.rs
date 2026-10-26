@@ -88,3 +88,29 @@ fn flash_image_codec_checks_banks_lengths_and_nested_configuration() {
     ]);
     assert!(verify_plist_bundle(&wire::xml(&bundle).unwrap(), &digest).is_err());
 }
+
+#[test]
+fn uarp_payloads_must_not_overlap_even_when_their_individual_bounds_are_valid() {
+    let mut bytes = vec![0; 148];
+    bytes[..4].copy_from_slice(&2u32.to_be_bytes());
+    bytes[4..8].copy_from_slice(&44u32.to_be_bytes());
+    bytes[36..40].copy_from_slice(&44u32.to_be_bytes());
+    bytes[40..44].copy_from_slice(&80u32.to_be_bytes());
+    for (row, start) in [(44, 124u32), (84, 132)] {
+        bytes[row..row + 4].copy_from_slice(&40u32.to_be_bytes());
+        bytes[row + 32..row + 36].copy_from_slice(&start.to_be_bytes());
+        bytes[row + 36..row + 40].copy_from_slice(&16u32.to_be_bytes());
+    }
+    assert!(
+        payload_ranges(&bytes, bytes.len() as u64)
+            .unwrap_err()
+            .to_string()
+            .contains("overlapping")
+    );
+    bytes[120..124].copy_from_slice(&8u32.to_be_bytes());
+    bytes[116..120].copy_from_slice(&140u32.to_be_bytes());
+    assert_eq!(
+        payload_ranges(&bytes, bytes.len() as u64).unwrap(),
+        [124..140, 140..148]
+    );
+}

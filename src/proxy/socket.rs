@@ -18,6 +18,7 @@ enum Transport {
 pub(crate) struct Stream {
     transport: Transport,
     shutdown_pending: bool,
+    write_closed: bool,
 }
 impl Stream {
     fn tcp(&self) -> &TcpStream {
@@ -27,6 +28,9 @@ impl Stream {
         }
     }
     pub(crate) fn shutdown_write(&mut self) -> io::Result<()> {
+        if self.write_closed {
+            return Ok(());
+        }
         if !self.shutdown_pending {
             self.shutdown_pending = true;
             if let Transport::Tls(s) = &mut self.transport {
@@ -52,6 +56,13 @@ impl Read for Stream {
 }
 impl Write for Stream {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.shutdown_pending || self.write_closed {
+            return if bytes.is_empty() {
+                Ok(0)
+            } else {
+                Err(io::ErrorKind::BrokenPipe.into())
+            };
+        }
         match &mut self.transport {
             Transport::Tcp(s) => s.write(bytes),
             Transport::Tls(s) => s.write(bytes),
@@ -65,6 +76,7 @@ impl Write for Stream {
         if self.shutdown_pending {
             self.tcp().shutdown(Shutdown::Write)?;
             self.shutdown_pending = false;
+            self.write_closed = true;
         }
         Ok(())
     }
@@ -136,6 +148,7 @@ pub(super) fn connect_blocking(host: &str, port: u16, proxy: Option<Proxy>) -> R
 }
 
 fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Result<Stream> {
+    super::target_uri(host, port)?;
     let mut stream = if let Some(proxy) = proxy {
         crate::log!(
             Debug,
@@ -153,6 +166,7 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
         let mut stream = Stream {
             transport,
             shutdown_pending: false,
+            write_closed: false,
         };
         match proxy.protocol() {
             ProxyProtocol::Http | ProxyProtocol::Https => {
@@ -170,6 +184,7 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
         Stream {
             transport: Transport::Tcp(tcp_connect(host, port, timeout)?),
             shutdown_pending: false,
+            write_closed: false,
         }
     };
     stream.flush()?;
@@ -226,7 +241,7 @@ fn http_connect(
     );
     let code = response.code.context("missing proxy status")?;
     ensure!(
-        code == 200,
+        (200..300).contains(&code),
         "proxy refused CONNECT (HTTP {code}); direct fallback is disabled"
     );
     Ok(())

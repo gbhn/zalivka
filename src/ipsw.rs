@@ -31,6 +31,29 @@ pub(crate) fn component_path(entry: &Value) -> Result<Option<&str>> {
     Ok(Some(path))
 }
 
+/// File digests are required for trusted payloads; fileless signing entries
+/// may request an empty server-generated measurement. Check both consistently.
+pub(crate) fn component_digest(entry: &Value) -> Result<Option<&[u8]>> {
+    let trusted = wire::optional_boolean(entry, &["Trusted"])?.unwrap_or(false);
+    let digest = wire::optional(entry, &["Digest"])?
+        .map(|value| value.as_data().context("invalid component Digest"))
+        .transpose()?;
+    ensure!(
+        !trusted
+            || component_path(entry)?.is_none()
+            || digest.is_some_and(|digest| !digest.is_empty()),
+        "strict restore requires nonempty component Digest for a trusted file"
+    );
+    if let Some(digest) = digest.filter(|digest| !digest.is_empty()) {
+        ensure!(
+            [20, 32, 48].contains(&digest.len()),
+            "unsupported component Digest size {}",
+            digest.len()
+        );
+    }
+    Ok(digest.filter(|digest| !digest.is_empty()))
+}
+
 pub struct Ipsw {
     path: PathBuf,
     archive: ZipArchive<BufReader<File>>,
@@ -134,14 +157,8 @@ impl Ipsw {
     pub(crate) fn plist_component(&mut self, id: &Identity, name: &str) -> Result<Vec<u8>> {
         let entry = wire::get(&id.value, &["Manifest", name])?;
         id.payload_type(name)?;
-        wire::optional_boolean(entry, &["Trusted"])?;
-        let expected = wire::get(entry, &["Digest"])?
-            .as_data()
-            .context("invalid bundle Digest")?;
-        ensure!(
-            [20, 32, 48].contains(&expected.len()),
-            "namespace updater requires a nonempty supported manifest Digest"
-        );
+        let expected = component_digest(entry)?
+            .context("namespace updater requires a nonempty supported manifest Digest")?;
         let data = self.read_limited(id.path(name)?, crate::firmware::MAX_PLIST_BUNDLE)?;
         let report = crate::firmware::verify_plist_bundle(&data, expected)
             .with_context(|| format!("checking component {name} payload bundle"))?;
@@ -159,19 +176,7 @@ impl Ipsw {
     pub fn component(&mut self, id: &Identity, name: &str) -> Result<Vec<u8>> {
         let entry = wire::get(&id.value, &["Manifest", name])?;
         let tag = id.payload_type(name)?;
-        let trusted = wire::optional_boolean(entry, &["Trusted"])?.unwrap_or(false);
-        let digest = wire::optional(entry, &["Digest"])?
-            .map(|value| {
-                value
-                    .as_data()
-                    .with_context(|| format!("invalid {name} Digest"))
-            })
-            .transpose()?
-            .filter(|digest| !digest.is_empty());
-        ensure!(
-            !trusted || digest.is_some(),
-            "strict restore requires nonempty {name} Digest"
-        );
+        let digest = component_digest(entry).with_context(|| format!("checking {name} Digest"))?;
         let data = self.read(id.path(name)?)?;
         if let Some(expected) = digest {
             let inputs = digest::DigestInput::variants(&data, data.len() as u64, tag)?;
@@ -243,7 +248,18 @@ impl Ipsw {
         }
         let start = entry.data_start().context("ZIP entry has no data offset")?;
         let size = entry.size();
+        ensure!(
+            entry.compressed_size() == size,
+            "stored ZIP entry size mismatch: {path}"
+        );
         let mut file = File::open(&self.path)?;
+        let archive_size = file.metadata()?.len();
+        ensure!(
+            start
+                .checked_add(size)
+                .is_some_and(|end| end <= archive_size),
+            "stored ZIP entry extends beyond IPSW: {path}"
+        );
         file.seek(SeekFrom::Start(start))?;
         Ok(Some(ImageReader {
             file,
@@ -291,6 +307,7 @@ impl Ipsw {
         wire::optional_boolean(&id.value, &["Info", "RequiresUIDMode"])?;
         wire::optional_boolean(&id.value, &["Info", "RequiresNonceSlot"])?;
         for (name, entry) in id.manifest()? {
+            component_digest(entry).with_context(|| format!("checking {name} Digest"))?;
             let tag = id.payload_type(name)?;
             img4::nonce_slot(&id.value, tag)?;
             if let Some(info) = wire::dictionary(entry)?.get("Info") {
@@ -329,26 +346,6 @@ impl Ipsw {
             if let Some(path) = component_path(entry)
                 .with_context(|| format!("invalid manifest component {name}"))?
             {
-                let digest = wire::optional(entry, &["Digest"])?
-                    .map(|value| {
-                        value
-                            .as_data()
-                            .with_context(|| format!("invalid {name} Digest"))
-                    })
-                    .transpose()?;
-                if wire::optional_boolean(entry, &["Trusted"])?.unwrap_or(false) {
-                    ensure!(
-                        digest.is_some_and(|digest| !digest.is_empty()),
-                        "strict restore requires nonempty {name} Digest"
-                    );
-                }
-                if let Some(digest) = digest.filter(|digest| !digest.is_empty()) {
-                    ensure!(
-                        [20, 32, 48].contains(&digest.len()),
-                        "unsupported {name} Digest size {}",
-                        digest.len()
-                    );
-                }
                 ensure!(self.contains(path), "IPSW is missing {name}: {path}");
             }
         }
@@ -395,6 +392,12 @@ impl Read for ImageReader {
             .len()
             .min((self.size - self.position).min(usize::MAX as u64) as usize);
         let n = self.file.read(&mut b[..limit])?;
+        if n == 0 && limit != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "truncated stored IPSW image",
+            ));
+        }
         self.position += n as u64;
         Ok(n)
     }

@@ -282,3 +282,37 @@ fn firmware_body_streaming_is_not_limited_by_the_metadata_body_deadline() {
         }
     }
 }
+
+#[test]
+fn encoded_responses_and_changing_range_totals_preserve_the_verified_prefix() {
+    for encoding in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("restore.ipsw");
+        let part = directory.path().join("restore.ipsw.part");
+        std::fs::write(&part, b"a").unwrap();
+        let responses = if encoding {
+            vec!["HTTP/1.1 206 Partial Content\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\nContent-Range: bytes 1-2/3\r\nConnection: close\r\n\r\nbc".into()]
+        } else {
+            vec![
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: 1\r\nContent-Range: bytes 1-1/4\r\nConnection: close\r\n\r\nb".into(),
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 2-4/5\r\nConnection: close\r\n\r\ncde".into(),
+            ]
+        };
+        let (url, server) = firmware_server(responses);
+        let error = test_download(&url, &destination, &Sha256::digest(b"abcde")).unwrap_err();
+        assert!(
+            error.to_string().contains(if encoding {
+                "Content-Encoding"
+            } else {
+                "total length changed"
+            }),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read(&part).unwrap(),
+            if encoding { b"a".as_slice() } else { b"ab" }
+        );
+        assert!(!destination.exists());
+        server.join().unwrap();
+    }
+}

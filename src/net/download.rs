@@ -175,6 +175,7 @@ struct PartialDownload<'a> {
     hash: Box<dyn DynDigest>,
     total: u64,
     expected: &'a [u8],
+    length: Option<u64>,
 }
 
 impl<'a> PartialDownload<'a> {
@@ -195,6 +196,7 @@ impl<'a> PartialDownload<'a> {
             hash,
             total,
             expected,
+            length: None,
         })
     }
 
@@ -207,6 +209,7 @@ impl<'a> PartialDownload<'a> {
         self.file.seek(SeekFrom::Start(0))?;
         self.hash.reset();
         self.total = 0;
+        self.length = None;
         Ok(())
     }
 
@@ -230,6 +233,14 @@ impl<'a> PartialDownload<'a> {
                 ));
             }
         }
+        ensure!(
+            response
+                .headers()
+                .get_all("content-encoding")
+                .iter()
+                .all(|value| value.as_bytes().eq_ignore_ascii_case(b"identity")),
+            "firmware response uses unsupported Content-Encoding"
+        );
         let content_length = response
             .headers()
             .get("content-length")
@@ -259,6 +270,11 @@ impl<'a> PartialDownload<'a> {
             (content_length, content_length)
         };
         if let Some(length) = expected_length {
+            ensure!(
+                self.length.is_none_or(|previous| previous == length),
+                "firmware total length changed during download"
+            );
+            self.length = Some(length);
             crate::storage::require(directory, length.saturating_sub(self.total))?;
         }
         let mut reader = response.body_mut().as_reader();

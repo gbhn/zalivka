@@ -162,3 +162,26 @@ fn fdr_direct_connection_retains_short_read_timeout() {
     tunnel.read_exact(&mut byte).unwrap();
     assert_eq!(byte, *b"x");
 }
+
+#[test]
+fn tunnel_hosts_cannot_change_authority_path_or_port() {
+    for host in [
+        "",
+        "apple.com/other",
+        "apple.com?x",
+        "apple.com#fragment",
+        "user@apple.com",
+        "apple.com:80",
+        "apple.com:443/path",
+        "host\r\nInjected: x",
+    ] {
+        assert!(target_uri(host, 443).is_err(), "{host:?}");
+    }
+    assert!(target_uri("apple.com", 0).is_err());
+    for host in ["apple.com", "127.0.0.1", "[::1]"] {
+        assert_eq!(
+            target_uri(host, 443).unwrap().authority().unwrap().as_str(),
+            format!("{host}:443")
+        );
+    }
+}

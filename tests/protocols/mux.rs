@@ -434,7 +434,8 @@ fn mux_retries_explicit_service_refusal_but_not_bad_handshakes() {
         .err()
         .unwrap();
     assert!(error.to_string().contains("invalid mux TCP handshake"));
-    assert_eq!(output.lock().unwrap().len(), 4); // version, setup, SYN, RST
+    assert_eq!(output.lock().unwrap().len(), 3); // version, setup, SYN; corrupt session sends no RST
+    assert!(session.connect(12345).is_err());
 }
 
 #[test]

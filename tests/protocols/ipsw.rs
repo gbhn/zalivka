@@ -1191,3 +1191,70 @@ fn archive_paths_and_digest_mismatches_are_rejected() {
     assert!(zalivka::ipsw::verify_digest(b"data", &[0; 5]).is_err());
     assert!(zalivka::ipsw::verify_digest(b"data", &Sha384::digest(b"data")).is_ok());
 }
+
+#[test]
+fn trusted_files_and_fileless_signing_metadata_use_the_same_digest_validation() {
+    for (name, bad) in [
+        (
+            "OS",
+            wire::dict([
+                ("Trusted", true.into()),
+                ("Info", wire::dict([("Path", "Firmware/OS".into())])),
+            ]),
+        ),
+        ("Fileless", wire::dict([("Trusted", "true".into())])),
+        ("Fileless", wire::dict([("Digest", "not data".into())])),
+        (
+            "Fileless",
+            wire::dict([("Digest", Value::Data(vec![0; 7]))]),
+        ),
+    ] {
+        let mut id = identity();
+        manifest_mut(&mut id).insert(name.into(), bad);
+        let file = fixture(Some(id.clone()), false);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        assert!(ipsw.preflight(&mut id).is_err(), "{name}");
+        assert!(ipsw.preflight_recovery(&mut id).is_err(), "{name}");
+        assert!(ipsw.verify_all().is_err(), "{name}");
+    }
+}
+
+#[test]
+fn direct_stored_images_reject_inconsistent_sizes_and_physical_truncation() {
+    let file = fixture(None, false);
+    let mut bytes = std::fs::read(file.path()).unwrap();
+    let name = b"Firmware/OS";
+    let offset = bytes
+        .windows(4)
+        .enumerate()
+        .find_map(|(offset, signature)| {
+            (signature == b"PK\x01\x02"
+                && bytes.get(offset + 46..offset + 46 + name.len()) == Some(name))
+            .then_some(offset)
+        })
+        .unwrap();
+    let original_size = u32::from_le_bytes(bytes[offset + 24..offset + 28].try_into().unwrap());
+    bytes[offset + 24..offset + 28].copy_from_slice(&(original_size + 1).to_le_bytes());
+    std::fs::write(file.path(), &bytes).unwrap();
+    assert!(
+        Ipsw::open(file.path())
+            .unwrap()
+            .stored_image("Firmware/OS")
+            .is_err()
+    );
+
+    let file = fixture(None, false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let mut image = ipsw.stored_image("Firmware/OS").unwrap().unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(file.path())
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    assert_eq!(image.read(&mut []).unwrap(), 0);
+    assert_eq!(
+        image.read(&mut [0]).unwrap_err().kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
+}

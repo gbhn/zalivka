@@ -608,3 +608,28 @@ fn tss_never_accepts_rejection_or_malformed_success() {
         assert!(tss::parse_response(&bytes).is_err(), "{header}");
     }
 }
+
+#[test]
+fn unmatched_signing_rules_still_require_well_formed_actions() {
+    for actions in [None, Some(true.into())] {
+        let mut rule = wire::dict([(
+            "Conditions",
+            wire::dict([("UnavailableParameter", true.into())]),
+        )]);
+        if let Some(actions) = actions {
+            rule.as_dictionary_mut()
+                .unwrap()
+                .insert("Actions".into(), actions);
+        }
+        let mut entry = plist::Dictionary::new();
+        assert!(
+            tss::apply_rules(
+                &mut entry,
+                &Value::Array(vec![rule]),
+                &plist::Dictionary::new()
+            )
+            .is_err()
+        );
+        assert!(entry.is_empty());
+    }
+}

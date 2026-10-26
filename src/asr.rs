@@ -28,6 +28,7 @@ fn info(stream: &mut impl Write, length: u64, checksum: bool) -> Result<()> {
         d.insert("Checksum Chunk Size".into(), (CHUNK as u64).into());
     }
     stream.write_all(&wire::xml(&Value::Dictionary(d))?)?;
+    stream.flush()?;
     Ok(())
 }
 
@@ -65,6 +66,7 @@ pub fn transfer(
                 image.seek(SeekFrom::Start(offset))?;
                 let copied = std::io::copy(&mut image.take(count), stream.get_mut())?;
                 ensure!(copied == count, "truncated ASR validation data");
+                stream.get_mut().flush()?;
             }
             "Payload" => break,
             command => bail!("unsupported ASR command {command}"),

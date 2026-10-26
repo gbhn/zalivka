@@ -117,6 +117,7 @@ pub fn upload(
     data: &[u8],
     finish: bool,
 ) -> Result<()> {
+    ensure!(!data.is_empty(), "cannot send an empty firmware image");
     let mut progress = crate::progress::Progress::new(
         if mode == Mode::Recovery {
             "Передача USB Recovery"

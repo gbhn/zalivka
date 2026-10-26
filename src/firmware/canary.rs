@@ -30,15 +30,10 @@ pub fn canary_response(arguments: &Value) -> Result<Option<Value>> {
         .context("Canary QueryLoop0 must be boolean")?;
     if let Some(tags) = wire::dictionary(arguments)?.get("DeviceGeneratedTags") {
         let tags = wire::dictionary(tags)?;
-        let names = tags
-            .get("ResponseTags")
-            .context("missing Canary ResponseTags")?
-            .as_array()
-            .context("invalid Canary ResponseTags")?;
-        let names: Vec<_> = names
-            .iter()
-            .map(|v| v.as_string().context("invalid Canary response tag"))
-            .collect::<Result<_>>()?;
+        let names = super::request::tags(
+            tags.get("ResponseTags")
+                .context("missing Canary ResponseTags")?,
+        )?;
         ensure!(
             names
                 .iter()

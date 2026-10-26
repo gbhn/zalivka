@@ -309,7 +309,7 @@ impl App {
                     caption(
                         ui,
                         format!(
-                            "Объём: {}{}",
+                            "Передано: {}{}",
                             human_bytes(transfer.update.completed),
                             transfer
                                 .update

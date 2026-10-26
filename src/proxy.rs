@@ -1,5 +1,5 @@
 //! Shared proxy policy for HTTP requests and the opaque restoreOS FDR tunnel.
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::{
     io::{self, Read, Write},
     sync::Arc,
@@ -114,11 +114,24 @@ pub(crate) fn connect(host: &str, port: u16) -> Result<Tunnel> {
 
 /// A tunnel exposes the destination port, but no HTTP path or target TLS session.
 fn target_uri(host: &str, port: u16) -> Result<Uri> {
-    Ok(format!(
+    ensure!(port != 0 && !host.is_empty(), "invalid tunnel destination");
+    let authority = format!("{host}:{port}");
+    let uri: Uri = format!(
         "{}://{host}:{port}/",
         if port == 80 { "http" } else { "https" }
     )
-    .parse()?)
+    .parse()?;
+    ensure!(
+        uri.authority()
+            .is_some_and(|value| value.as_str() == authority)
+            && uri.host() == Some(host)
+            && uri.port_u16() == Some(port)
+            && !authority.contains('@')
+            && uri.path() == "/"
+            && uri.query().is_none(),
+        "invalid tunnel hostname"
+    );
+    Ok(uri)
 }
 
 fn connect_via(uri: &Uri, proxy: Option<Proxy>) -> Result<Tunnel> {

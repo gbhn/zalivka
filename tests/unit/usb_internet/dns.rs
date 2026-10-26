@@ -240,3 +240,16 @@ fn tcp_dns_rejects_invalid_lengths_and_truncated_queries_at_eof() {
         );
     }
 }
+
+#[test]
+fn unsupported_dns_opcodes_are_echoed_in_the_error_response() {
+    let mut resolver = Resolver::default();
+    for opcode in [1u8, 2, 4, 5] {
+        let mut request = query("x.invalid", 1);
+        request[2] |= opcode << 3;
+        let response = resolver.reply(&request).unwrap();
+        assert_eq!((response[2] >> 3) & 15, opcode);
+        assert_eq!(response[3] & 15, u8::from(Rcode::NOTIMP));
+        assert!(resolver.names.is_empty());
+    }
+}

@@ -16,7 +16,7 @@ use windows_sys::{
                 DEVPKEY_Device_DriverInfPath, DEVPKEY_Device_DriverInfSection, DEVPROP_TYPE_STRING,
             },
         },
-        Foundation::INVALID_HANDLE_VALUE,
+        Foundation::{ERROR_NOT_FOUND, INVALID_HANDLE_VALUE},
         System::Registry::*,
     },
     core::GUID,
@@ -117,11 +117,59 @@ pub(super) fn guid_string(g: GUID) -> String {
 }
 fn windows_inf(name: &str) -> Result<Vec<u16>> {
     ensure!(
-        name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'.'),
+        name.is_ascii()
+            && name.len() > 4
+            && name[name.len() - 4..].eq_ignore_ascii_case(".inf")
+            && name[..name.len() - 4]
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric()),
         "invalid inbox INF name"
     );
     Ok(wide(windows_directory()?.join("INF").join(name)))
 }
+fn ncm_guids(original: Option<&(u32, Vec<u8>)>) -> Vec<u8> {
+    let mut guids = original
+        .filter(|(ty, bytes)| matches!(*ty, REG_MULTI_SZ | REG_SZ) && bytes.len().is_multiple_of(2))
+        .map(|(_, bytes)| {
+            bytes
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    while guids.last() == Some(&0) {
+        guids.pop();
+    }
+    if !guids.is_empty() {
+        guids.push(0);
+    }
+    guids.extend(wide(GUID_TEXT));
+    guids.push(0);
+    guids.into_iter().flat_map(u16::to_le_bytes).collect()
+}
+
+fn original_property(value: &[u16], ty: u32, size: u32) -> Result<String> {
+    ensure!(
+        ty == DEVPROP_TYPE_STRING
+            && size >= 2
+            && size as usize <= std::mem::size_of_val(value)
+            && size.is_multiple_of(2),
+        "invalid original NCM driver property"
+    );
+    let value = &value[..size as usize / 2];
+    ensure!(
+        value.last() == Some(&0),
+        "unterminated original NCM driver property"
+    );
+    let value = &value[..value.len() - 1];
+    ensure!(
+        !value.is_empty() && !value.contains(&0),
+        "empty or embedded NUL in original NCM driver property"
+    );
+    let value = String::from_utf16(value).context("invalid original NCM driver property UTF-16")?;
+    Ok(value)
+}
+
 pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Result<()> {
     let set = Set(unsafe { SetupDiCreateDeviceInfoList(ptr::null(), ptr::null_mut()) });
     ensure!(
@@ -150,7 +198,7 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
         serde_json::from_slice::<Backup>(&std::fs::read(&path)?)?
     } else {
         ensure!(!restore, "no saved NCM driver settings for this interface");
-        let property = |key| {
+        let property = |key| -> Result<Option<String>> {
             let mut value = [0u16; 260];
             let mut size = 0;
             let mut ty = 0;
@@ -166,13 +214,21 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
                     0,
                 )
             };
-            (ok != 0 && ty == DEVPROP_TYPE_STRING).then(|| text(&value))
+            if ok == 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_NOT_FOUND as i32) {
+                    return Ok(None);
+                }
+                return Err(error)
+                    .context("reading original NCM driver property; no driver changes were made");
+            }
+            original_property(&value, ty, size).map(Some)
         };
         let backup = Backup {
             instance: instance.into(),
             class: guid_string(device.ClassGuid),
-            inf: property(&DEVPKEY_Device_DriverInfPath),
-            section: property(&DEVPKEY_Device_DriverInfSection),
+            inf: property(&DEVPKEY_Device_DriverInfPath)?,
+            section: property(&DEVPKEY_Device_DriverInfSection)?,
             guids: read_value(&key, "DeviceInterfaceGUIDs")?,
         };
         ensure!(
@@ -196,36 +252,18 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
     } else {
         Some("winusb.inf")
     };
+    let class_guid = parse_guid(class).context("invalid saved NCM class GUID")?;
+    let inf = inf_name.map(windows_inf).transpose()?;
     // The caller owns rollback, including a partially changed current interface.
     // Failures before this point have neither changed bindings nor registry values.
     *changed = true;
     if restore {
         set_guids(&key, backup.guids.as_ref())?;
     } else {
-        let mut guids = backup
-            .guids
-            .as_ref()
-            .filter(|(ty, _)| *ty == REG_MULTI_SZ)
-            .map(|(_, bytes)| {
-                bytes
-                    .chunks_exact(2)
-                    .map(|b| u16::from_le_bytes([b[0], b[1]]))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        while guids.last() == Some(&0) {
-            guids.pop();
-        }
-        if !guids.is_empty() {
-            guids.push(0);
-        }
-        guids.extend(wide(GUID_TEXT));
-        guids.push(0);
-        let bytes: Vec<_> = guids.into_iter().flat_map(u16::to_le_bytes).collect();
+        let bytes = ncm_guids(backup.guids.as_ref());
         set_guids(&key, Some(&(REG_MULTI_SZ, bytes)))?;
     }
     let result = (|| -> Result<()> {
-        let class_guid = parse_guid(class).context("invalid saved NCM class GUID")?;
         let class = wide(class);
         check(
             unsafe {
@@ -240,8 +278,7 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
             "setting NCM device class",
         )?;
         device.ClassGuid = class_guid;
-        let driver = if let Some(name) = inf_name {
-            let inf = windows_inf(name)?;
+        let driver = if let Some(inf) = &inf {
             let mut params = SP_DEVINSTALL_PARAMS_W {
                 cbSize: std::mem::size_of::<SP_DEVINSTALL_PARAMS_W>() as u32,
                 ..Default::default()
@@ -254,7 +291,7 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
             params.FlagsEx |= DI_FLAGSEX_ALLOWEXCLUDEDDRVS;
             ensure!(inf.len() <= params.DriverPath.len(), "INF path is too long");
             params.DriverPath.fill(0);
-            params.DriverPath[..inf.len()].copy_from_slice(&inf);
+            params.DriverPath[..inf.len()].copy_from_slice(inf);
             check(
                 unsafe { SetupDiSetDeviceInstallParamsW(set.0, &device, &params) },
                 "setting inbox driver search",

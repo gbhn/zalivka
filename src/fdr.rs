@@ -58,6 +58,9 @@ impl Fdr {
                     let _ = tx.send(format!("FDR control failed: {e:#}"));
                     worker_session.cancel();
                 }
+                // EOF on control also ends its proxy children. Otherwise idle
+                // children can keep this worker blocked in join indefinitely.
+                worker_stop.store(true, Ordering::Relaxed);
                 for child in children {
                     let _ = child.join();
                 }
@@ -121,6 +124,7 @@ fn control_loop(
                 // concurrent; parallel connects could reorder requests.
                 let connection = (|| -> Result<MuxStream> {
                     let mut connection = session.connect(port)?;
+                    connection.set_read_timeout(Duration::from_secs(20));
                     connection.write_all(b"HelloConn\0")?;
                     connection_handshake(&mut connection, version)
                         .context("FDR connection handshake")?;
@@ -180,14 +184,18 @@ impl Drop for Fdr {
 }
 
 fn handle_connection(mut stream: MuxStream, stop: &AtomicBool) -> Result<()> {
+    stream.set_read_timeout(Duration::from_secs(1));
     let mut cmd = [0; 2];
     while read_exact_idle(&mut stream, &mut cmd, stop).context("reading FDR connection command")? {
         match u16::from_le_bytes(cmd) {
             0xbbaa => {
                 crate::log!(Debug, "fdr", "Получен FDR Ping");
+                stream.set_read_timeout(Duration::from_secs(20));
                 ping(&mut stream)?;
+                stream.set_read_timeout(Duration::from_secs(1));
             }
             0x105 => {
+                stream.set_read_timeout(Duration::from_secs(20));
                 let (host, port) = proxy_handshake(&mut stream)?;
                 crate::log!(Debug, "fdr", "Подключение прокси FDR к {host}:{port}");
                 let mut socket =

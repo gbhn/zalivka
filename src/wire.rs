@@ -97,11 +97,22 @@ pub fn number(v: &Value) -> Result<u64> {
         return Ok(n);
     }
     if let Some(s) = v.as_string() {
-        return if let Some(s) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            u64::from_str_radix(s, 16).context("invalid hexadecimal integer")
+        let (digits, radix) = if let Some(s) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
+        {
+            (s, 16)
         } else {
-            s.parse().context("invalid decimal integer")
+            (s, 10)
         };
+        ensure!(
+            !digits.is_empty()
+                && digits.bytes().all(|byte| if radix == 16 {
+                    byte.is_ascii_hexdigit()
+                } else {
+                    byte.is_ascii_digit()
+                }),
+            "invalid unsigned plist integer"
+        );
+        return u64::from_str_radix(digits, radix).context("plist integer overflow");
     }
     bail!("expected plist integer")
 }

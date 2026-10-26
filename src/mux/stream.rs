@@ -197,8 +197,9 @@ impl Read for MuxStream {
                 c.consumed += n;
                 if c.consumed >= 16384 {
                     c.consumed = 0;
-                    link.send_tcp(self.source, ACK, &[])
-                        .map_err(std::io::Error::other)?;
+                    // The bytes are already in the caller's buffer. Report
+                    // that success; a failed ACK cancels the next operation.
+                    let _ = link.send_tcp(self.source, ACK, &[]);
                 }
                 return Ok(n);
             }

@@ -208,6 +208,12 @@ fn uarp_ranges(prefix: &[u8], length: u64) -> Result<Vec<Range<u64>>> {
         ranges.push(offset..offset + size_of_payload);
         position += size;
     }
+    let mut ordered: Vec<_> = ranges.iter().collect();
+    ordered.sort_unstable_by_key(|range| (range.start, range.end));
+    ensure!(
+        ordered.windows(2).all(|pair| pair[0].end <= pair[1].start),
+        "overlapping UARP payloads"
+    );
     Ok(ranges)
 }
 

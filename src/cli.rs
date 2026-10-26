@@ -257,7 +257,18 @@ enum DriverCommand {
 }
 
 fn parse_pid(value: &str) -> std::result::Result<u16, String> {
-    u16::from_str_radix(value.trim_start_matches("0x"), 16).map_err(|e| e.to_string())
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("PID must contain hexadecimal digits".into());
+    }
+    let pid = u16::from_str_radix(digits, 16).map_err(|e| e.to_string())?;
+    if pid == 0 {
+        return Err("USB PID cannot be zero".into());
+    }
+    Ok(pid)
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<()> {

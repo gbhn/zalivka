@@ -42,6 +42,7 @@ impl Resolver {
         }
         let mut reply = MessageBuilder::new_vec();
         reply.header_mut().set_id(request.header().id());
+        reply.header_mut().set_opcode(request.header().opcode());
         reply.header_mut().set_qr(true);
         reply.header_mut().set_rd(request.header().rd());
         reply.header_mut().set_ra(true);

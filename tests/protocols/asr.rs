@@ -197,3 +197,60 @@ fn asr_uses_default_for_zero_port_and_rejects_invalid_port() {
     );
     assert!(asr::data_port(&wire::dict([("DataPort", 65536u64.into())]), 12345).is_err());
 }
+
+#[test]
+fn asr_flushes_each_reply_before_waiting_for_another_command() {
+    struct BufferedDuplex {
+        input: VecDeque<Vec<u8>>,
+        pending: Vec<u8>,
+        flushed: Vec<Vec<u8>>,
+    }
+    impl Read for BufferedDuplex {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            assert!(
+                self.pending.is_empty(),
+                "ASR waited with an unflushed reply"
+            );
+            let Some(command) = self.input.front_mut() else {
+                return Ok(0);
+            };
+            let n = out.len().min(command.len());
+            out[..n].copy_from_slice(&command[..n]);
+            command.drain(..n);
+            if command.is_empty() {
+                self.input.pop_front();
+            }
+            Ok(n)
+        }
+    }
+    impl Write for BufferedDuplex {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.pending.extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushed.push(std::mem::take(&mut self.pending));
+            Ok(())
+        }
+    }
+    let commands = [
+        wire::dict([("Command", "Initiate".into())]),
+        wire::dict([
+            ("Command", "OOBData".into()),
+            ("OOB Offset", 1u64.into()),
+            ("OOB Length", 2u64.into()),
+        ]),
+        wire::dict([("Command", "Payload".into())]),
+    ];
+    let mut stream = BufferedDuplex {
+        input: commands
+            .iter()
+            .map(|message| wire::xml(message).unwrap())
+            .collect(),
+        pending: vec![],
+        flushed: vec![],
+    };
+    asr::transfer(&mut stream, &mut Cursor::new(b"image"), 5).unwrap();
+    assert_eq!(stream.flushed[1], b"ma");
+    assert_eq!(stream.flushed[2], b"image");
+}

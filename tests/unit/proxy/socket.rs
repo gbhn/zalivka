@@ -277,6 +277,9 @@ fn https_proxy_verifies_the_certificate_and_preserves_target_bytes() {
                 tls.write_all(b"HTTP/1.1 200 OK\r\n\r\n\x16\x03\x03\x00\x02")
                     .unwrap();
                 tls.flush().unwrap();
+                let mut tail = Vec::new();
+                tls.read_to_end(&mut tail).unwrap();
+                assert!(tail.is_empty(), "data after TLS close_notify");
             }
         });
         let transport = tls_transport(
@@ -288,6 +291,7 @@ fn https_proxy_verifies_the_certificate_and_preserves_target_bytes() {
             let mut stream = Stream {
                 transport: transport.unwrap(),
                 shutdown_pending: false,
+                write_closed: false,
             };
             let proxy = Proxy::new("https://localhost:443").unwrap();
             http_connect(
@@ -300,6 +304,11 @@ fn https_proxy_verifies_the_certificate_and_preserves_target_bytes() {
             .unwrap();
             stream.tcp().set_nonblocking(true).unwrap();
             assert_eq!(read_bytes(&mut stream, 5), [0x16, 3, 3, 0, 2]);
+            stream.shutdown_write().unwrap();
+            assert_eq!(
+                stream.write(b"late TLS data").unwrap_err().kind(),
+                io::ErrorKind::BrokenPipe
+            );
         } else {
             assert!(transport.is_err());
         }
@@ -312,6 +321,41 @@ impl Stream {
         Self {
             transport: Transport::Tcp(stream),
             shutdown_pending: false,
+            write_closed: false,
         }
     }
+}
+
+#[test]
+fn every_successful_connect_status_starts_an_opaque_tunnel() {
+    for status in [201, 204, 299] {
+        let proxy_listener = listener();
+        let proxy =
+            Proxy::new(&format!("http://{}", proxy_listener.local_addr().unwrap())).unwrap();
+        let server = thread::spawn(move || {
+            let mut socket = accept(proxy_listener);
+            header(&mut socket);
+            write!(socket, "HTTP/1.1 {status} Tunnel ready\r\n\r\nopaque").unwrap();
+        });
+        let mut stream = connect_blocking("does-not-resolve.invalid", 443, Some(proxy)).unwrap();
+        assert_eq!(read_bytes(&mut stream, 6), b"opaque");
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn a_half_closed_stream_keeps_reading_but_never_accepts_another_write() {
+    let target = listener();
+    let mut stream = connect_via("127.0.0.1", target.local_addr().unwrap().port(), None).unwrap();
+    let (mut peer, _) = target.accept().unwrap();
+    stream.shutdown_write().unwrap();
+    stream.shutdown_write().unwrap();
+    stream.poll().unwrap();
+    assert_eq!(
+        stream.write(b"late").unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe
+    );
+    assert_eq!(stream.write(&[]).unwrap(), 0);
+    peer.write_all(b"reply after FIN").unwrap();
+    assert_eq!(read_bytes(&mut stream, 15), b"reply after FIN");
 }

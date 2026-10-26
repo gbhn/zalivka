@@ -1,6 +1,6 @@
 //! Collect manifest requirements, stream ZIP entries and report verified digests.
 use super::{
-    Ipsw, component_path,
+    Ipsw, component_digest, component_path,
     digest::{DigestInput, verify_component_digest},
 };
 use crate::{checksum::hasher, firmware, img4, wire};
@@ -45,6 +45,8 @@ impl Ipsw {
         for (_, value) in self.identity_values() {
             for (name, entry) in wire::dictionary(wire::get(value, &["Manifest"])?)? {
                 let tag = img4::component_tag(name, Some(entry))?;
+                let digest = component_digest(entry)
+                    .with_context(|| format!("checking manifest component {name}"))?;
                 let Some(path) = component_path(entry)
                     .with_context(|| format!("invalid manifest component {name}"))?
                 else {
@@ -52,18 +54,11 @@ impl Ipsw {
                 };
                 ensure!(self.contains(path), "missing manifest component {path}");
                 let requirements = entries.entry(path.into()).or_default();
-                if let Some(digest) = wire::dictionary(entry)?.get("Digest") {
-                    let digest = digest.as_data().context("invalid manifest digest")?;
-                    if !digest.is_empty() {
-                        ensure!(
-                            [20, 32, 48].contains(&digest.len()),
-                            "unsupported digest for {path}"
-                        );
-                        requirements.components.insert(ComponentDigest {
-                            tag,
-                            expected: digest.to_vec(),
-                        });
-                    }
+                if let Some(digest) = digest {
+                    requirements.components.insert(ComponentDigest {
+                        tag,
+                        expected: digest.to_vec(),
+                    });
                 }
             }
         }

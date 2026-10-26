@@ -99,3 +99,14 @@ fn malformed_progress_cannot_supply_a_fake_percentage() {
         );
     }
 }
+
+#[test]
+fn duplicate_operation_weights_cannot_change_the_meaning_of_a_worker_event() {
+    for weights in [vec![(1, 1), (1, 2)], vec![(1, 1), (1, 0)]] {
+        let mut line = Vec::new();
+        Event::OperationWeights { weights }
+            .write_to(&mut line)
+            .unwrap();
+        assert!(Event::parse(std::str::from_utf8(&line).unwrap()).is_none());
+    }
+}

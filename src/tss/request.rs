@@ -208,6 +208,7 @@ pub fn apply_rules(entry: &mut Dictionary, rules: &Value, parameters: &Dictionar
         .context("RestoreRequestRules must be an array")?
     {
         let conditions = wire::dictionary(wire::get(rule, &["Conditions"])?)?;
+        let actions = wire::dictionary(wire::get(rule, &["Actions"])?)?;
         let matches = conditions.iter().all(|(key, expected)| {
             let key = match key.as_str() {
                 "ApRawProductionMode" | "ApCurrentProductionMode" => "ApProductionMode",
@@ -223,7 +224,7 @@ pub fn apply_rules(entry: &mut Dictionary, rules: &Value, parameters: &Dictionar
             }
         });
         if matches {
-            for (key, value) in wire::dictionary(wire::get(rule, &["Actions"])?)? {
+            for (key, value) in actions {
                 entry.insert(key.clone(), value.clone());
             }
         }

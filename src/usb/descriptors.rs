@@ -116,23 +116,23 @@ pub(crate) fn ncm_interface(config: ConfigurationDescriptor<'_>) -> Result<NcmIn
             })
             .map(|descriptor| descriptor[4])
             .last();
-        let Some(number) = data_number else { continue };
-        if let Some(data) = config.interface_alt_settings().find(|i| {
-            i.interface_number() == number
-                && i.class() == 0x0a
-                && i.endpoints().count() == 2
-                && i.endpoints()
-                    .all(|e| e.transfer_type() == TransferType::Bulk)
+        let Some(number) = data_number.filter(|number| *number != control.interface_number())
+        else {
+            continue;
+        };
+        for data in config.interface_alt_settings().filter(|i| {
+            i.interface_number() == number && i.class() == 0x0a && i.endpoints().count() == 2
         }) {
-            let input = bulk_endpoint(&data, true)
-                .context("NCM IN endpoint missing")?
-                .address();
-            let output = bulk_endpoint(&data, false).context("NCM OUT endpoint missing")?;
+            let (Some(input), Some(output)) =
+                (bulk_endpoint(&data, true), bulk_endpoint(&data, false))
+            else {
+                continue;
+            };
             return Ok(NcmInterface {
                 control: control.interface_number(),
                 data: number,
                 alternate: data.alternate_setting(),
-                input,
+                input: input.address(),
                 output: output.address(),
                 packet_size: output.max_packet_size(),
             });

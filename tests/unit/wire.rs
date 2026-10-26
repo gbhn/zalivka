@@ -106,3 +106,23 @@ fn failed_serialization_rolls_back_only_its_frame_and_allows_the_next_frame() {
     assert_eq!(receive(&mut input).unwrap(), last);
     assert_eq!(input.position(), input.get_ref().len() as u64);
 }
+
+#[test]
+fn unsigned_plist_numbers_reject_signs_and_accept_only_digits_in_the_selected_radix() {
+    for (value, expected) in [("0", 0), ("42", 42), ("0xff", 255), ("0XFF", 255)] {
+        assert_eq!(number(&value.into()).unwrap(), expected);
+    }
+    for value in [
+        "+1",
+        "0x+1",
+        "-1",
+        " 1",
+        "1 ",
+        "0x",
+        "",
+        "0x0x1",
+        "18446744073709551616",
+    ] {
+        assert!(number(&value.into()).is_err(), "{value}");
+    }
+}

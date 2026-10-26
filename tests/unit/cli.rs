@@ -143,3 +143,13 @@ fn manual_sharing_is_unlimited_and_explicit_limits_are_validated() {
         );
     }
 }
+
+#[test]
+fn usb_pid_uses_one_optional_case_insensitive_prefix_and_rejects_zero() {
+    for value in ["1227", "0x1227", "0X1227"] {
+        assert_eq!(parse_pid(value).unwrap(), 0x1227);
+    }
+    for value in ["", "0", "0x", "+1227", "0x0x1227", "10000", " 1227"] {
+        assert!(parse_pid(value).is_err(), "{value}");
+    }
+}

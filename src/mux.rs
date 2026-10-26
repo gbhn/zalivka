@@ -415,6 +415,16 @@ impl Link {
         }
     }
     fn pump(&mut self) -> Result<bool> {
+        let result = self.pump_packet();
+        if result.is_err() {
+            // A consumed or malformed frame cannot be replayed by another
+            // service. Retire the link just as after an uncertain USB write.
+            self.cancelled.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    fn pump_packet(&mut self) -> Result<bool> {
         let Some(bytes) = self.receive()? else {
             return Ok(false);
         };
@@ -445,6 +455,9 @@ impl Link {
             return Ok(true);
         };
         ensure!(c.destination == peer_port, "mux TCP peer port mismatch");
+        if c.closed {
+            return Ok(true);
+        }
         c.window = u32::from(u16::from_be_bytes(tcp[14..16].try_into()?)) << 8;
         if flags & RST != 0 {
             c.closed = true;
@@ -471,8 +484,10 @@ impl Link {
             "invalid mux TCP acknowledgement"
         );
         c.peer_ack = ack;
-        if !data.is_empty() {
+        if !data.is_empty() || flags & 1 != 0 {
             ensure!(seq == c.ack, "out-of-order mux TCP data");
+        }
+        if !data.is_empty() {
             ensure!(
                 c.input.len() + data.len() <= RECEIVE_WINDOW,
                 "device exceeded mux receive window"

@@ -1216,3 +1216,22 @@ fn centauri_table(entries: Vec<([u8; 4], Vec<u8>, u32)>) -> Vec<u8> {
         .encode()
         .unwrap()
 }
+
+#[test]
+fn canary_rejects_duplicate_firmware_data_response_tags() {
+    let mut args = updater_args(
+        "Canary",
+        wire::dict([("QueryLoop0", true.into())]),
+        &[
+            "Test,Ticket,1",
+            "Test,Ticket,2",
+            "FirmwareData",
+            "FirmwareData",
+        ],
+    );
+    args.as_dictionary_mut().unwrap().insert(
+        "DeviceGeneratedRequest".into(),
+        wire::dict([("QueryLoop0", true.into())]),
+    );
+    assert!(zalivka::firmware::canary_response(&args).is_err());
+}

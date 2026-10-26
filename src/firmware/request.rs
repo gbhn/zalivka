@@ -99,7 +99,7 @@ pub(super) struct Request<'a> {
     pub response_tags: Vec<String>,
 }
 
-fn tags(value: &Value) -> Result<Vec<&str>> {
+pub(super) fn tags(value: &Value) -> Result<Vec<&str>> {
     let mut seen = BTreeSet::new();
     value
         .as_array()

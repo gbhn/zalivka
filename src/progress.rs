@@ -50,7 +50,10 @@ impl Event {
         match &event {
             Self::Transfer(update) if !update.valid() => None,
             Self::OperationWeights { weights }
-                if weights.iter().all(|(_, weight)| *weight == 0) =>
+                if weights.iter().all(|(_, weight)| *weight == 0) || {
+                    let mut seen = std::collections::HashSet::new();
+                    weights.iter().any(|(operation, _)| !seen.insert(operation))
+                } =>
             {
                 None
             }
