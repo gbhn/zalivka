@@ -71,7 +71,7 @@ impl App {
                         if ui
                             .add_enabled(
                                 !self.logs.is_empty() && !self.picking,
-                                egui::Button::new("Сохранить всё").small(),
+                                egui::Button::new("Сохранить журнал").small(),
                             )
                             .clicked()
                         {
@@ -84,7 +84,7 @@ impl App {
                             )
                             .clicked()
                         {
-                            ctx.copy_text(self.journal_text());
+                            ctx.copy_text(self.journal_text(self.log_details));
                         }
                     });
                 });

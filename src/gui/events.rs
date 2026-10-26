@@ -35,9 +35,12 @@ impl App {
                     if matches!(&output, Output::State(progress::Event::RebootRequired)) {
                         self.windows_reboot_required = true;
                     }
-                    if let Some(line) = job.output(output) {
+                    let line = job.output(output);
+                    let log_error = job.log_error.clone();
+                    if let Some(line) = line {
                         self.journal_line(line);
                     }
+                    self.journal_error(log_error.as_deref());
                 }
                 Event::Picked(picker, path) => {
                     self.picking = false;
@@ -52,7 +55,13 @@ impl App {
                             Picker::Connect => self.setup.connect_data = path.display().to_string(),
                             Picker::Log => {
                                 let source = self.log_path.clone();
-                                let text = self.journal_text();
+                                let mut text = self.journal_text(true);
+                                if source.is_none() {
+                                    text = format!(
+                                        "Неполный журнал: сохранены последние {} записей из памяти.\n{text}\n",
+                                        self.logs.len()
+                                    );
+                                }
                                 let spawn = self.background(ctx, "save", move || {
                                     let result = worker::save_log(path, source.as_deref(), &text)
                                         .map_err(|e| format!("{e:#}"));
@@ -95,6 +104,10 @@ impl App {
             "session",
             format!("{}: {}", notice.title, notice.detail),
         )));
+        // The final record can be the first failed write. Build the displayed
+        // result after that attempt so journal completeness is reported honestly.
+        self.journal_error(job.log_error.as_deref());
+        let notice = job.completion_notice(success, self.windows_reboot_required);
         if notice.tone == Tone::Error {
             self.journal_open = true;
         }

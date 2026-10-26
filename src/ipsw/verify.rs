@@ -122,6 +122,8 @@ impl EntryDigests {
         length: u64,
         buffer: &mut [u8],
     ) -> Result<EntryVerification> {
+        let mut progress =
+            crate::progress::Progress::new(format!("Проверка {name}"), Some(length), 0);
         let mut n =
             read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
         let aea = buffer[..n].starts_with(b"AEA1");
@@ -167,6 +169,7 @@ impl EntryDigests {
                 input.update(hash.as_mut(), &buffer[..n], verified.bytes);
             }
             verified.bytes += n as u64;
+            progress.advance(n as u64);
             n = read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
         }
         ensure!(verified.bytes == length, "truncated ZIP entry {name}");
@@ -195,6 +198,7 @@ impl EntryDigests {
             }
             verified.digests += 1;
         }
+        progress.finish();
         Ok(verified)
     }
 }

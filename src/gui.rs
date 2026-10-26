@@ -169,13 +169,25 @@ impl App {
             tone: Tone::Error,
         });
     }
-    fn journal_text(&self) -> String {
+    fn journal_text(&self, details: bool) -> String {
         self.logs
             .iter()
-            .filter(|record| self.log_details || record.level != Level::Debug)
+            .filter(|record| details || record.level != Level::Debug)
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+    fn journal_error(&mut self, error: Option<&str>) {
+        if self.log_path.is_some()
+            && let Some(error) = error
+        {
+            self.log_path = None;
+            self.error(
+                "Журнал на диске неполный",
+                format!("{error}. Можно сохранить последнюю часть журнала из памяти."),
+            );
+            self.journal_open = true;
+        }
     }
     fn journal_line(&mut self, line: Record) {
         self.logs.push_back(line);
@@ -278,6 +290,7 @@ impl App {
                 self.journal_line(record);
                 self.log_path = Some(path);
                 self.notice = None;
+                self.journal_error(job.log_error.as_deref());
                 self.job = Some(job);
             }
             Err(e) => self.error("Не удалось начать операцию", format!("{e:#}")),

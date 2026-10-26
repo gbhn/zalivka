@@ -191,6 +191,27 @@ pub(super) fn log_checkpoint(
     })
 }
 
+/// Once firmware is running, a diagnostic write must not interrupt the device
+/// protocol. A partial JSON line also makes the transcript unsafe to append to.
+pub(super) fn record_message(log: &mut Option<impl Write>, message: &Value) -> Option<Record> {
+    let output = log.as_mut()?;
+    let result = (|| -> Result<()> {
+        serde_json::to_writer(&mut *output, message)?;
+        output.write_all(b"\n")?;
+        output.flush()?;
+        Ok(())
+    })();
+    let error = result.err()?;
+    *log = None;
+    Some(Record::new(
+        Level::Warning,
+        "transcript",
+        format!(
+            "Журнал JSONL неполный: {error:#}. Запись последующих сообщений отключена; восстановление продолжается."
+        ),
+    ))
+}
+
 pub(super) fn run(
     state: &mut ContextState,
     mut bootx_error: Option<anyhow::Error>,
@@ -235,10 +256,8 @@ pub(super) fn run(
                 fdr.check()?;
                 let message = received
                     .context("reading restored message before a successful final status")?;
-                if let Some(log) = &mut log {
-                    serde_json::to_writer(&mut *log, &message)?;
-                    log.write_all(b"\n")?;
-                    log.flush()?;
+                if let Some(warning) = record_message(&mut log, &message) {
+                    crate::logging::publish(warning);
                 }
                 match wire::string(&message, &["MsgType"])? {
                     "DataRequestMsg" => state.serve(&session, &mut main, &message)?,

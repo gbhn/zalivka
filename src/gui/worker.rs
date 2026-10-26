@@ -19,6 +19,7 @@ pub(super) struct Job {
     pub(super) started: Instant,
     child: Child,
     pub(super) log: File,
+    pub(super) log_error: Option<String>,
     pub(super) success: Option<bool>,
     pub(super) readers: u8,
     pub(super) cancelled: bool,
@@ -89,6 +90,7 @@ impl Job {
             started: now,
             child,
             log,
+            log_error: None,
             success: None,
             readers: 2,
             cancelled: false,
@@ -141,7 +143,19 @@ impl Job {
     pub(super) fn record(&mut self, mut record: Record) -> Record {
         record.elapsed_ms = self.started.elapsed().as_millis() as u64;
         record.normalize();
-        let _ = record.write_to(&mut self.log);
+        if self.log_error.is_none()
+            && let Err(error) = record.write_to(&mut self.log)
+        {
+            let error = error.to_string();
+            record
+                .message
+                .push_str(&format!(" / Журнал на диске неполный: {error}"));
+            if record.level != Level::Error {
+                record.level = Level::Warning;
+            }
+            record.normalize();
+            self.log_error = Some(error);
+        }
         record
     }
 
@@ -287,7 +301,7 @@ impl Job {
 
     pub(super) fn completion_notice(&self, success: bool, reboot_required: bool) -> Notice {
         let elapsed = elapsed_text(self.started.elapsed().as_secs());
-        let (title, detail, tone) = if self.cancelled {
+        let (title, mut detail, mut tone) = if self.cancelled {
             (
                 if self.action == Action::Restore && self.restore_completed {
                     "Восстановление завершено, раздача остановлена".into()
@@ -326,6 +340,14 @@ impl Job {
                 Tone::Success,
             )
         };
+        if let Some(error) = &self.log_error {
+            detail.push_str(&format!(
+                " Журнал на диске неполный: {error}. В окне доступна последняя часть журнала."
+            ));
+            if tone == Tone::Success {
+                tone = Tone::Neutral;
+            }
+        }
         Notice {
             title,
             detail,

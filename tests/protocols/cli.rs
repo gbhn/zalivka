@@ -176,6 +176,54 @@ fn verbose_diagnostics_keep_stdout_machine_readable() {
 }
 
 #[test]
+fn verifying_an_ipsw_reports_file_progress_without_an_archive_checksum() {
+    let file = fixture(None, false);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
+        .env(zalivka::progress::WORKER_EVENTS_ENV, "1")
+        .arg("verify")
+        .arg(file.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events: Vec<_> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(zalivka::progress::Event::parse)
+        .collect();
+    let mut started = std::collections::HashSet::new();
+    let mut completed = std::collections::HashSet::new();
+    let mut bytes = 0;
+    let mut report = None;
+    for event in events {
+        match event {
+            zalivka::progress::Event::Transfer(update) => {
+                assert!(update.stage.starts_with("Проверка "));
+                if update.finished {
+                    assert!(completed.insert(update.id));
+                    assert_eq!(update.total, Some(update.completed));
+                    bytes += update.completed;
+                } else {
+                    started.insert(update.id);
+                }
+            }
+            zalivka::progress::Event::Log(record) if record.source == "report" => {
+                report = Some(serde_json::from_str::<serde_json::Value>(&record.message).unwrap());
+            }
+            _ => {}
+        }
+    }
+    let report = report.unwrap();
+    assert!(!started.is_empty());
+    assert_eq!(started, completed);
+    assert_eq!(started.len() as u64, report["entries"].as_u64().unwrap());
+    assert_eq!(bytes, report["uncompressed_bytes"].as_u64().unwrap());
+}
+
+#[test]
 fn cli_restore_requires_erase_and_experimental_flags_before_accessing_usb() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
         .args(["restore", "absent.ipsw", "--ecid", "1234"])

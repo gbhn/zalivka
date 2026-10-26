@@ -4,7 +4,7 @@ use super::file_data::{FILE_DATA_BATCH, FileDataWriter, send_file_data};
 use super::keys::{ImagePrefix, key_exchange};
 use super::session::{
     acknowledge_final_status, finish_final_status, log_checkpoint, log_progress, operation_weights,
-    wait_for_restore_close,
+    record_message, wait_for_restore_close,
 };
 use super::*;
 use crate::mux::Session;
@@ -19,6 +19,54 @@ use std::{
     io::{Read, Write},
     time::{Duration, Instant},
 };
+
+#[test]
+fn transcript_write_or_flush_failure_does_not_block_final_status_acknowledgement() {
+    struct BrokenLog {
+        on_flush: bool,
+    }
+    impl Write for BrokenLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.on_flush {
+                Ok(bytes.len())
+            } else {
+                Err(std::io::Error::other("disk write failed"))
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("disk flush failed"))
+        }
+    }
+    let status = wire::dict([("MsgType", "StatusMsg".into()), ("Status", 0u64.into())]);
+    for on_flush in [false, true] {
+        let mut log = Some(BrokenLog { on_flush });
+        let warning = record_message(&mut log, &status).unwrap();
+        assert_eq!(warning.level, crate::logging::Level::Warning);
+        assert!(warning.message.contains(if on_flush {
+            "disk flush failed"
+        } else {
+            "disk write failed"
+        }));
+        assert!(log.is_none());
+        assert!(record_message(&mut log, &status).is_none());
+        let mut output = Vec::new();
+        finish_final_status(&mut output, &status, || Ok(())).unwrap();
+        let ack = wire::receive(&mut output.as_slice()).unwrap();
+        assert_eq!(
+            wire::string(&ack, &["MsgType"]).unwrap(),
+            "ReceivedFinalStatusMsg"
+        );
+    }
+    let mut log = Some(Vec::new());
+    for _ in 0..2 {
+        assert!(record_message(&mut log, &status).is_none());
+    }
+    let text = String::from_utf8(log.unwrap()).unwrap();
+    assert_eq!(text.lines().count(), 2);
+    for line in text.lines() {
+        assert_eq!(serde_json::from_str::<Value>(line).unwrap(), status);
+    }
+}
 
 #[test]
 fn data_ports_require_explicit_asr_ports_and_keep_all_bounds() {

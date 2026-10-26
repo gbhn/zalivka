@@ -250,10 +250,19 @@ fn structured_journal_filters_details_and_saves_each_record_once() {
     }
     assert_eq!(app.logs.len(), 4);
     assert_eq!(app.logs[1].level, Level::Info);
-    assert!(!app.journal_text().contains("protocol details"));
-    assert!(app.journal_text().contains("connection failed"));
+    assert!(
+        !app.journal_text(app.log_details)
+            .contains("protocol details")
+    );
+    assert!(
+        app.journal_text(app.log_details)
+            .contains("connection failed")
+    );
     app.log_details = true;
-    assert!(app.journal_text().contains("protocol details"));
+    assert!(
+        app.journal_text(app.log_details)
+            .contains("protocol details")
+    );
     send_worker(
         &mut app,
         progress::Event::Transfer(progress::Update {
@@ -271,6 +280,86 @@ fn structured_journal_filters_details_and_saves_each_record_once() {
     assert_eq!(saved.lines().count(), 4);
     assert!(saved.contains("protocol details"));
     assert!(!saved.contains(progress::EVENT_PREFIX));
+}
+
+#[test]
+fn failed_journal_writes_keep_worker_state_and_report_partial_logging() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut operation = job(Action::Restore);
+    operation.log = File::open(log.path()).unwrap();
+    let mut app = App::new();
+    app.log_path = Some(log.path().into());
+    app.job = Some(operation);
+    send_worker(
+        &mut app,
+        progress::Event::Log(Record::new(Level::Debug, "test", "original record")),
+    );
+    assert!(app.log_path.is_none());
+    assert!(app.journal_open);
+    assert!(app.notice.as_ref().unwrap().title.contains("неполный"));
+    assert!(app.logs[0].message.contains("original record"));
+    assert_eq!(app.logs[0].level, Level::Warning);
+    assert!(!app.job.as_ref().unwrap().can_stop());
+    send_worker(
+        &mut app,
+        progress::Event::Log(Record::new(Level::Info, "test", "next record")),
+    );
+    assert_eq!(app.logs[1].message, "next record");
+    send_worker(&mut app, progress::Event::RestoreCompleted);
+    assert!(app.job.as_ref().unwrap().can_stop());
+    for _ in 0..2 {
+        app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
+    }
+    app.poll(&egui::Context::default());
+    let notice = app.notice.as_ref().unwrap();
+    assert_eq!(notice.title, Action::Restore.completed_title());
+    assert_eq!(notice.tone, Tone::Neutral);
+    assert!(notice.detail.contains("Журнал на диске неполный"));
+    assert!(std::fs::read(log.path()).unwrap().is_empty());
+}
+
+#[test]
+fn a_failure_writing_the_final_record_cannot_report_a_complete_journal() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut operation = job(Action::Verify);
+    operation.log = File::open(log.path()).unwrap();
+    let mut app = App::new();
+    app.log_path = Some(log.path().into());
+    app.job = Some(operation);
+    for _ in 0..2 {
+        app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
+    }
+    app.poll(&egui::Context::default());
+    assert!(app.job.is_none());
+    assert!(app.log_path.is_none());
+    assert!(app.journal_open);
+    let notice = app.notice.as_ref().unwrap();
+    assert_eq!(notice.title, Action::Verify.completed_title());
+    assert_eq!(notice.tone, Tone::Neutral);
+    assert!(notice.detail.contains("Журнал на диске неполный"));
+}
+
+#[test]
+fn memory_journal_export_includes_hidden_details_and_marks_the_partial_copy() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("memory.log");
+    let mut app = App::new();
+    app.journal_line(Record::new(Level::Debug, "test", "protocol details"));
+    app.journal_line(Record::new(Level::Info, "test", "visible record"));
+    assert!(!app.log_details);
+    app.tx
+        .send(Event::Picked(Picker::Log, Some(path.clone())))
+        .unwrap();
+    let ctx = egui::Context::default();
+    app.poll(&ctx);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let saved = std::fs::read_to_string(path).unwrap();
+    assert!(saved.contains("protocol details"));
+    assert!(saved.contains("visible record"));
+    assert!(saved.starts_with("Неполный журнал:"));
 }
 
 #[cfg(target_os = "linux")]
