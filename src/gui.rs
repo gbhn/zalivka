@@ -11,11 +11,12 @@ use worker::{Job, Output};
 
 use theme::{Tone, configure};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use eframe::egui;
 use std::{
     collections::VecDeque,
     path::PathBuf,
+    process::{Command, Stdio},
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
 };
@@ -44,7 +45,7 @@ pub fn run() -> Result<()> {
                 "../assets/window-icon.png"
             ))?)
             .with_inner_size([1020.0, 800.0])
-            .with_min_inner_size([700.0, 640.0]),
+            .with_min_inner_size([480.0, 360.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -316,6 +317,32 @@ impl App {
             self.picking = false;
             self.error("Не удалось открыть окно выбора", e);
         }
+    }
+    fn open_firmware_folder(&self) -> Result<()> {
+        let directory = if self.setup.cache.trim().is_empty() {
+            catalog::cache_directory()?
+        } else {
+            PathBuf::from(self.setup.cache.trim())
+        };
+        std::fs::create_dir_all(&directory).context("creating firmware directory")?;
+        let directory = std::path::absolute(directory).context("locating firmware directory")?;
+        #[cfg(windows)]
+        let opener = "explorer.exe";
+        #[cfg(target_os = "macos")]
+        let opener = "open";
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let opener = "xdg-open";
+        let mut child = Command::new(opener)
+            .arg(directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("opening firmware directory")?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
     }
     fn start(&mut self, action: Action, ctx: &egui::Context) {
         if self.job.is_some() {

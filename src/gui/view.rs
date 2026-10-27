@@ -55,43 +55,44 @@ impl App {
         if !self.journal_open {
             return;
         }
+        let max_height = (ctx.content_rect().height() * 0.35).min(350.0);
         egui::TopBottomPanel::bottom("journal")
             .resizable(true)
-            .default_height(220.0)
+            .default_height(max_height.min(220.0))
             .min_height(110.0)
-            .max_height(350.0)
+            .max_height(max_height)
             .frame(
                 egui::Frame::new()
                     .fill(ctx.style().visuals.window_fill)
                     .inner_margin(16),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                ui.spacing_mut().interact_size.y = 24.0;
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.horizontal_wrapped(|ui| {
                     ui.strong("Журнал");
                     ui.checkbox(&mut self.log_details, "Технические подробности");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Скрыть").clicked() {
-                            self.journal_open = false;
-                        }
-                        if ui
-                            .add_enabled(
-                                !self.logs.is_empty() && !self.picking,
-                                egui::Button::new("Сохранить журнал").small(),
-                            )
-                            .clicked()
-                        {
-                            self.pick(Picker::Log, ctx);
-                        }
-                        if ui
-                            .add_enabled(
-                                !self.logs.is_empty(),
-                                egui::Button::new("Копировать").small(),
-                            )
-                            .clicked()
-                        {
-                            ctx.copy_text(self.journal_text(self.log_details));
-                        }
-                    });
+                    if ui
+                        .add_enabled(
+                            !self.logs.is_empty(),
+                            egui::Button::new("Копировать").small(),
+                        )
+                        .clicked()
+                    {
+                        ctx.copy_text(self.journal_text(self.log_details));
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.logs.is_empty() && !self.picking,
+                            egui::Button::new("Сохранить журнал").small(),
+                        )
+                        .clicked()
+                    {
+                        self.pick(Picker::Log, ctx);
+                    }
+                    if ui.small_button("Скрыть").clicked() {
+                        self.journal_open = false;
+                    }
                 });
                 ui.separator();
                 let records: Vec<_> = self
@@ -108,6 +109,7 @@ impl App {
                 let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
+                    .min_scrolled_height(0.0)
                     .stick_to_bottom(true)
                     .show_rows(ui, row_height, records.len(), |ui, rows| {
                         for row in rows {
@@ -130,6 +132,115 @@ impl App {
                         }
                     });
             });
+    }
+}
+
+impl App {
+    pub(super) fn view(&mut self, ctx: &egui::Context) {
+        self.header(ctx);
+        egui::TopBottomPanel::bottom("footer")
+            .frame(
+                egui::Frame::new()
+                    .fill(ctx.style().visuals.panel_fill)
+                    .inner_margin(egui::Margin::symmetric(26, 9)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    caption(
+                        ui,
+                        if self.job.is_some() {
+                            "Выполняется операция"
+                        } else if self.target().is_some() {
+                            "Mac подключён"
+                        } else {
+                            "Ожидание устройства"
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("Zalivka {}", zalivka::VERSION))
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(zalivka::VERSION);
+                    });
+                });
+            });
+        self.journal(ctx);
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(ctx.style().visuals.panel_fill)
+                    .inner_margin(22),
+            )
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("main_content")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.heading("Восстановление Mac");
+                        ui.add_space(9.0);
+                        if let Some(notice) = &self.notice {
+                            let mut dismiss = false;
+                            let color = notice.tone.color(ui.visuals());
+                            card(ui.ctx())
+                                .fill(tint(color, ui.visuals().window_fill))
+                                .show(ui, |ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(
+                                            RichText::new(&notice.title).strong().color(color),
+                                        );
+                                        if ui.small_button("Скрыть").clicked() {
+                                            dismiss = true;
+                                        }
+                                    });
+                                    caption(ui, &notice.detail);
+                                });
+                            if dismiss {
+                                self.notice = None;
+                            }
+                            ui.add_space(12.0);
+                        }
+                        if self.job.is_some() {
+                            self.active_job(ui);
+                        } else {
+                            ui.add_enabled_ui(!self.picking, |ui| {
+                                self.windows_card(ui, ctx);
+                                if ui.available_width() >= 780.0 {
+                                    ui.columns(2, |columns| {
+                                        let mut device =
+                                            self.prepare_device_card(&mut columns[0], ctx);
+                                        let mut firmware =
+                                            self.prepare_firmware_card(&mut columns[1], ctx);
+                                        let height = device
+                                            .content_ui
+                                            .min_size()
+                                            .y
+                                            .max(firmware.content_ui.min_size().y);
+                                        for frame in [&mut device, &mut firmware] {
+                                            let mut bounds = frame.content_ui.min_rect();
+                                            bounds.set_height(height);
+                                            frame.content_ui.expand_to_include_rect(bounds);
+                                        }
+                                        device.end(&mut columns[0]);
+                                        firmware.end(&mut columns[1]);
+                                    });
+                                } else {
+                                    self.prepare_device_card(ui, ctx).end(ui);
+                                    ui.add_space(12.0);
+                                    self.prepare_firmware_card(ui, ctx).end(ui);
+                                }
+                                ui.add_space(12.0);
+                                self.actions(ui);
+                            });
+                        }
+                    });
+            });
+        self.settings(ctx);
+        self.confirmation(ctx);
     }
 }
 
@@ -174,94 +285,6 @@ impl eframe::App for App {
                 self.setup.automatic = false;
             }
         }
-        self.header(ctx);
-        egui::TopBottomPanel::bottom("footer")
-            .frame(
-                egui::Frame::new()
-                    .fill(ctx.style().visuals.panel_fill)
-                    .inner_margin(egui::Margin::symmetric(26, 9)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    caption(
-                        ui,
-                        if self.job.is_some() {
-                            "Выполняется операция"
-                        } else if self.target().is_some() {
-                            "Mac подключён"
-                        } else {
-                            "Ожидание устройства"
-                        },
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        caption(ui, format!("Zalivka {}", zalivka::VERSION));
-                    });
-                });
-            });
-        self.journal(ctx);
-        if self.job.is_none() {
-            egui::TopBottomPanel::bottom("actions")
-                .show_separator_line(false)
-                .frame(
-                    egui::Frame::new()
-                        .fill(ctx.style().visuals.panel_fill)
-                        .inner_margin(egui::Margin::symmetric(22, 12)),
-                )
-                .show(ctx, |ui| {
-                    ui.add_enabled_ui(!self.picking, |ui| self.actions(ui));
-                });
-        }
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(ctx.style().visuals.panel_fill)
-                    .inner_margin(22),
-            )
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.heading("Восстановление Mac");
-                        ui.add_space(9.0);
-                        if let Some(notice) = &self.notice {
-                            let mut dismiss = false;
-                            let color = notice.tone.color(ui.visuals());
-                            card(ui.ctx())
-                                .fill(tint(color, ui.visuals().window_fill))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(&notice.title).strong().color(color),
-                                        );
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui.small_button("Скрыть").clicked() {
-                                                    dismiss = true;
-                                                }
-                                            },
-                                        );
-                                    });
-                                    caption(ui, &notice.detail);
-                                });
-                            if dismiss {
-                                self.notice = None;
-                            }
-                            ui.add_space(12.0);
-                        }
-                        if self.job.is_some() {
-                            self.active_job(ui);
-                        } else {
-                            ui.add_enabled_ui(!self.picking, |ui| {
-                                self.windows_card(ui, ctx);
-                                self.device_card(ui, ctx);
-                                ui.add_space(12.0);
-                                self.firmware_card(ui, ctx);
-                            });
-                        }
-                    });
-            });
-        self.settings(ctx);
-        self.confirmation(ctx);
+        self.view(ctx);
     }
 }

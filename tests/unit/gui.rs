@@ -1345,8 +1345,8 @@ fn main_panels_render_in_both_themes_without_light_surfaces_in_dark_mode() {
                 app.header(ctx);
                 app.journal(ctx);
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    app.device_card(ui, ctx);
-                    app.firmware_card(ui, ctx);
+                    app.prepare_device_card(ui, ctx).end(ui);
+                    app.prepare_firmware_card(ui, ctx).end(ui);
                     app.actions(ui);
                 });
             },
@@ -1372,6 +1372,267 @@ fn main_panels_render_in_both_themes_without_light_surfaces_in_dark_mode() {
                 .all(|color| color.r() < 64 && color.g() < 64 && color.b() < 64)
                 == (theme == egui::Theme::Dark)
         );
+        assert!(app.job.is_none());
+    }
+}
+
+fn visible_text_rect(output: &egui::FullOutput, value: &str) -> Option<egui::Rect> {
+    output.shapes.iter().find_map(|shape| {
+        if let egui::Shape::Text(text) = &shape.shape
+            && text.galley.text() == value
+        {
+            let rect = text.galley.rect.translate(text.pos.to_vec2());
+            if shape.clip_rect.expand(1.0).contains_rect(rect) {
+                return Some(rect);
+            }
+        }
+        None
+    })
+}
+
+#[test]
+fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_open() {
+    for size in [
+        egui::vec2(1020.0, 630.0),
+        egui::vec2(700.0, 480.0),
+        egui::vec2(480.0, 360.0),
+    ] {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        let mut app = App::new();
+        app.journal_open = true;
+        app.host = Ok(Some(drivers::HostStatus {
+            apple_service_installed: false,
+            apple_service_running: false,
+            apple_driver_installed: false,
+            compatible_usb_driver: false,
+            usb_network_driver_available: true,
+            usb_network_interfaces: vec![],
+        }));
+        for _ in 0..20 {
+            app.journal_line(Record::new(Level::Error, "test", "Проверка журнала"));
+        }
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let mut output = egui::FullOutput::default();
+        // Also exercise shrinking a window after egui has saved a taller journal.
+        for frame_size in [egui::vec2(1280.0, 1000.0), size, size, size] {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, frame_size)),
+                    ..Default::default()
+                },
+                |ctx| app.view(ctx),
+            );
+        }
+        let heading = visible_text_rect(&output, "Восстановление Mac")
+            .unwrap_or_else(|| panic!("main content hidden at {size:?}"));
+        assert!(screen.contains_rect(heading));
+        for label in ["Копировать", "Сохранить журнал", "Скрыть"] {
+            assert!(
+                visible_text_rect(&output, label).is_some(),
+                "journal control {label} clipped at {size:?}"
+            );
+        }
+        assert!(
+            output.shapes.iter().any(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape
+                    && text.galley.text().contains("Проверка журнала")
+                {
+                    let rect = text.galley.rect.translate(text.pos.to_vec2());
+                    return rect.top() >= shape.clip_rect.top()
+                        && rect.bottom() <= shape.clip_rect.bottom();
+                }
+                false
+            }),
+            "journal rows hidden at {size:?}"
+        );
+        let mut reached = [false; 4];
+        let labels = [
+            "Устройство",
+            "Прошивка",
+            "Запустить Revive",
+            "Стереть и восстановить",
+        ];
+        for _ in 0..50 {
+            for (reached, label) in reached.iter_mut().zip(labels) {
+                *reached |= visible_text_rect(&output, label).is_some();
+            }
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events: vec![
+                        egui::Event::PointerMoved(heading.center()),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -35.0),
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ctx| app.view(ctx),
+            );
+        }
+        for (reached, label) in reached.into_iter().zip(labels) {
+            assert!(reached, "cannot scroll to {label} at {size:?}");
+        }
+        assert!(app.job.is_none());
+    }
+}
+
+#[test]
+fn narrow_cards_keep_text_and_controls_inside_their_bounds() {
+    for width in [480.0, 700.0, 840.0, 1020.0, 1280.0] {
+        for automatic in [false, true] {
+            let ctx = egui::Context::default();
+            configure(&ctx);
+            let mut app = App::new();
+            app.setup.automatic = automatic;
+            app.setup.ecid = "2a".into();
+            app.devices.push(device(42, Mode::Recovery));
+            app.scanning = true;
+            app.firmware = Some(FirmwareSelection {
+                device: app.devices[0].clone(),
+                request: 0,
+                release: Some(Err("offline".into())),
+            });
+            for scanning in [false, true, false] {
+                app.scanning = scanning;
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 1600.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| app.view(ctx),
+                );
+                for shape in &output.shapes {
+                    if let egui::Shape::Text(text) = &shape.shape {
+                        assert_ne!(text.galley.text(), "Поиск…");
+                        let rect = text.galley.rect.translate(text.pos.to_vec2());
+                        assert!(
+                            shape.clip_rect.expand(1.0).contains_rect(rect),
+                            "clipped {} at width {width}, automatic={automatic}: {rect:?} outside {:?}",
+                            text.galley.text(),
+                            shape.clip_rect,
+                        );
+                    }
+                }
+                let card_rect = |title| {
+                    let heading = visible_text_rect(&output, title).unwrap();
+                    output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Rect(rect)
+                                if rect.rect.height() > 60.0
+                                    && rect.fill == ctx.style().visuals.window_fill
+                                    && rect.rect.contains(heading.center()) =>
+                            {
+                                Some(rect.rect)
+                            }
+                            _ => None,
+                        })
+                        .unwrap()
+                };
+                let device = card_rect("Устройство");
+                let firmware = card_rect("Прошивка");
+                let actions = card_rect("Действие");
+                assert!((device.width() - firmware.width()).abs() < 1.0);
+                assert!((device.left() - actions.left()).abs() < 1.0);
+                assert!((firmware.right() - actions.right()).abs() < 1.0);
+                if width >= 840.0 {
+                    assert!((device.top() - firmware.top()).abs() < 1.0);
+                    assert!(
+                        (device.bottom() - firmware.bottom()).abs() < 1.0,
+                        "unequal card heights at width {width}, automatic={automatic}: {device:?}, {firmware:?}"
+                    );
+                    assert!(device.right() < firmware.left());
+                } else {
+                    assert!((device.width() - actions.width()).abs() < 1.0);
+                    assert!(device.bottom() < firmware.top());
+                }
+                let revive = visible_text_rect(&output, "Запустить Revive").unwrap();
+                let restore = visible_text_rect(&output, "Стереть и восстановить").unwrap();
+                assert!(!revive.intersects(restore));
+                if width <= 700.0 {
+                    assert!(revive.bottom() < restore.top());
+                } else {
+                    assert!((revive.top() - restore.top()).abs() < 1.0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn small_dialogs_scroll_to_their_controls() {
+    for action in [None, Some(Action::Revive), Some(Action::Restore)] {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        let mut app = App::new();
+        app.setup.ecid = "2a".into();
+        app.devices.push(device(42, Mode::Dfu));
+        app.settings_open = action.is_none();
+        app.confirmation = action.map(|action| Confirmation {
+            action,
+            ecid: 42,
+            accepted: false,
+        });
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(480.0, 360.0));
+        let label = match action {
+            None => "Диагностика USB",
+            Some(Action::Revive) => "Начать Revive",
+            _ => "Стереть Mac",
+        };
+        let mut reached = false;
+        let mut compact_folder_row = false;
+        for frame in 0..30 {
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events: vec![
+                        egui::Event::PointerMoved(screen.center()),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -20.0),
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.settings(ctx);
+                    app.confirmation(ctx);
+                },
+            );
+            if let Some(rect) = visible_text_rect(&output, label) {
+                reached |= screen.contains_rect(rect);
+            }
+            if action.is_none() {
+                if frame >= 3 {
+                    for label in ["Настройки", "Готово"] {
+                        let rect = visible_text_rect(&output, label)
+                            .unwrap_or_else(|| panic!("settings header {label} scrolled away"));
+                        assert!(screen.contains_rect(rect));
+                    }
+                }
+                if let (Some(title), Some(field), Some(button)) = (
+                    visible_text_rect(&output, "Папка прошивок"),
+                    visible_text_rect(&output, "По умолчанию"),
+                    visible_text_rect(&output, "Выбрать"),
+                ) {
+                    assert!(field.top() - title.bottom() < 34.0);
+                    assert!(button.top() - title.bottom() < 34.0);
+                    assert!((field.center().y - button.center().y).abs() < 10.0);
+                    compact_folder_row = true;
+                }
+            }
+        }
+        assert!(reached, "dialog control {label} is unreachable");
+        assert!(action.is_some() || compact_folder_row);
         assert!(app.job.is_none());
     }
 }
@@ -1415,7 +1676,8 @@ fn firmware_card_text(app: &mut App, ctx: &egui::Context) -> String {
             ..Default::default()
         },
         |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.firmware_card(ui, ctx));
+            egui::CentralPanel::default()
+                .show(ctx, |ui| app.prepare_firmware_card(ui, ctx).end(ui));
         },
     );
     output

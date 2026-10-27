@@ -4,7 +4,7 @@ use super::widgets::{
     caption, card, elapsed_text, human_bytes, laptop, metric, pill, progress_bar, section,
 };
 use super::{App, Confirmation, Picker, setup::Action};
-use eframe::egui::{self, Color32, RichText, Vec2};
+use eframe::egui::{self, Color32, RichText, Vec2, containers::frame::Prepared};
 use std::{
     path::Path,
     time::{Duration, Instant},
@@ -12,12 +12,21 @@ use std::{
 use zalivka::{device::Mode, drivers};
 
 impl App {
-    pub(super) fn device_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        card(ui.ctx()).show(ui, |ui| {
-            section(ui, "01", "Устройство");
-            ui.horizontal(|ui| {
-                laptop(ui, self.target().is_some());
-                ui.vertical(|ui| {
+    pub(super) fn prepare_device_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+    ) -> Prepared {
+        let mut frame = card(ctx).begin(ui);
+        let ui = &mut frame.content_ui;
+        ui.set_width(ui.available_width());
+        section(ui, "01", "Устройство");
+        ui.horizontal_wrapped(|ui| {
+            laptop(ui, self.target().is_some());
+            ui.allocate_ui_with_layout(
+                Vec2::new((ui.available_width() - 100.0).max(220.0), 54.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
                     let title = self
                         .target()
                         .map(|device| format!("Mac (CPID {:04x})", device.chip_id))
@@ -43,182 +52,175 @@ impl App {
                                 .color(ui.visuals().weak_text_color()),
                         );
                     }
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(!self.scanning, egui::Button::new("Обновить"))
-                        .clicked()
-                    {
-                        self.detect(ctx);
-                    }
-                    if self.scanning {
-                        caption(ui, "Поиск…");
-                    }
-                    if let Some(d) = self.target() {
-                        pill(
-                            ui,
-                            if d.mode == Mode::Dfu {
-                                "DFU"
-                            } else {
-                                "Recovery"
-                            },
-                            if d.mode == Mode::Dfu {
-                                Tone::Success.color(ui.visuals())
-                            } else {
-                                ui.visuals().weak_text_color()
-                            },
+                },
+            );
+            if let Some(d) = self.target() {
+                pill(
+                    ui,
+                    if d.mode == Mode::Dfu {
+                        "DFU"
+                    } else {
+                        "Recovery"
+                    },
+                    if d.mode == Mode::Dfu {
+                        Tone::Success.color(ui.visuals())
+                    } else {
+                        ui.visuals().weak_text_color()
+                    },
+                );
+            }
+        });
+        if self.devices.len() > 1 || (!self.devices.is_empty() && self.target().is_none()) {
+            ui.add_space(4.0);
+            egui::ComboBox::from_id_salt("devices")
+                .selected_text("Выбрать устройство")
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for d in &self.devices {
+                        let ecid = format!("{:016x}", d.ecid);
+                        ui.selectable_value(
+                            &mut self.setup.ecid,
+                            ecid.clone(),
+                            format!("Mac, {ecid}, {:?}", d.mode),
                         );
                     }
                 });
+        }
+        if self.scan_error.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("Не удалось проверить USB").color(ui.visuals().error_fg_color),
+                );
+                if ui.link("Диагностика").clicked() {
+                    self.start(Action::Doctor, ctx);
+                }
             });
-            if self.devices.len() > 1 || (!self.devices.is_empty() && self.target().is_none()) {
-                ui.add_space(4.0);
-                egui::ComboBox::from_id_salt("devices")
-                    .selected_text("Выбрать устройство")
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        for d in &self.devices {
-                            let ecid = format!("{:016x}", d.ecid);
-                            ui.selectable_value(
-                                &mut self.setup.ecid,
-                                ecid.clone(),
-                                format!("Mac, {ecid}, {:?}", d.mode),
-                            );
-                        }
-                    });
-            }
-            if self.scan_error.is_some() {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Не удалось проверить USB")
-                            .color(ui.visuals().error_fg_color),
-                    );
-                    if ui.link("Диагностика").clicked() {
-                        self.start(Action::Doctor, ctx);
-                    }
-                });
+        }
+        frame
+    }
+    pub(super) fn prepare_firmware_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+    ) -> Prepared {
+        let mut frame = card(ctx).begin(ui);
+        let ui = &mut frame.content_ui;
+        ui.set_width(ui.available_width());
+        section(ui, "02", "Прошивка");
+        ui.horizontal_wrapped(|ui| {
+            for (automatic, title) in [(true, "Автоматически"), (false, "Локальный IPSW")]
+            {
+                let color = if self.setup.automatic == automatic {
+                    Color32::WHITE
+                } else {
+                    ui.visuals().text_color()
+                };
+                ui.selectable_value(
+                    &mut self.setup.automatic,
+                    automatic,
+                    RichText::new(title).color(color),
+                );
             }
         });
-    }
-    pub(super) fn firmware_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        card(ui.ctx()).show(ui, |ui| {
-            section(ui, "02", "Прошивка");
-            ui.horizontal(|ui| {
-                for (automatic, title) in [(true, "Автоматически"), (false, "Локальный IPSW")]
-                {
-                    let color = if self.setup.automatic == automatic {
-                        Color32::WHITE
-                    } else {
-                        ui.visuals().text_color()
-                    };
-                    ui.selectable_value(
-                        &mut self.setup.automatic,
-                        automatic,
-                        RichText::new(title).color(color),
-                    );
-                }
-            });
-            ui.add_space(5.0);
-            if self.setup.automatic {
-                self.refresh_firmware(ctx, false);
-                let mut retry = false;
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        match self.firmware.as_ref().map(|firmware| &firmware.release) {
-                            None => {
-                                ui.strong("Прошивка ещё не выбрана");
-                                caption(
-                                    ui,
-                                    if self.devices.is_empty() {
-                                        "Подключите Mac для подбора прошивки"
-                                    } else {
-                                        "Выберите Mac для подбора прошивки"
-                                    },
-                                );
-                            }
-                            Some(None) => {
-                                ui.strong("Подбираем прошивку…");
-                                caption(ui, "Проверяем каталог Apple для выбранного Mac");
-                            }
-                            Some(Some(Ok(release))) => {
-                                ui.strong(format!(
-                                    "Версия {}, сборка {}",
-                                    release.version, release.build
-                                ));
-                                caption(ui, &release.product_type);
-                            }
-                            Some(Some(Err(error))) => {
-                                ui.strong("Не удалось подобрать прошивку")
-                                    .on_hover_text(error);
-                                caption(ui, "Проверьте интернет и повторите поиск");
-                            }
-                        }
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self
-                            .firmware
-                            .as_ref()
-                            .is_some_and(|firmware| matches!(firmware.release, Some(Err(_))))
-                        {
-                            retry = ui.button("Повторить").clicked();
-                        }
-                        if ui
-                            .add_enabled(
-                                self.target().is_some(),
-                                egui::Button::new("Скачать отдельно"),
-                            )
-                            .clicked()
-                        {
-                            self.start(Action::Download, ctx);
-                        }
-                    });
-                });
-                if retry {
-                    self.refresh_firmware(ctx, true);
-                }
-            } else {
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        Vec2::new((ui.available_width() - 245.0).max(120.0), 34.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            let path = Path::new(self.setup.ipsw.trim());
-                            let name = path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| "Перетащите IPSW в окно".into());
-                            ui.add(egui::Label::new(RichText::new(name).strong()).truncate())
-                                .on_hover_text(&self.setup.ipsw);
-                            let detail = path
-                                .metadata()
-                                .ok()
-                                .map(|m| human_bytes(m.len()))
-                                .unwrap_or_else(|| "Файл прошивки Apple".into());
-                            caption(ui, detail);
+        ui.add_space(5.0);
+        if self.setup.automatic {
+            self.refresh_firmware(ctx, false);
+            match self.firmware.as_ref().map(|firmware| &firmware.release) {
+                None => {
+                    ui.strong("Прошивка ещё не выбрана");
+                    caption(
+                        ui,
+                        if self.devices.is_empty() {
+                            "Подключите Mac для подбора прошивки"
+                        } else {
+                            "Выберите Mac для подбора прошивки"
                         },
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(!self.picking, egui::Button::new("Выбрать файл"))
-                            .clicked()
-                        {
-                            self.pick(Picker::Firmware, ctx);
-                        }
-                        if self.setup.local_file().is_ok() && ui.small_button("Проверить").clicked()
-                        {
-                            self.start(Action::Verify, ctx);
-                        }
-                    });
-                });
+                }
+                Some(None) => {
+                    ui.strong("Подбираем прошивку…");
+                    caption(ui, "Проверяем каталог Apple для выбранного Mac");
+                }
+                Some(Some(Ok(release))) => {
+                    ui.strong(format!(
+                        "Версия {}, сборка {}",
+                        release.version, release.build
+                    ));
+                    caption(ui, &release.product_type);
+                }
+                Some(Some(Err(error))) => {
+                    ui.strong("Не удалось подобрать прошивку")
+                        .on_hover_text(error);
+                    caption(ui, "Проверьте интернет и повторите поиск");
+                }
             }
-        });
+        } else {
+            let path = Path::new(self.setup.ipsw.trim());
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Перетащите IPSW в окно".into());
+            ui.add(egui::Label::new(RichText::new(name).strong()).truncate())
+                .on_hover_text(&self.setup.ipsw);
+            let detail = path
+                .metadata()
+                .ok()
+                .map(|m| human_bytes(m.len()))
+                .unwrap_or_else(|| "Файл прошивки Apple".into());
+            caption(ui, detail);
+        }
+        ui.add_space(5.0);
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), 34.0),
+            egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true),
+            |ui| {
+                if self.setup.automatic {
+                    if ui
+                        .add_enabled(self.target().is_some(), egui::Button::new("Скачать"))
+                        .clicked()
+                    {
+                        self.start(Action::Download, ctx);
+                    }
+                } else {
+                    if ui
+                        .add_enabled(!self.picking, egui::Button::new("Выбрать файл"))
+                        .clicked()
+                    {
+                        self.pick(Picker::Firmware, ctx);
+                    }
+                    if self.setup.local_file().is_ok() && ui.button("Проверить").clicked()
+                    {
+                        self.start(Action::Verify, ctx);
+                    }
+                }
+                if ui
+                    .button("Открыть папку")
+                    .on_hover_text("Папка скачанных прошивок")
+                    .clicked()
+                    && let Err(error) = self.open_firmware_folder()
+                {
+                    self.error("Не удалось открыть папку прошивок", format!("{error:#}"));
+                }
+                if self.setup.automatic
+                    && self
+                        .firmware
+                        .as_ref()
+                        .is_some_and(|firmware| matches!(firmware.release, Some(Err(_))))
+                    && ui.button("Повторить").clicked()
+                {
+                    self.refresh_firmware(ctx, true);
+                }
+            },
+        );
+        frame
     }
     pub(super) fn actions(&mut self, ui: &mut egui::Ui) {
         card(ui.ctx()).show(ui, |ui| {
             section(ui, "03", "Действие");
             let ready = self.blocked_reason().is_none() && !self.picking;
-            ui.columns(2, |columns| {
-                for (ui, (action, title, detail, button)) in columns.iter_mut().zip([
+            let column_count = if ui.available_width() < 640.0 { 1 } else { 2 };
+            ui.columns(column_count, |columns| {
+                for (index, (action, title, detail, button)) in [
                     (
                         Action::Revive,
                         "Revive",
@@ -231,7 +233,14 @@ impl App {
                         "Стереть Mac и установить систему",
                         "Стереть и восстановить",
                     ),
-                ]) {
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let ui = &mut columns[index % column_count];
+                    if column_count == 1 && index > 0 {
+                        ui.add_space(14.0);
+                    }
                     ui.label(RichText::new(title).size(18.0).strong());
                     caption(ui, detail);
                     ui.add_space(7.0);
@@ -282,7 +291,7 @@ impl App {
     pub(super) fn active_job(&mut self, ui: &mut egui::Ui) {
         card(ui.ctx()).show(ui, |ui| {
             let Some(job) = self.job.as_ref() else { return };
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 pill(ui, "В работе", BLUE);
                 ui.label(RichText::new(job.action.title()).size(21.0).strong());
             });

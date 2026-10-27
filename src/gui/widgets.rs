@@ -10,14 +10,18 @@ pub(super) fn caption(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Respo
 }
 
 pub(super) fn path_picker(ui: &mut egui::Ui, value: &mut String, hint: &str, button: &str) -> bool {
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(value)
-                .hint_text(hint)
-                .desired_width(315.0),
-        );
-        ui.button(button).clicked()
-    })
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), 34.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            let clicked = ui.button(button).clicked();
+            ui.add_sized(
+                Vec2::new(ui.available_width(), 34.0),
+                egui::TextEdit::singleline(value).hint_text(hint),
+            );
+            clicked
+        },
+    )
     .inner
 }
 
