@@ -102,7 +102,11 @@ fn main() {
     let mut status = vec!["status", "--porcelain", "--untracked-files=normal", "--"];
     status.extend(inputs);
     let dirty = git(&status).is_some_and(|status| !status.is_empty());
-    let fingerprint = format!("{:x}", hash.finalize());
+    let fingerprint: String = hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     let built_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("build time before Unix epoch")

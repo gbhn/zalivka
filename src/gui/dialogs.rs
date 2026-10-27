@@ -19,7 +19,7 @@ impl App {
         let target = self.target();
         let mut cancel = false;
         let mut launch = None;
-        let response = egui::Modal::new(egui::Id::new("confirm"))
+        let response = egui::Modal::new(egui::Id::unique("confirm"))
             .frame(card(ctx).inner_margin(26))
             .show(ctx, |ui| {
                 ui.set_width(400.0_f32.min((ctx.content_rect().width() - 84.0).max(0.0)));
@@ -98,7 +98,7 @@ impl App {
             return;
         }
         let mut close = false;
-        let response = egui::Modal::new(egui::Id::new("settings"))
+        let response = egui::Modal::new(egui::Id::unique("settings"))
             .frame(card(ctx).inner_margin(24))
             .show(ctx, |ui| {
                 ui.set_width(540.0_f32.min((ctx.content_rect().width() - 82.0).max(0.0)));

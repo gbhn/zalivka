@@ -109,7 +109,7 @@ pub(super) fn ftab_index(bytes: &[u8], length: u64) -> Result<Vec<FtabEntry>> {
     let rows = bytes.get(48..end).context("truncated FTAB index")?;
     let mut entries = Vec::with_capacity(count);
     let mut tags = HashSet::new();
-    for row in rows.chunks_exact(16) {
+    for row in rows.as_chunks::<16>().0 {
         let tag = row[..4].try_into()?;
         let offset = u64::from(u32::from_le_bytes(row[4..8].try_into()?));
         let size = u64::from(u32::from_le_bytes(row[8..12].try_into()?));

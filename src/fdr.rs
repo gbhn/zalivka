@@ -12,7 +12,7 @@ use std::{
         mpsc,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub struct Fdr {
@@ -198,29 +198,64 @@ fn handle_connection(mut stream: MuxStream, stop: &AtomicBool) -> Result<()> {
                 stream.set_read_timeout(Duration::from_secs(20));
                 let (host, port) = proxy_handshake(&mut stream)?;
                 crate::log!(Debug, "fdr", "Подключение прокси FDR к {host}:{port}");
+                let connecting = Instant::now();
                 let mut socket =
                     crate::proxy::connect(&host, port).context("connecting FDR Apple endpoint")?;
+                crate::log!(
+                    Debug,
+                    "fdr",
+                    "Туннель FDR к {host}:{port} установлен за {:.3} с; начало пересылки данных",
+                    connecting.elapsed().as_secs_f64()
+                );
                 stream.set_read_timeout(Duration::from_millis(100));
                 let mut buffer = vec![0; 32768];
-                while !stop.load(Ordering::Relaxed) {
-                    match stream.read(&mut buffer) {
-                        Ok(0) => return Ok(()),
-                        Ok(n) => socket.write_all(&buffer[..n])?,
-                        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-                        Err(e) => return Err(e.into()),
+                let relaying = Instant::now();
+                let mut from_mac = 0u64;
+                let mut from_upstream = 0u64;
+                let result = (|| -> Result<&str> {
+                    while !stop.load(Ordering::Relaxed) {
+                        match stream.read(&mut buffer) {
+                            Ok(0) => return Ok("EOF от Mac"),
+                            Ok(n) => {
+                                from_mac += n as u64;
+                                socket
+                                    .write_all(&buffer[..n])
+                                    .context("writing FDR payload to proxy/Apple")?;
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                            Err(e) => return Err(e).context("reading FDR payload from Mac"),
+                        }
+                        match socket.read(&mut buffer) {
+                            Ok(0) => return Ok("EOF от прокси/Apple"),
+                            Ok(n) => {
+                                from_upstream += n as u64;
+                                stream
+                                    .write_all(&buffer[..n])
+                                    .context("writing FDR payload to Mac")?;
+                            }
+                            Err(e)
+                                if matches!(
+                                    e.kind(),
+                                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                                ) => {}
+                            Err(e) => {
+                                return Err(e).context("reading FDR payload from proxy/Apple");
+                            }
+                        }
                     }
-                    match socket.read(&mut buffer) {
-                        Ok(0) => return Ok(()),
-                        Ok(n) => stream.write_all(&buffer[..n])?,
-                        Err(e)
-                            if matches!(
-                                e.kind(),
-                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                            ) => {}
-                        Err(e) => return Err(e.into()),
-                    }
-                }
-                return Ok(());
+                    Ok("остановка FDR")
+                })();
+                let reason = match &result {
+                    Ok(reason) => (*reason).to_owned(),
+                    Err(error) => format!("{error:#}"),
+                };
+                crate::log!(
+                    Debug,
+                    "fdr",
+                    "Туннель FDR {host}:{port}: {reason}; прочитано от Mac={from_mac} Б, от прокси/Apple={from_upstream} Б, пересылка={:.3} с",
+                    relaying.elapsed().as_secs_f64()
+                );
+                return result.map(|_| ());
             }
             n => bail!("unsupported FDR connection command {n:#x}"),
         }

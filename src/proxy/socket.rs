@@ -126,8 +126,10 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
         crate::log!(
             Debug,
             "proxy",
-            "Соединение с {host}:{port} через прокси {:?}",
-            proxy.protocol()
+            "Соединение с {host}:{port} через прокси {:?} {}:{}",
+            proxy.protocol(),
+            proxy.host(),
+            proxy.port()
         );
         let mut stream = proxy_stream(&proxy, timeout)?;
         match proxy.protocol() {

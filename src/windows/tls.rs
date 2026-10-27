@@ -62,7 +62,7 @@ fn connect_with_config(
     let name = ServerName::try_from(host.to_owned())
         .map_err(|_| ureq::Error::Tls("invalid TSS hostname"))?;
     let mut connection = ClientConnection::new(config, name)?;
-    let mut socket = TransportAdapter::new(transport);
+    let mut socket = TransportAdapter::new(transport, details.current_time.clone());
     socket.set_timeout(details.timeout);
     connection.complete_io(&mut socket)?;
     Ok(Box::new(WindowsTls {

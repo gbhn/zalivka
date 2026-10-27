@@ -1,8 +1,8 @@
 [package]
 name = "zalivka"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.99"
 description = "Experimental native Rust DFU restore client for Apple Silicon and T2 Macs"
 license = "MIT"
 
@@ -19,25 +19,25 @@ crc32fast = "1.5"
 fs4 = { version = "1.1", default-features = false }
 hex = "0.4"
 oxiri = "0.3"
-nusb = "0.2.8"
-plist = "1.8"
+nusb = "0.2.9"
+plist = "1.10"
 quick-xml = "0.42"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha1 = "0.10"
-sha2 = "0.10"
-hpke = { version = "0.13", default-features = false, features = ["alloc", "std", "p256"] }
+sha1 = "0.11"
+sha2 = "0.11"
+hpke = { version = "0.15", default-features = false, features = ["alloc", "aes", "nistp"] }
 base64 = "0.23"
-hkdf = "0.12"
-hmac = "0.12"
+hkdf = "0.13"
+hmac = "0.13"
 httparse = "1.10"
-p256 = { version = "0.13", default-features = false, features = ["pem", "std"] }
-ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "socks-proxy"] }
+p256 = { version = "0.14", default-features = false, features = ["pem", "std"] }
+ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "socks-proxy"] }
 uuid = { version = "1", features = ["v4"] }
 oxitls-rustcrypto-provider = "0.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
-eframe = { version = "=0.33.3", optional = true, default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+eframe = { version = "=0.37.0", optional = true, default-features = false, features = ["clipboard", "default_fonts", "glow", "x11", "wayland"] }
 rfd = { version = "0.17.2", optional = true }
 
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
@@ -48,12 +48,12 @@ x509-parser = { version = "0.18", default-features = false }
 [target.'cfg(windows)'.dependencies]
 cab = "0.6"
 rustls-platform-verifier = { version = "0.7", default-features = false }
-ureq = { version = "3.4", default-features = false, features = ["platform-verifier"] }
+ureq = { version = "3.5", default-features = false, features = ["platform-verifier"] }
 windows-service = "0.8"
 windows-sys = { version = "0.61", features = ["Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_Devices_Usb", "Win32_Foundation", "Win32_Networking_WinHttp", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_Security_Credentials", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 winresource = { version = "0.1", optional = true, default-features = false }
 
 [profile.release]

@@ -5,14 +5,15 @@ use eframe::egui::{self, Color32, RichText, Vec2};
 use std::time::Instant;
 
 impl App {
-    pub(super) fn header(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("header")
+    pub(super) fn header(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::Panel::top("header")
             .frame(
                 egui::Frame::new()
-                    .fill(ctx.style().visuals.window_fill)
+                    .fill(ui.visuals().window_fill)
                     .inner_margin(egui::Margin::symmetric(26, 15)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let logo = self.logo.get_or_insert_with(|| {
                         let icon = super::logo_icon();
@@ -52,22 +53,23 @@ impl App {
                 });
             });
     }
-    pub(super) fn journal(&mut self, ctx: &egui::Context) {
+    pub(super) fn journal(&mut self, ui: &mut egui::Ui) {
         if !self.journal_open {
             return;
         }
+        let ctx = ui.ctx().clone();
         let max_height = (ctx.content_rect().height() * 0.35).min(350.0);
-        egui::TopBottomPanel::bottom("journal")
+        egui::Panel::bottom("journal")
             .resizable(true)
-            .default_height(max_height.min(220.0))
-            .min_height(110.0)
-            .max_height(max_height)
+            .default_size(max_height.min(220.0))
+            .min_size(110.0)
+            .max_size(max_height)
             .frame(
                 egui::Frame::new()
-                    .fill(ctx.style().visuals.window_fill)
+                    .fill(ui.visuals().window_fill)
                     .inner_margin(16),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.spacing_mut().interact_size.y = 24.0;
                 ui.spacing_mut().item_spacing.y = 4.0;
                 ui.horizontal_wrapped(|ui| {
@@ -85,7 +87,7 @@ impl App {
                                 )
                                 .clicked()
                             {
-                                self.pick(Picker::Log, ctx);
+                                self.pick(Picker::Log, &ctx);
                             }
                             if ui
                                 .add_enabled(
@@ -151,7 +153,7 @@ impl App {
             ctx.request_repaint_after(remaining);
         }
         let mut dismiss = false;
-        egui::Area::new(egui::Id::new("notification"))
+        egui::Area::new(egui::Id::unique("notification"))
             .order(egui::Order::Foreground)
             .movable(false)
             .anchor(egui::Align2::RIGHT_TOP, Vec2::ZERO)
@@ -224,15 +226,16 @@ impl App {
 }
 
 impl App {
-    pub(super) fn view(&mut self, ctx: &egui::Context) {
-        self.header(ctx);
-        egui::TopBottomPanel::bottom("footer")
+    pub(super) fn view(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        self.header(ui);
+        egui::Panel::bottom("footer")
             .frame(
                 egui::Frame::new()
-                    .fill(ctx.style().visuals.panel_fill)
+                    .fill(ui.visuals().panel_fill)
                     .inner_margin(egui::Margin::symmetric(26, 9)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     caption(
                         ui,
@@ -257,16 +260,16 @@ impl App {
                     });
                 });
             });
-        self.journal(ctx);
+        self.journal(ui);
         let mut notification_bounds = ctx.content_rect().shrink(14.0);
-        notification_bounds.min.y = ctx.available_rect().top() + 14.0;
+        notification_bounds.min.y = ui.available_rect_before_wrap().top() + 14.0;
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(ctx.style().visuals.panel_fill)
+                    .fill(ui.visuals().panel_fill)
                     .inner_margin(22),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("main_content")
                     .auto_shrink([false, false])
@@ -277,13 +280,13 @@ impl App {
                             self.active_job(ui);
                         } else {
                             ui.add_enabled_ui(!self.picking, |ui| {
-                                self.windows_card(ui, ctx);
+                                self.windows_card(ui, &ctx);
                                 if ui.available_width() >= 780.0 {
                                     ui.columns(2, |columns| {
                                         let mut device =
-                                            self.prepare_device_card(&mut columns[0], ctx);
+                                            self.prepare_device_card(&mut columns[0], &ctx);
                                         let mut firmware =
-                                            self.prepare_firmware_card(&mut columns[1], ctx);
+                                            self.prepare_firmware_card(&mut columns[1], &ctx);
                                         let height = device
                                             .content_ui
                                             .min_size()
@@ -298,9 +301,9 @@ impl App {
                                         firmware.end(&mut columns[1]);
                                     });
                                 } else {
-                                    self.prepare_device_card(ui, ctx).end(ui);
+                                    self.prepare_device_card(ui, &ctx).end(ui);
                                     ui.add_space(12.0);
-                                    self.prepare_firmware_card(ui, ctx).end(ui);
+                                    self.prepare_firmware_card(ui, &ctx).end(ui);
                                 }
                                 ui.add_space(12.0);
                                 self.actions(ui);
@@ -308,9 +311,9 @@ impl App {
                         }
                     });
             });
-        self.notification(ctx, notification_bounds);
-        self.settings(ctx);
-        self.confirmation(ctx);
+        self.notification(&ctx, notification_bounds);
+        self.settings(&ctx);
+        self.confirmation(&ctx);
     }
 }
 
@@ -319,7 +322,7 @@ impl eframe::App for App {
         visuals.panel_fill.to_normalized_gamma_f32()
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         if self.job.is_none() && !self.picking && self.last_scan.elapsed() >= SCAN_INTERVAL {
             self.detect(ctx);
@@ -350,7 +353,7 @@ impl eframe::App for App {
                 i.raw
                     .dropped_files
                     .iter()
-                    .filter_map(|f| f.path.clone())
+                    .map(|f| f.path().to_path_buf())
                     .find(|p| {
                         p.extension()
                             .is_some_and(|s| s.eq_ignore_ascii_case("ipsw"))
@@ -361,6 +364,9 @@ impl eframe::App for App {
                 self.setup.automatic = false;
             }
         }
-        self.view(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.view(ui);
     }
 }

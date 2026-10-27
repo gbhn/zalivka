@@ -12,8 +12,20 @@ fn job(action: Action) -> Job {
     Job::new(7, action, child, tempfile::tempfile().unwrap())
 }
 
+// These layout tests have no renderer to apply GPU texture updates.
+fn render_pass(
+    ctx: &egui::Context,
+    input: egui::RawInput,
+    contents: impl FnMut(&egui::Context),
+) -> egui::FullOutput {
+    let mut output = ctx.run_pass(input, contents);
+    output.textures_delta.clear();
+    output
+}
+
 fn render_app(app: &mut App, ctx: &egui::Context, frame: u32) -> egui::FullOutput {
-    ctx.run(
+    render_pass(
+        ctx,
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -22,7 +34,11 @@ fn render_app(app: &mut App, ctx: &egui::Context, frame: u32) -> egui::FullOutpu
             time: Some(f64::from(frame) / 60.0),
             ..Default::default()
         },
-        |ctx| eframe::App::update(app, ctx, &mut eframe::Frame::_new_kittest()),
+        |ctx| {
+            let mut frame = eframe::Frame::_new_kittest();
+            eframe::App::logic(app, ctx, &mut frame);
+            ctx.root_ui(|ui| eframe::App::ui(app, ui, &mut frame));
+        },
     )
 }
 
@@ -41,7 +57,7 @@ fn startup_keeps_a_normal_window_and_clears_with_the_selected_background() {
                 .iter()
                 .any(|command| matches!(command, egui::ViewportCommand::Maximized(_)));
             assert!(!maximizes, "{preference:?}, frame {frame}");
-            let visuals = ctx.style().visuals.clone();
+            let visuals = ctx.global_style().visuals.clone();
             let clear = eframe::App::clear_color(&app, &visuals);
             assert_eq!(clear, visuals.panel_fill.to_normalized_gamma_f32());
             assert_eq!(clear[3], 1.0);
@@ -64,13 +80,15 @@ fn active_operations_wait_for_updates_instead_of_redrawing_at_monitor_refresh_ra
             app.journal_line(Record::new(Level::Info, "test", "Передача идёт"));
             let ctx = egui::Context::default();
             configure(&ctx);
-            for frame in 0..12 {
+            // Let egui's initial scrollbar animations finish before checking idle paints.
+            for frame in 0..30 {
                 let output = render_app(&mut app, &ctx, frame);
-                if frame == 11 {
+                if frame == 29 {
                     let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
                     assert!(
                         delay >= Duration::from_millis(400),
-                        "{action:?}, fraction={fraction:?}: redraw in {delay:?}"
+                        "{action:?}, fraction={fraction:?}: redraw in {delay:?}; causes={:?}",
+                        ctx.repaint_causes()
                     );
                     assert!(
                         delay <= Duration::from_millis(500),
@@ -125,7 +143,8 @@ fn throttled_background_paints_do_not_delay_input_or_drop_worker_updates() {
             }),
         ))
         .unwrap();
-    let _ = ctx.run(
+    let _ = render_pass(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -149,7 +168,11 @@ fn throttled_background_paints_do_not_delay_input_or_drop_worker_updates() {
             ],
             ..Default::default()
         },
-        |ctx| eframe::App::update(&mut app, ctx, &mut eframe::Frame::_new_kittest()),
+        |ctx| {
+            let mut frame = eframe::Frame::_new_kittest();
+            eframe::App::logic(&mut app, ctx, &mut frame);
+            ctx.root_ui(|ui| eframe::App::ui(&mut app, ui, &mut frame));
+        },
     );
     assert!(
         app.journal_open,
@@ -786,7 +809,8 @@ fn active_job_labels(app: &mut App, theme: egui::Theme) -> (Vec<String>, usize) 
     let ctx = egui::Context::default();
     configure(&ctx);
     ctx.set_theme(theme);
-    let output = ctx.run(
+    let output = render_pass(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -795,7 +819,9 @@ fn active_job_labels(app: &mut App, theme: egui::Theme) -> (Vec<String>, usize) 
             ..Default::default()
         },
         |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.active_job(ui));
+            ctx.root_ui(|ui| {
+                egui::CentralPanel::default().show(ui, |ui| app.active_job(ui));
+            });
         },
     );
     let labels = output
@@ -812,7 +838,7 @@ fn active_job_labels(app: &mut App, theme: egui::Theme) -> (Vec<String>, usize) 
         .filter(|shape| {
             matches!(&shape.shape,
                 egui::Shape::Rect(rect) if rect.rect.width() > 500.0 && rect.rect.height() > 50.0
-                    && rect.fill == ctx.style().visuals.window_fill
+                    && rect.fill == ctx.global_style().visuals.window_fill
             )
         })
         .count();
@@ -1269,7 +1295,8 @@ fn dialogs_stay_open_and_escape_cancels_without_starting_a_job() {
             accepted: false,
         });
         for _ in 0..3 {
-            let _ = ctx.run(
+            let _ = render_pass(
+                &ctx,
                 egui::RawInput {
                     system_theme: Some(theme),
                     ..Default::default()
@@ -1294,7 +1321,7 @@ fn dialogs_stay_open_and_escape_cancels_without_starting_a_job() {
             }],
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| {
+        let _ = render_pass(&ctx, input, |ctx| {
             app.settings(ctx);
             app.confirmation(ctx);
         });
@@ -1335,7 +1362,8 @@ fn main_panels_render_in_both_themes_without_light_surfaces_in_dark_mode() {
         .push_back(Record::new(Level::Error, "test", "example"));
     for theme in [egui::Theme::Dark, egui::Theme::Light] {
         ctx.set_theme(theme);
-        let output = ctx.run(
+        let output = render_pass(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1344,12 +1372,14 @@ fn main_panels_render_in_both_themes_without_light_surfaces_in_dark_mode() {
                 ..Default::default()
             },
             |ctx| {
-                app.header(ctx);
-                app.journal(ctx);
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    app.prepare_device_card(ui, ctx).end(ui);
-                    app.prepare_firmware_card(ui, ctx).end(ui);
-                    app.actions(ui);
+                ctx.root_ui(|ui| {
+                    app.header(ui);
+                    app.journal(ui);
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        app.prepare_device_card(ui, ctx).end(ui);
+                        app.prepare_firmware_card(ui, ctx).end(ui);
+                        app.actions(ui);
+                    });
                 });
             },
         );
@@ -1403,7 +1433,7 @@ fn ordinary_notifications_expire_after_five_seconds_and_replacements_restart_the
         .send(Event::Saved(Ok(PathBuf::from("first.log"))))
         .unwrap();
     let mut output = egui::FullOutput::default();
-    for frame in 0..12 {
+    for frame in 0..30 {
         output = render_app(&mut app, &ctx, frame);
     }
     let deadline = app.notice.as_ref().unwrap().expires_at.unwrap();
@@ -1411,14 +1441,15 @@ fn ordinary_notifications_expire_after_five_seconds_and_replacements_restart_the
     assert!(deadline <= Instant::now() + Duration::from_secs(5));
     assert!(
         output.viewport_output[&egui::ViewportId::ROOT].repaint_delay >= Duration::from_millis(400),
-        "waiting for notification expiry must not cause continuous redraws"
+        "waiting for notification expiry must not cause continuous redraws; causes={:?}",
+        ctx.repaint_causes()
     );
 
     app.notice.as_mut().unwrap().expires_at = Some(Instant::now());
-    let _ = render_app(&mut app, &ctx, 12);
+    let _ = render_app(&mut app, &ctx, 30);
     assert!(app.notice.is_none());
 
-    for (frame, path) in [(13, "second.log"), (14, "third.log")] {
+    for (frame, path) in [(31, "second.log"), (32, "third.log")] {
         let before = Instant::now();
         app.tx.send(Event::Saved(Ok(PathBuf::from(path)))).unwrap();
         let _ = render_app(&mut app, &ctx, frame);
@@ -1431,7 +1462,7 @@ fn ordinary_notifications_expire_after_five_seconds_and_replacements_restart_the
     }
 
     app.error("Ошибка", "Критическое сообщение");
-    for frame in 15..18 {
+    for frame in 33..36 {
         let _ = render_app(&mut app, &ctx, frame);
         let notice = app.notice.as_ref().unwrap();
         assert_eq!(notice.tone, Tone::Error);
@@ -1453,7 +1484,7 @@ fn notifications_keep_content_in_place_and_their_actions_work_in_small_windows()
                 screen_rect: Some(screen),
                 ..Default::default()
             };
-            let baseline = ctx.run(input.clone(), |ctx| app.view(ctx));
+            let baseline = render_pass(&ctx, input.clone(), |ctx| ctx.root_ui(|ui| app.view(ui)));
             let heading = visible_text_rect(&baseline, "Восстановление Mac").unwrap();
             for tone in [Tone::Neutral, Tone::Success, Tone::Error] {
                 app.notice = Some(Notice {
@@ -1464,7 +1495,7 @@ fn notifications_keep_content_in_place_and_their_actions_work_in_small_windows()
                 });
                 let mut output = egui::FullOutput::default();
                 for _ in 0..3 {
-                    output = ctx.run(input.clone(), |ctx| app.view(ctx));
+                    output = render_pass(&ctx, input.clone(), |ctx| ctx.root_ui(|ui| app.view(ui)));
                 }
                 assert_eq!(
                     visible_text_rect(&output, "Восстановление Mac"),
@@ -1497,11 +1528,11 @@ fn notifications_keep_content_in_place_and_their_actions_work_in_small_windows()
                     let pos = visible_text_rect(&output, "Открыть журнал")
                         .unwrap()
                         .center();
-                    output = ctx.run(click(pos), |ctx| app.view(ctx));
+                    output = render_pass(&ctx, click(pos), |ctx| ctx.root_ui(|ui| app.view(ui)));
                     assert!(app.journal_open);
                 }
                 let pos = visible_text_rect(&output, "×").unwrap().center();
-                let _ = ctx.run(click(pos), |ctx| app.view(ctx));
+                let _ = render_pass(&ctx, click(pos), |ctx| ctx.root_ui(|ui| app.view(ui)));
                 assert!(app.notice.is_none());
             }
         }
@@ -1532,12 +1563,13 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
         let mut output = egui::FullOutput::default();
         // Also exercise shrinking a window after egui has saved a taller journal.
         for frame_size in [egui::vec2(1280.0, 1000.0), size, size, size] {
-            output = ctx.run(
+            output = render_pass(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, frame_size)),
                     ..Default::default()
                 },
-                |ctx| app.view(ctx),
+                |ctx| ctx.root_ui(|ui| app.view(ui)),
             );
         }
         let heading = visible_text_rect(&output, "Восстановление Mac")
@@ -1573,12 +1605,15 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
             for (reached, label) in reached.iter_mut().zip(labels) {
                 *reached |= visible_text_rect(&output, label).is_some();
             }
-            output = ctx.run(
+            output = render_pass(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events: vec![
                         egui::Event::PointerMoved(heading.center()),
                         egui::Event::MouseWheel {
+                            phase: egui::TouchPhase::Move,
+                            source: egui::MouseWheelSource::Unknown,
                             unit: egui::MouseWheelUnit::Point,
                             delta: egui::vec2(0.0, -35.0),
                             modifiers: egui::Modifiers::NONE,
@@ -1586,7 +1621,7 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
                     ],
                     ..Default::default()
                 },
-                |ctx| app.view(ctx),
+                |ctx| ctx.root_ui(|ui| app.view(ui)),
             );
         }
         for (reached, label) in reached.into_iter().zip(labels) {
@@ -1614,7 +1649,8 @@ fn narrow_cards_keep_text_and_controls_inside_their_bounds() {
             });
             for scanning in [false, true, false] {
                 app.scanning = scanning;
-                let output = ctx.run(
+                let output = render_pass(
+                    &ctx,
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,
@@ -1622,7 +1658,7 @@ fn narrow_cards_keep_text_and_controls_inside_their_bounds() {
                         )),
                         ..Default::default()
                     },
-                    |ctx| app.view(ctx),
+                    |ctx| ctx.root_ui(|ui| app.view(ui)),
                 );
                 for shape in &output.shapes {
                     if let egui::Shape::Text(text) = &shape.shape {
@@ -1644,7 +1680,7 @@ fn narrow_cards_keep_text_and_controls_inside_their_bounds() {
                         .find_map(|shape| match &shape.shape {
                             egui::Shape::Rect(rect)
                                 if rect.rect.height() > 60.0
-                                    && rect.fill == ctx.style().visuals.window_fill
+                                    && rect.fill == ctx.global_style().visuals.window_fill
                                     && rect.rect.contains(heading.center()) =>
                             {
                                 Some(rect.rect)
@@ -1706,12 +1742,15 @@ fn small_dialogs_scroll_to_their_controls() {
         let mut reached = false;
         let mut compact_folder_row = false;
         for frame in 0..30 {
-            let output = ctx.run(
+            let output = render_pass(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events: vec![
                         egui::Event::PointerMoved(screen.center()),
                         egui::Event::MouseWheel {
+                            phase: egui::TouchPhase::Move,
+                            source: egui::MouseWheelSource::Unknown,
                             unit: egui::MouseWheelUnit::Point,
                             delta: egui::vec2(0.0, -20.0),
                             modifiers: egui::Modifiers::NONE,
@@ -1754,7 +1793,8 @@ fn small_dialogs_scroll_to_their_controls() {
 }
 
 fn firmware_card_text(app: &mut App, ctx: &egui::Context) -> String {
-    let output = ctx.run(
+    let output = render_pass(
+        ctx,
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1763,8 +1803,10 @@ fn firmware_card_text(app: &mut App, ctx: &egui::Context) -> String {
             ..Default::default()
         },
         |ctx| {
-            egui::CentralPanel::default()
-                .show(ctx, |ui| app.prepare_firmware_card(ui, ctx).end(ui));
+            ctx.root_ui(|ui| {
+                egui::CentralPanel::default()
+                    .show(ui, |ui| app.prepare_firmware_card(ui, ctx).end(ui));
+            });
         },
     );
     output

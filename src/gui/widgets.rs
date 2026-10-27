@@ -26,7 +26,7 @@ pub(super) fn path_picker(ui: &mut egui::Ui, value: &mut String, hint: &str, but
 }
 
 pub(super) fn card(ctx: &egui::Context) -> egui::Frame {
-    let style = ctx.style();
+    let style = ctx.global_style();
     egui::Frame::new()
         .fill(style.visuals.window_fill)
         .stroke(style.visuals.widgets.noninteractive.bg_stroke)

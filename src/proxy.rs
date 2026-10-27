@@ -128,6 +128,7 @@ impl Connector for HttpConnector {
             now: details.now,
             timeout: details.timeout,
             current_time: details.current_time.clone(),
+            register_shutdown: details.register_shutdown.clone(),
             run_connector: Arc::new(move |details| {
                 let proxy_details = ConnectionDetails {
                     uri: details.uri,
@@ -139,6 +140,7 @@ impl Connector for HttpConnector {
                     timeout: details.timeout,
                     current_time: details.current_time.clone(),
                     run_connector: details.run_connector.clone(),
+                    register_shutdown: details.register_shutdown.clone(),
                 };
                 DefaultConnector::default()
                     .connect(&proxy_details, None)?
@@ -165,7 +167,7 @@ impl HttpConnector {
         let make = |remaining: Duration| -> anyhow::Result<_> {
             let timeout = ureq::unversioned::transport::NextTimeout {
                 after: remaining.into(),
-                reason: details.timeout.reason,
+                ..details.timeout
             };
             let addrs = details
                 .resolver
@@ -180,11 +182,15 @@ impl HttpConnector {
                 timeout,
                 current_time: details.current_time.clone(),
                 run_connector: details.run_connector.clone(),
+                register_shutdown: details.register_shutdown.clone(),
             };
             let transport = DefaultConnector::default()
                 .connect(&proxy_details, None)?
                 .context("connecting configured HTTP proxy")?;
-            Ok(TransportAdapter::new(transport))
+            Ok(TransportAdapter::new(
+                transport,
+                details.current_time.clone(),
+            ))
         };
         let result = (|| -> anyhow::Result<_> {
             let mut stream = make(timeout)?;
@@ -218,6 +224,7 @@ impl<T: Transport> connect::Connection for ureq::unversioned::transport::Transpo
         self.set_timeout(ureq::unversioned::transport::NextTimeout {
             after: remaining.into(),
             reason: ureq::Timeout::Connect,
+            ..Default::default()
         });
         Ok(())
     }

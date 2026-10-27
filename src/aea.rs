@@ -5,9 +5,9 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE},
 };
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use hpke::{Deserializable, Kem, OpModeR, aead::AesGcm256, kdf::HkdfSha256, kem::DhP256HkdfSha256};
-use p256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint, pkcs8::DecodePrivateKey};
+use p256::{SecretKey, elliptic_curve::sec1::ToSec1Point, pkcs8::DecodePrivateKey};
 use sha2::{Digest, Sha256};
 
 const MAX_AUTH: usize = 1024 * 1024;
@@ -136,7 +136,7 @@ impl PublicFcs {
         ensure!(pem.len() <= 65536, "public FCS key response exceeds 64 KiB");
         let pem = std::str::from_utf8(pem).context("FCS key is not UTF-8 PEM")?;
         let secret = SecretKey::from_pkcs8_pem(pem).context("FCS key is not PKCS#8 P-256")?;
-        let recipient = secret.public_key().to_encoded_point(false);
+        let recipient = secret.public_key().to_sec1_point(false);
         ensure!(
             URL_SAFE.encode(Sha256::digest(recipient.as_bytes())) == self.fingerprint,
             "public FCS key fingerprint mismatch"
@@ -156,7 +156,7 @@ impl PublicFcs {
         Hkdf::<Sha256>::new(None, &main)
             .expand(b"AEA_RHEK", &mut mac_key)
             .map_err(|_| anyhow::anyhow!("AEA header key derivation failed"))?;
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&mac_key)?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&mac_key)?;
         mac.update(&self.root[80..112]);
         mac.update(&self.auth);
         mac.update(&self.root[32..80]);
