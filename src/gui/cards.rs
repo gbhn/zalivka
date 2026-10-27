@@ -287,6 +287,7 @@ impl App {
     }
     pub(super) fn active_job(&mut self, ui: &mut egui::Ui) {
         card(ui.ctx()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
             let Some(job) = self.job.as_ref() else { return };
             ui.horizontal_wrapped(|ui| {
                 pill(ui, "В работе", BLUE);

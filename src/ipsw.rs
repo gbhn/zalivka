@@ -11,12 +11,14 @@ use std::{
     fs::File,
     io::{BufReader, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, mpsc},
+    thread,
 };
 pub use verify::Verification;
 use zip::ZipArchive;
 
 pub const MAX_COMPONENT: u64 = 1024 * 1024 * 1024;
+const STREAM_CHUNK: usize = 256 * 1024;
 
 /// Signing-only entries may omit a path; present metadata must still be valid.
 pub(crate) fn component_path(entry: &Value) -> Result<Option<&str>> {
@@ -222,7 +224,13 @@ impl Ipsw {
     pub fn stream(&mut self, path: &str, out: &mut impl Write) -> Result<u64> {
         validate_path(path)?;
         let mut entry = self.archive.by_name(path)?;
-        Ok(std::io::copy(&mut entry, out)?)
+        if entry.compression() == zip::CompressionMethod::Stored
+            || entry.size() <= STREAM_CHUNK as u64
+        {
+            Ok(std::io::copy(&mut entry, out)?)
+        } else {
+            copy_prefetched(entry, out)
+        }
     }
 
     pub fn size(&mut self, path: &str) -> Result<u64> {
@@ -394,6 +402,61 @@ impl Ipsw {
     }
 }
 
+/// Overlap decompression with writes. The queue, reader and writer hold at most
+/// three blocks; the output stays on the calling thread for mux/AEA exchanges.
+fn copy_prefetched(mut input: impl Read + Send, out: &mut impl Write) -> Result<u64> {
+    thread::scope(|scope| {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let reader = thread::Builder::new()
+            .name("ipsw-read-ahead".into())
+            .spawn_scoped(scope, move || -> std::io::Result<u64> {
+                let mut total = 0;
+                loop {
+                    let mut block = vec![0; STREAM_CHUNK];
+                    let mut filled = 0;
+                    while filled < block.len() {
+                        match input.read(&mut block[filled..]) {
+                            Ok(0) => break,
+                            Ok(n) => filled += n,
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    if filled == 0 {
+                        return Ok(total);
+                    }
+                    block.truncate(filled);
+                    total += filled as u64;
+                    sender.send(block).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "IPSW stream consumer closed",
+                        )
+                    })?;
+                }
+            })
+            .context("starting IPSW reader")?;
+        let written: std::io::Result<()> = (|| {
+            for block in &receiver {
+                out.write_all(&block)?;
+            }
+            Ok(())
+        })();
+        // Unblock a reader waiting on a full queue before joining after an
+        // output failure. Preserve that original failure over queue closure.
+        drop(receiver);
+        let read = reader
+            .join()
+            .map_err(|_| anyhow::anyhow!("IPSW reader panicked"));
+        written?;
+        // EOF (including ZIP CRC validation) must succeed before the caller
+        // can signal FileDataDone, even if every payload block was written.
+        Ok(read??)
+    })
+}
+
 pub struct ImageReader {
     file: File,
     start: u64,
@@ -452,3 +515,7 @@ pub fn validate_path(path: &str) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/ipsw.rs"]
+mod tests;

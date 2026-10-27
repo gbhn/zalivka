@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn ipsw_stream_preserves_stored_and_deflated_entries_across_block_boundaries() {
+    let image: Vec<_> = (0..3 * 256 * 1024 + 123).map(|i| (i % 251) as u8).collect();
+    let files = [
+        ("empty", &image[..0]),
+        ("small", &image[..17]),
+        ("one-block", &image[..256 * 1024]),
+        ("whole-blocks", &image[..2 * 256 * 1024]),
+        ("partial-tail", image.as_slice()),
+    ];
+    for compression in [
+        zip::CompressionMethod::Stored,
+        zip::CompressionMethod::Deflated,
+    ] {
+        let file = fixture_compression(None, false, &files, compression);
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        for (path, expected) in files {
+            let mut output = Vec::new();
+            assert_eq!(
+                ipsw.stream(path, &mut output).unwrap(),
+                expected.len() as u64
+            );
+            assert_eq!(output, expected, "{compression:?}: {path}");
+        }
+        assert_eq!(ipsw.read("Firmware/OS").unwrap(), im4p(b"test"));
+    }
+}
+
+#[test]
 fn reopening_an_ipsw_rejects_a_replaced_build_manifest() {
     let file = fixture(None, false);
     let ipsw = Ipsw::open(file.path()).unwrap();

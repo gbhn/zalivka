@@ -8,7 +8,8 @@ use std::{
     io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     ptr,
-    sync::Arc,
+    sync::{Arc, mpsc},
+    thread::{self, JoinHandle},
     time::Duration,
 };
 use windows_sys::{
@@ -48,6 +49,73 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct AppleUsb {
     handle: OwnedHandle,
+}
+
+type ReadRequest = (Arc<AppleUsb>, u8, usize, Ioctl);
+
+/// Windows cancels IRPs when their submitting thread exits. Keep that thread
+/// alive for the input endpoint, independently of short-lived ASR/FDR workers.
+pub(crate) struct ReadSubmitter {
+    requests: Option<mpsc::SyncSender<ReadRequest>>,
+    completed: mpsc::Receiver<Result<PendingRead>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl ReadSubmitter {
+    pub(crate) fn new() -> Result<Self> {
+        let (requests, incoming) = mpsc::sync_channel::<ReadRequest>(1);
+        let (finished, completed) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("zalivka-usb-in".into())
+            .spawn(move || {
+                while let Ok((device, pipe, length, submit)) = incoming.recv() {
+                    let result = PendingRead::begin_using(device, pipe, length, submit);
+                    if finished.send(result).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            requests: Some(requests),
+            completed,
+            worker: Some(worker),
+        })
+    }
+
+    pub(crate) fn begin(
+        &mut self,
+        device: Arc<AppleUsb>,
+        pipe: u8,
+        length: usize,
+    ) -> Result<PendingRead> {
+        self.begin_using(device, pipe, length, DeviceIoControl)
+    }
+
+    fn begin_using(
+        &mut self,
+        device: Arc<AppleUsb>,
+        pipe: u8,
+        length: usize,
+        submit: Ioctl,
+    ) -> Result<PendingRead> {
+        self.requests
+            .as_ref()
+            .context("Apple USB read submitter closed")?
+            .send((device, pipe, length, submit))
+            .map_err(|_| anyhow::anyhow!("Apple USB read submitter stopped"))?;
+        self.completed
+            .recv()
+            .context("waiting for Apple USB read submission")?
+    }
+}
+
+impl Drop for ReadSubmitter {
+    fn drop(&mut self) {
+        drop(self.requests.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 /// Keep one IN request alive across short mux polls. A poll timeout must not
@@ -156,21 +224,10 @@ impl PendingRead {
                 {
                     return Ok(None);
                 }
-                if error.raw_os_error() != Some(ERROR_OPERATION_ABORTED as i32) {
-                    return Err(error).context("receiving Apple USB IN completion");
-                }
-                // Any mux reader can submit this shared IN request. Windows
-                // cancels it when its originating thread exits (e.g. ASR is
-                // finished), even though the device and main channel are alive.
-                // Retire the completed request, preserving any received bytes,
-                // just as the nusb backend handles TransferError::Cancelled.
-                // BulkInput rearms it; Session still enforces explicit cancel,
-                // read deadlines, framing errors and final restore status.
-                crate::log!(
-                    Debug,
-                    "usb",
-                    "Apple USB IN request aborted (995); resuming reads on the same connection"
-                );
+                // An aborted driver request may have consumed bytes without
+                // returning them. Do not silently resume a damaged mux stream.
+                // ReadSubmitter prevents cancellation on service-worker exit.
+                return Err(error).context("receiving Apple USB IN completion");
             }
             self.pending = false;
         }
@@ -512,10 +569,6 @@ impl AppleUsb {
         let response = self.ioctl(code, data, data.len(), timeout)?;
         ensure!(response.len() == data.len(), "short Apple USB bulk write");
         Ok(())
-    }
-
-    pub(crate) fn begin_read(self: &Arc<Self>, pipe: u8, length: usize) -> Result<PendingRead> {
-        PendingRead::begin_using(self.clone(), pipe, length, DeviceIoControl)
     }
 }
 

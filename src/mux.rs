@@ -487,7 +487,12 @@ impl Link {
         );
         c.peer_ack = ack;
         if !data.is_empty() || flags & 1 != 0 {
-            ensure!(seq == c.ack, "out-of-order mux TCP data");
+            ensure!(
+                seq == c.ack,
+                "out-of-order mux TCP data on {peer_port} -> {source}: expected={}, got={seq}, bytes={}, flags={flags:#x}",
+                c.ack,
+                data.len()
+            );
         }
         if !data.is_empty() {
             ensure!(

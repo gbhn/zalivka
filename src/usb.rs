@@ -242,9 +242,22 @@ impl MuxUsb {
         }
         let interface = UsbInterface::claim(&device, info, selected.number).context("claiming USB multiplex interface; stop usbmuxd/Apple Mobile Device Service if it owns this interface")?;
         interface.set_alt_setting(selected.alternate)?;
+        let input = interface.bulk_in(selected.input)?;
+        let output = interface.bulk_out(selected.output)?;
+        crate::log!(
+            Debug,
+            "usb",
+            "Restore USB: speed={:?}, transport={}, interface={}, input={:#04x}, output={:#04x}, max_packet={}",
+            info.speed(),
+            interface.transport(),
+            selected.number,
+            selected.input,
+            selected.output,
+            selected.packet_size
+        );
         Ok(Self {
-            input: interface.bulk_in(selected.input)?,
-            output: interface.bulk_out(selected.output)?,
+            input,
+            output,
             _device: device,
             _interface: interface,
             packet_size: selected.packet_size,

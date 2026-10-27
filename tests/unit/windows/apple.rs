@@ -81,6 +81,54 @@ fn connected_pipe(label: &str) -> (Arc<AppleUsb>, OwnedHandle) {
 }
 
 #[test]
+fn input_submission_outlives_service_workers_without_cancelling_or_losing_data() {
+    use windows_sys::Win32::Storage::FileSystem::WriteFile;
+    let (device, client) = connected_pipe("persistent-submitter");
+    let mut submitter = ReadSubmitter::new().unwrap();
+    for bytes in [
+        b"first packet".as_slice(),
+        b"packet after another worker exit",
+    ] {
+        let worker_device = device.clone();
+        let (returned, mut read) = std::thread::spawn(move || {
+            let read = submitter
+                .begin_using(worker_device, 1, 4096, read_pipe)
+                .unwrap();
+            (submitter, read)
+        })
+        .join()
+        .unwrap();
+        submitter = returned;
+        // The service thread has exited, but the real I/O owner is still
+        // alive. A raw PendingRead here would complete with error 995.
+        assert!(read.poll(Duration::from_millis(10)).unwrap().is_none());
+        let mut sent = 0;
+        // SAFETY: synchronous client write from a live byte slice.
+        assert_ne!(
+            unsafe {
+                WriteFile(
+                    client.as_raw_handle(),
+                    bytes.as_ptr(),
+                    bytes.len() as u32,
+                    &mut sent,
+                    ptr::null_mut(),
+                )
+            },
+            0
+        );
+        assert_eq!(read.poll(Duration::from_secs(1)).unwrap().unwrap(), bytes);
+    }
+    let read = submitter
+        .begin_using(device.clone(), 1, 4096, read_pipe)
+        .unwrap();
+    drop(read); // Cancel and drain an idle read before the submitter exits.
+    drop(submitter);
+    // The endpoint remains usable after shutdown.
+    let mut next = PendingRead::begin_using(device, 1, 4096, read_pipe).unwrap();
+    assert!(next.poll(Duration::ZERO).unwrap().is_none());
+}
+
+#[test]
 fn read_event_wakes_on_completion_and_remains_valid_after_retiring_request() {
     use windows_sys::Win32::Storage::FileSystem::WriteFile;
     let (device, client) = connected_pipe("read-event");
@@ -170,7 +218,7 @@ fn persistent_read_survives_idle_polls_and_drains_on_drop_without_losing_bytes()
 use windows_sys::Win32::Foundation::{ERROR_GEN_FAILURE, ERROR_INVALID_PARAMETER, SetLastError};
 
 #[test]
-fn read_survives_worker_exit_and_continues_on_the_same_handle() {
+fn raw_read_reports_worker_exit_cancellation_and_keeps_the_handle_usable() {
     use windows_sys::Win32::{Foundation::ERROR_BROKEN_PIPE, Storage::FileSystem::WriteFile};
     let (device, client) = connected_pipe("worker-exit");
     let worker_device = device.clone();
@@ -181,10 +229,13 @@ fn read_survives_worker_exit_and_continues_on_the_same_handle() {
     })
     .join()
     .unwrap();
-    // Mirrors the ASR worker returning while the shared mux IN request it
-    // submitted is still pending. Windows completes that request with 995.
-    assert_eq!(read.poll(Duration::from_secs(1)).unwrap(), Some(Vec::new()));
-    assert!(!read.pending);
+    // A cancelled request cannot promise that all received bytes survived.
+    // The endpoint owner tested above prevents this during normal restore.
+    let error = read.poll(Duration::from_secs(1)).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().raw_os_error(),
+        Some(ERROR_OPERATION_ABORTED as i32)
+    );
     drop(read);
 
     let mut next = PendingRead::begin_using(device.clone(), 1, 4096, read_pipe).unwrap();

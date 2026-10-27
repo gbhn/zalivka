@@ -103,7 +103,12 @@ impl UsbInterface {
         match self {
             Self::Native(i) => Ok(BulkInput::Native(i.endpoint(address)?)),
             #[cfg(windows)]
-            Self::Apple(i) => Ok(BulkInput::Apple(i.clone(), i.pipe(address)?, None)),
+            Self::Apple(i) => Ok(BulkInput::Apple(
+                i.clone(),
+                i.pipe(address)?,
+                None,
+                crate::windows::apple::ReadSubmitter::new()?,
+            )),
         }
     }
 }
@@ -186,6 +191,8 @@ pub(super) enum BulkInput {
         std::sync::Arc<crate::windows::apple::AppleUsb>,
         u8,
         Option<crate::windows::apple::PendingRead>,
+        // Drop/drain the pending request before its submitting thread exits.
+        crate::windows::apple::ReadSubmitter,
     ),
 }
 
@@ -193,7 +200,7 @@ impl BulkInput {
     pub(super) fn input_ready(&self) -> Option<crate::mux::InputReady> {
         match self {
             #[cfg(windows)]
-            Self::Apple(_, _, Some(pending)) => Some(pending.input_ready()),
+            Self::Apple(_, _, Some(pending), _) => Some(pending.input_ready()),
             _ => None,
         }
     }
@@ -222,15 +229,15 @@ impl BulkInput {
                 }
             }
             #[cfg(windows)]
-            Self::Apple(i, pipe, pending) => {
+            Self::Apple(i, pipe, pending, submitter) => {
                 if pending.is_none() {
-                    *pending = Some(i.begin_read(*pipe, 65536)?);
+                    *pending = Some(submitter.begin(i.clone(), *pipe, 65536)?);
                 }
                 match pending.as_mut().unwrap().poll(timeout)? {
                     Some(data) => {
                         // Keep ACK reception active while mux decodes the
                         // previous read and submits the next outgoing burst.
-                        *pending = Some(i.begin_read(*pipe, 65536)?);
+                        *pending = Some(submitter.begin(i.clone(), *pipe, 65536)?);
                         Ok(data)
                     }
                     None => Ok(Vec::new()),
