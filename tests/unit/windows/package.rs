@@ -2,6 +2,40 @@ use super::*;
 use std::{os::windows::process::CommandExt, process::Command};
 
 #[test]
+fn published_inf_is_resolved_by_windows_without_a_connected_device() {
+    let inf = driver_store_inf(Path::new("winusb.inf"))
+        .unwrap()
+        .expect("Windows includes the WinUSB driver package");
+    assert!(inf.is_absolute());
+    assert!(inf.file_name().unwrap().eq_ignore_ascii_case("winusb.inf"));
+    assert!(inf.is_file(), "{}", inf.display());
+    assert!(!complete_apple_package(&inf));
+    assert!(
+        driver_store_inf(Path::new("zalivka-nonexistent-driver.inf"))
+            .unwrap()
+            .is_none()
+    );
+    // Enumerating the class driver list must work with ordinary user rights.
+    installed().unwrap();
+}
+
+#[test]
+fn package_detection_requires_the_original_inf_and_every_package_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let inf = unpack(directory.path(), "amd64").unwrap();
+    assert!(complete_apple_package(&inf));
+    assert!(!complete_apple_package(&directory.path().join("other.inf")));
+    for name in FILES {
+        let path = directory.path().join(name);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(!complete_apple_package(&inf), "missing {name}");
+        std::fs::write(path, bytes).unwrap();
+    }
+    assert!(complete_apple_package(&inf));
+}
+
+#[test]
 fn embedded_packages_match_windows_expansion_byte_for_byte() {
     for (arch, bytes) in [("amd64", X64_CAB), ("arm64", ARM64_CAB)] {
         let directory = tempfile::tempdir().unwrap();

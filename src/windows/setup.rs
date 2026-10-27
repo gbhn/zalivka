@@ -73,48 +73,6 @@ fn service_state(service: &Service) -> Result<ServiceState> {
         .current_state)
 }
 
-fn apple_driver_installed() -> Result<bool> {
-    let prefix = format!("appleusb.inf_{}_", architecture()?);
-    let directory = windows_directory()?.join(r"System32\DriverStore\FileRepository");
-    crate::log!(
-        Debug,
-        "drivers",
-        "Поиск {prefix}* в {}",
-        directory.display()
-    );
-    for entry in std::fs::read_dir(&directory)
-        .with_context(|| format!("Чтение DriverStore: {}", directory.display()))?
-    {
-        let entry = entry?;
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .starts_with(&prefix)
-        {
-            let missing: Vec<_> = super::package::FILES
-                .iter()
-                .filter(|name| !entry.path().join(name).is_file())
-                .collect();
-            crate::log!(
-                Debug,
-                "drivers",
-                "Пакет Apple: {}; отсутствующие файлы: {missing:?}",
-                entry.path().display()
-            );
-            if missing.is_empty() {
-                return Ok(true);
-            }
-        }
-    }
-    crate::log!(
-        Debug,
-        "drivers",
-        "Полный пакет Apple для текущей архитектуры в DriverStore не найден"
-    );
-    Ok(false)
-}
-
 pub(crate) fn status() -> Result<HostStatus> {
     let service = open_service(ServiceAccess::QUERY_STATUS)?;
     let active = service
@@ -134,7 +92,7 @@ pub(crate) fn status() -> Result<HostStatus> {
     Ok(HostStatus {
         apple_service_installed: service.is_some(),
         apple_service_running: active,
-        apple_driver_installed: apple_driver_installed()?,
+        apple_driver_installed: super::package::installed()?,
         compatible_usb_driver,
     })
 }
@@ -216,7 +174,7 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
     // Check the service first; don't replace the driver if stopping the conflict fails.
     stop_service().context("Подготовка Windows: остановка службы Apple")?;
     let mut reboot = false;
-    if !apple_driver_installed()? {
+    if !super::package::installed()? {
         let directory = tempfile::Builder::new()
             .prefix("zalivka-apple-usb-")
             .tempdir()
@@ -291,12 +249,15 @@ pub(crate) fn prepare() -> Result<bool> {
         crate::log!(
             Info,
             "drivers",
-            "Все доступные драйверы уже готовы; повторная установка не требуется."
+            "Пакет драйвера уже установлен; повторная установка не требуется."
         );
+        verify_connected_devices(false)?;
         return Ok(false);
     }
     if unsafe { IsUserAnAdmin() } != 0 {
-        return prepare_elevated();
+        let reboot = prepare_elevated()?;
+        verify_connected_devices(reboot)?;
+        return Ok(reboot);
     }
     crate::log!(
         Info,
@@ -320,7 +281,68 @@ pub(crate) fn prepare() -> Result<bool> {
         !host.needs_preparation(),
         "Подготовка Windows не подтверждена. Откройте диагностику USB."
     );
-    Ok(code == 3010)
+    let reboot = code == 3010;
+    verify_connected_devices(reboot)?;
+    Ok(reboot)
+}
+
+fn verify_connected_devices(reboot: bool) -> Result<()> {
+    if reboot {
+        crate::log!(
+            Info,
+            "drivers",
+            "Пакет установлен. Проверка USB-доступа отложена до перезагрузки Windows."
+        );
+        return Ok(());
+    }
+    let devices = crate::drivers::diagnostics(true)
+        .context("Проверка USB-доступа после подготовки Windows")?;
+    verify_device_access(&devices)
+}
+
+fn verify_device_access(devices: &[crate::drivers::UsbDiagnostic]) -> Result<()> {
+    for device in devices {
+        crate::log!(
+            Info,
+            "drivers",
+            "USB после подготовки: {}",
+            serde_json::to_string(device)?
+        );
+    }
+    if devices.is_empty() {
+        crate::log!(
+            Info,
+            "drivers",
+            "Пакет установлен. Mac в DFU / Recovery / Restore не подключён; доступ к устройству ещё не проверен."
+        );
+    } else {
+        let failures: Vec<_> = devices
+            .iter()
+            .filter(|device| !device.accessible)
+            .map(|device| {
+                format!(
+                    "{} (драйвер: {}): {}",
+                    device.instance_id,
+                    device.driver.as_deref().unwrap_or("не назначен"),
+                    device
+                        .error
+                        .as_deref()
+                        .unwrap_or("USB-интерфейс недоступен")
+                )
+            })
+            .collect();
+        ensure!(
+            failures.is_empty(),
+            "Пакет установлен, но доступ к подключённому устройству не подтверждён. Подключите Mac заново; если ошибка повторяется, выполните сброс USB-драйверов Apple. {}",
+            failures.join("; ")
+        );
+        crate::log!(
+            Info,
+            "drivers",
+            "Доступ к USB-интерфейсам подключённых устройств подтверждён."
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn open_installed_apps() -> Result<()> {
@@ -429,3 +451,7 @@ pub(crate) fn run_elevated(arguments: &str) -> Result<u32> {
     );
     Ok(code)
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/windows/setup.rs"]
+mod tests;

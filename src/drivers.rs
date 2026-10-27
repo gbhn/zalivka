@@ -100,6 +100,10 @@ pub struct UsbDiagnostic {
 
 /// Does not require the device to be accessible through WinUSB/udev already.
 pub fn doctor() -> Result<Vec<UsbDiagnostic>> {
+    diagnostics(false)
+}
+
+pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
     let mut diagnostics = vec![];
     for info in nusb::list_devices()
         .wait()
@@ -109,6 +113,10 @@ pub fn doctor() -> Result<Vec<UsbDiagnostic>> {
             continue;
         }
         let mode = Mode::from_pid(info.product_id());
+        // Preparing a Mac must not probe an unrelated iPhone in normal mode.
+        if restore_only && mode.is_none() && info.product_id() != 0x12ac {
+            continue;
+        }
         let mux: Vec<u8> = info
             .interfaces()
             .filter(|i| (i.class(), i.subclass(), i.protocol()) == crate::usb::MUX_INTERFACE)

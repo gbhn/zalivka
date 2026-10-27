@@ -4391,7 +4391,7 @@ dependencies = [
 
 [[package]]
 name = "zalivka"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "asn1-rs",
