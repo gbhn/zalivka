@@ -143,61 +143,27 @@ fn local_restore_and_revive_reject_cache_options() {
 }
 
 #[test]
-fn manual_sharing_is_unlimited_and_explicit_limits_are_validated() {
-    let command = Cli::try_parse_from(["zalivka", "usb-internet", "share"])
-        .unwrap()
-        .command;
-    assert!(matches!(
-        command,
-        Command::UsbInternet {
-            command: InternetCommand::Share { seconds: None, .. }
-        }
-    ));
-    let command = Cli::try_parse_from(["zalivka", "usb-internet", "share", "--seconds", "900"])
-        .unwrap()
-        .command;
-    assert!(matches!(
-        command,
-        Command::UsbInternet {
-            command: InternetCommand::Share {
-                seconds: Some(900),
-                ..
-            }
-        }
-    ));
-    let command = Cli::try_parse_from([
-        "zalivka",
-        "revive",
-        "--ecid",
-        "2a",
-        "--experimental",
-        "--share-internet",
-    ])
-    .unwrap()
-    .command;
-    let Command::Revive(args) = command else {
-        panic!("wrong command")
-    };
-    assert!(
-        args.run(Behavior::Update)
-            .unwrap_err()
-            .to_string()
-            .contains("erase restore only")
-    );
-    for seconds in ["0", "86401"] {
-        assert!(
-            Cli::try_parse_from(["zalivka", "usb-internet", "share", "--seconds", seconds])
-                .is_err()
-        );
-    }
-}
-
-#[test]
 fn usb_pid_uses_one_optional_case_insensitive_prefix_and_rejects_zero() {
     for value in ["1227", "0x1227", "0X1227"] {
         assert_eq!(parse_pid(value).unwrap(), 0x1227);
     }
     for value in ["", "0", "0x", "+1227", "0x0x1227", "10000", " 1227"] {
         assert!(parse_pid(value).is_err(), "{value}");
+    }
+}
+
+#[test]
+fn usb_internet_commands_and_post_restore_sharing_are_rejected() {
+    for command in ["status", "prepare", "share"] {
+        assert!(Cli::try_parse_from(["zalivka", "usb-internet", command]).is_err());
+    }
+    for command in ["restore", "revive"] {
+        let mut args = vec!["zalivka", command, "--ecid", "2a", "--experimental"];
+        if command == "restore" {
+            args.push("--erase");
+        }
+        assert!(Cli::try_parse_from(&args).is_ok());
+        args.push("--share-internet");
+        assert!(Cli::try_parse_from(args).is_err());
     }
 }

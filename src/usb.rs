@@ -2,9 +2,9 @@ mod backend;
 mod descriptors;
 use crate::device::{DeviceInfo, Mode};
 use anyhow::{Context, Result, bail};
+pub(crate) use backend::UsbInterface;
 use backend::{BulkInput, BulkOutput};
-pub(crate) use backend::{UsbInterface, cancel_and_drain};
-pub(crate) use descriptors::{NcmInterface, mux_interface, ncm_interface, recovery_interface};
+pub(crate) use descriptors::{mux_interface, recovery_interface};
 use nusb::{
     Device, MaybeFuture,
     transfer::{ControlIn, ControlOut, ControlType, Recipient},
@@ -55,7 +55,8 @@ pub trait RecoveryTransport {
 }
 
 pub struct RecoveryUsb {
-    pub device: Device,
+    #[cfg(not(windows))]
+    device: Device,
     interface: UsbInterface,
     bulk: Option<BulkOutput>,
     pub info: DeviceInfo,
@@ -119,6 +120,7 @@ impl RecoveryUsb {
                 .wait()?;
             info.set_nonces(&nonces)?;
             return Ok(Self {
+                #[cfg(not(windows))]
                 device,
                 interface,
                 bulk,

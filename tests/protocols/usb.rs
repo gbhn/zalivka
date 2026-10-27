@@ -131,11 +131,10 @@ fn invalid_nonces_leave_both_previous_values_intact() {
 }
 
 #[test]
-fn dfu_crc_known_vector_and_packet_boundaries() {
-    assert_eq!(dfu::crc32(b"123456789"), 0x340bc6d9);
+fn dfu_crc_and_packet_boundaries() {
     for len in [1, 2032, 2033, 2048, 2049, 4096] {
         let data = vec![0xaa; len];
-        let packets = dfu::packets(&data).unwrap();
+        let packets = dfu_packets(&data).unwrap();
         assert!(packets.iter().all(|(_, p)| p.len() <= 2048));
         let joined: Vec<u8> = packets
             .iter()
@@ -144,15 +143,15 @@ fn dfu_crc_known_vector_and_packet_boundaries() {
         assert_eq!(joined.len(), len + 16);
         assert_eq!(&joined[..len], data);
         let crc = u32::from_le_bytes(joined[joined.len() - 4..].try_into().unwrap());
-        assert_eq!(crc, dfu::crc32(&joined[..joined.len() - 4]));
+        assert_eq!(crc, !crc32fast::hash(&joined[..joined.len() - 4]));
         assert_eq!(
             &joined[len..len + 12],
             &[255, 255, 255, 255, 0xac, 5, 0, 1, 0x55, 0x46, 0x44, 0x10]
         );
     }
-    let p = dfu::packets(&vec![0; 2048]).unwrap();
+    let p = dfu_packets(&vec![0; 2048]).unwrap();
     assert_eq!(p.iter().map(|p| p.0).collect::<Vec<_>>(), [0, 0]);
-    assert!(dfu::packets(&[]).is_err());
+    assert!(dfu_packets(&[]).is_err());
 }
 
 #[test]
@@ -241,7 +240,7 @@ fn dfu_suffix_continuation_is_sent_before_getstatus() {
             ..Default::default()
         };
         dfu::upload(&mut usb, Mode::Dfu, &vec![0xaa; size], false).unwrap();
-        let packets = dfu::packets(&vec![0xaa; size]).unwrap();
+        let packets = dfu_packets(&vec![0xaa; size]).unwrap();
         assert_eq!(
             usb.controls
                 .iter()
@@ -294,7 +293,7 @@ fn dfu_upload_borrows_complete_blocks_and_preserves_the_suffix_bytes() {
             .into_iter()
             .map(|(_, _, block, bytes)| (block, bytes))
             .collect();
-        assert_eq!(actual, dfu::packets(&data).unwrap());
+        assert_eq!(actual, dfu_packets(&data).unwrap());
         assert!(
             actual
                 .iter()
@@ -473,4 +472,10 @@ fn empty_firmware_is_rejected_before_any_usb_request_in_both_modes() {
     for mode in [Mode::Dfu, Mode::Recovery] {
         assert!(dfu::upload(&mut NoUsb, mode, &[], true).is_err());
     }
+}
+
+fn dfu_packets(data: &[u8]) -> Result<Vec<(u16, Vec<u8>)>> {
+    Ok(dfu::packets(data)?
+        .map(|(index, bytes)| (index, bytes.into_owned()))
+        .collect())
 }

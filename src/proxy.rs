@@ -287,8 +287,7 @@ fn connect_via(uri: &Uri, proxy: Option<Proxy>) -> Result<Tunnel> {
         } else {
             443
         });
-    // FDR and USB networking share CONNECT/SOCKS, proxy TLS and authentication.
-    // Only the I/O mode differs; the target's TLS remains opaque in both paths.
+    // The destination's TLS remains opaque to the proxy tunnel.
     Ok(Tunnel(socket::connect_blocking(host, port, proxy)?))
 }
 

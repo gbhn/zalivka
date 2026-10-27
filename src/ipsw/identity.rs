@@ -187,12 +187,6 @@ impl Ipsw {
             .enumerate()
     }
 
-    pub fn identities(&self) -> Vec<Identity> {
-        self.identity_values()
-            .map(|(index, value)| Identity::new(index, value.clone()))
-            .collect()
-    }
-
     pub fn identity_summaries(&self) -> impl Iterator<Item = Result<IdentitySummary>> {
         self.identity_values()
             .map(|(index, value)| IdentitySummary::from_value(index, value))

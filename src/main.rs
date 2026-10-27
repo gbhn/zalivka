@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
+
 mod cli;
 #[cfg(feature = "gui")]
 mod gui;

@@ -80,7 +80,7 @@ fn native_invalid_pac_returns_an_error() {
 }
 
 #[test]
-fn native_pac_choice_opens_a_usb_tunnel_without_target_dns() {
+fn native_pac_choice_opens_an_fdr_tunnel_without_target_dns() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -121,7 +121,7 @@ fn native_pac_choice_opens_a_usb_tunnel_without_target_dns() {
     )
     .unwrap();
     let mut stream =
-        crate::proxy::socket::connect_via("does-not-resolve.invalid", 443, proxy).unwrap();
+        crate::proxy::socket::connect_blocking("does-not-resolve.invalid", 443, proxy).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut reply = vec![];
     while reply.len() < 3 {
@@ -130,7 +130,14 @@ fn native_pac_choice_opens_a_usb_tunnel_without_target_dns() {
         match stream.read(&mut bytes) {
             Ok(0) => panic!("PAC tunnel closed before its reply"),
             Ok(n) => reply.extend_from_slice(&bytes[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
                 thread::sleep(Duration::from_millis(1))
             }
             Err(e) => panic!("PAC tunnel read failed: {e}"),

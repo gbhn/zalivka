@@ -2,19 +2,6 @@
 use super::{DEVICE_MAGIC, HOST_MAGIC, MTU};
 use anyhow::{Result, ensure};
 
-pub fn encode_packet(
-    protocol: u32,
-    version: u32,
-    tx: u16,
-    rx: u16,
-    payload: &[u8],
-) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    encode_header(&mut bytes, protocol, version, tx, rx, payload.len())?;
-    bytes.extend_from_slice(payload);
-    Ok(bytes)
-}
-
 pub(super) fn encode_header(
     bytes: &mut Vec<u8>,
     protocol: u32,

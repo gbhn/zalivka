@@ -380,8 +380,8 @@ fn requested_tickets_require_nonempty_data_and_structured_firmware_is_preserved(
 }
 
 #[test]
-fn ftab_roundtrip_preserves_entries_and_rejects_bad_offsets() {
-    use zalivka::firmware::Ftab;
+fn ftab_index_preserves_payload_ranges_and_rejects_bad_offsets() {
+    use crate::test_support::Ftab;
     let mut header = [0; 48];
     header[..4].copy_from_slice(&1u32.to_le_bytes());
     header[4..8].fill(255);
@@ -391,17 +391,13 @@ fn ftab_roundtrip_preserves_entries_and_rejects_bad_offsets() {
         header,
         entries: vec![(*b"rkos", vec![1, 2, 3], 0), (*b"rrko", vec![4, 5], 7)],
     };
-    let bytes = table.encode().unwrap();
-    let parsed = Ftab::parse(&bytes).unwrap();
-    assert_eq!(parsed.entries, table.entries);
-    assert_eq!(parsed.encode().unwrap(), bytes);
+    let bytes = table.encode();
     // A streaming reader has the complete index, without the payload bytes.
     assert_eq!(
         zalivka::firmware::payload_ranges(&bytes[..80], bytes.len() as u64).unwrap(),
         [80..83, 83..85]
     );
     let rejects = |bad: &[u8]| {
-        assert!(Ftab::parse(bad).is_err());
         assert!(zalivka::firmware::payload_ranges(bad, bad.len() as u64).is_err());
     };
     let mut bad = bytes.clone();
@@ -421,18 +417,17 @@ fn ftab_roundtrip_preserves_entries_and_rejects_bad_offsets() {
 
 #[test]
 fn container_indexes_must_fit_the_declared_file_even_without_payloads() {
-    use zalivka::firmware::{Ftab, payload_ranges};
+    use crate::test_support::Ftab;
+    use zalivka::firmware::payload_ranges;
     let mut header = [0; 48];
     header[36..40].copy_from_slice(b"ftab");
-    let mut table = Ftab {
+    let table = Ftab {
         header,
         entries: vec![],
     };
-    let bytes = table.encode().unwrap();
+    let bytes = table.encode();
     assert!(payload_ranges(&bytes, 48).unwrap().is_empty());
     assert!(payload_ranges(&bytes, 47).is_err());
-    table.header[36..40].fill(0);
-    assert!(table.encode().is_err());
 
     let mut uarp = vec![0; 44];
     uarp[..4].copy_from_slice(&3u32.to_be_bytes());
@@ -497,7 +492,7 @@ fn updater_v2_validates_signing_requests_and_v3_is_a_capability_marker() {
         assert!(format!("{error:#}").contains("ResponseTags"));
     }
     assert!(mux_output(&output, 62078).get_ref().is_empty());
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &restore::supported_data_types(),
         &["FirmwareUpdaterDataV3"]
     ));
@@ -685,7 +680,7 @@ fn firmware_chunk_stream_sends_tickets_size_bounded_chunks_and_an_explicit_end()
                 .unwrap()
                 .as_data()
                 .unwrap();
-            if wire::boolean(&frame, &["DataDone"]) {
+            if crate::test_support::boolean(&frame, &["DataDone"]) {
                 assert!(data.is_empty());
                 break;
             }
@@ -743,7 +738,7 @@ fn firmware_chunk_compatibility_covers_legacy_structured_and_empty_payloads() {
             .unwrap(),
         0
     );
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &wire::receive(&mut stream).unwrap(),
         &["DataDone"]
     ));
@@ -931,11 +926,14 @@ fn namespace_bundles_bind_metadata_and_stream_original_bytes_without_updater_nam
             }
             let update = zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).unwrap();
             let request = wire::dictionary(&update.request).unwrap();
-            assert!(wire::boolean(
+            assert!(crate::test_support::boolean(
                 &update.request,
                 &[&format!("@{namespace},Ticket")]
             ));
-            assert!(wire::boolean(&update.request, &["@BBTicket"]));
+            assert!(crate::test_support::boolean(
+                &update.request,
+                &["@BBTicket"]
+            ));
             assert_eq!(request[&format!("{namespace},BoardID")], 7u64.into());
             for (key, value) in
                 wire::dictionary(wire::get(&args, &["MessageArgInfo"]).unwrap()).unwrap()
@@ -980,7 +978,7 @@ fn namespace_bundles_bind_metadata_and_stream_original_bytes_without_updater_nam
                     .unwrap();
                 assert!(data.len() <= 131072);
                 received.extend_from_slice(data);
-                if wire::boolean(&frame, &["DataDone"]) {
+                if crate::test_support::boolean(&frame, &["DataDone"]) {
                     assert!(data.is_empty());
                     break;
                 }
@@ -1212,9 +1210,7 @@ fn centauri_table(entries: Vec<([u8; 4], Vec<u8>, u32)>) -> Vec<u8> {
     header[4..8].fill(255);
     header[32..36].copy_from_slice(b"rkos");
     header[36..40].copy_from_slice(b"ftab");
-    zalivka::firmware::Ftab { header, entries }
-        .encode()
-        .unwrap()
+    crate::test_support::Ftab { header, entries }.encode()
 }
 
 #[test]

@@ -93,60 +93,6 @@ pub(crate) fn mux_interface(device: &nusb::Device) -> Result<MuxInterface> {
     .context("no Apple USB multiplex interface")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NcmInterface {
-    pub control: u8,
-    pub data: u8,
-    pub alternate: u8,
-    pub input: u8,
-    pub output: u8,
-    pub packet_size: usize,
-}
-
-pub(crate) fn ncm_interface(config: ConfigurationDescriptor<'_>) -> Result<NcmInterface> {
-    for control in config
-        .interface_alt_settings()
-        .filter(|i| i.class() == 2 && i.subclass() == 0x0d && i.alternate_setting() == 0)
-    {
-        let data_number = control
-            .descriptors()
-            .filter(|descriptor| {
-                descriptor.len() >= 5
-                    && descriptor.descriptor_type() == 0x24
-                    && descriptor[2] == 6 // CDC Union functional descriptor.
-                    && descriptor[3] == control.interface_number()
-            })
-            .map(|descriptor| descriptor[4])
-            .last();
-        let Some(number) = data_number.filter(|number| *number != control.interface_number())
-        else {
-            continue;
-        };
-        for data in config.interface_alt_settings().filter(|i| {
-            i.interface_number() == number && i.class() == 0x0a && i.endpoints().count() == 2
-        }) {
-            let (Some(input), Some(output)) =
-                (bulk_endpoint(&data, true), bulk_endpoint(&data, false))
-            else {
-                continue;
-            };
-            return Ok(NcmInterface {
-                control: control.interface_number(),
-                data: number,
-                alternate: data.alternate_setting(),
-                input: input.address(),
-                output: output.address(),
-                packet_size: output.max_packet_size(),
-            });
-        }
-    }
-    anyhow::bail!("Mac does not expose a usable CDC-NCM interface")
-}
-
 #[cfg(test)]
 #[path = "../../tests/unit/usb.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "../../tests/unit/usb/ncm.rs"]
-mod ncm_tests;

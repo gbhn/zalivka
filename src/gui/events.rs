@@ -1,5 +1,6 @@
 //! Apply background events and finish jobs only after their logs are drained.
 use super::theme::Tone;
+use super::widgets::elapsed_text;
 use super::worker::{Job, Output};
 use super::{
     App, Event, Level, Notice, Picker, Record, SCAN_INTERVAL, UI_REFRESH_INTERVAL, worker,
@@ -104,6 +105,7 @@ impl App {
                         title: "Журнал сохранён".into(),
                         detail: path.display().to_string(),
                         tone: Tone::Success,
+                        expires_at: Some(Instant::now() + super::NOTICE_LIFETIME),
                     });
                 }
                 Event::Saved(Err(e)) => self.error("Журнал не сохранён", e),
@@ -124,11 +126,16 @@ impl App {
             Tone::Neutral if !job.cancelled => Level::Warning,
             _ => Level::Info,
         };
-        self.journal_line(job.record(Record::new(
-            level,
-            "session",
-            format!("{}: {}", notice.title, notice.detail),
-        )));
+        let mut message = format!(
+            "{}. Длительность: {}.",
+            notice.title,
+            elapsed_text(job.started.elapsed().as_secs())
+        );
+        if !notice.detail.is_empty() {
+            message.push(' ');
+            message.push_str(&notice.detail);
+        }
+        self.journal_line(job.record(Record::new(level, "session", message)));
         // The final record can be the first failed write. Build the displayed
         // result after that attempt so journal completeness is reported honestly.
         self.journal_error(job.log_error.as_deref());

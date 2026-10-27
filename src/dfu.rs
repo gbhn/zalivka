@@ -19,11 +19,6 @@ impl std::fmt::Display for ResetFailure {
     }
 }
 
-/// DFU CRC is the uncomplemented IEEE CRC32 register, including the suffix.
-pub fn crc32(data: &[u8]) -> u32 {
-    !crc32fast::hash(data)
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub struct Status {
     pub status: u8,
@@ -70,14 +65,8 @@ fn wait_download(usb: &mut impl RecoveryTransport) -> Result<()> {
 }
 
 /// Match Apple's last-packet convention: a suffix-only packet can reuse the last block index.
-pub fn packets(data: &[u8]) -> Result<Vec<(u16, Vec<u8>)>> {
-    Ok(packet_iter(data)?
-        .map(|(index, bytes)| (index, bytes.into_owned()))
-        .collect())
-}
-
-// Full blocks borrow the input. Only the final block and suffix need storage.
-fn packet_iter(data: &[u8]) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>> {
+/// Full blocks borrow the input. Only the final block and suffix need storage.
+pub fn packets(data: &[u8]) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>> {
     ensure!(!data.is_empty(), "cannot send an empty DFU image");
     let blocks = data.len().div_ceil(BLOCK_SIZE);
     ensure!(
@@ -149,7 +138,7 @@ pub fn upload(
         }
         state => bail!("expected DFU idle state 2, got {state}; re-enter DFU"),
     }
-    let mut packets = packet_iter(data)?.peekable();
+    let mut packets = packets(data)?.peekable();
     let mut remaining = data.len();
     while let Some((block, bytes)) = packets.next() {
         usb.control_out(0x21, 1, block, 0, &bytes)?;

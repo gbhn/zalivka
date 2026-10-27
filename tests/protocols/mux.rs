@@ -48,7 +48,7 @@ fn mux_accepts_the_recorded_device_magic_and_preserves_outgoing_host_magic() {
     assert_eq!(packet.rx, 1);
     assert_eq!(packet.payload, &[0; 20]);
 
-    let outgoing = mux::encode_packet(6, 2, 1, 0xffff, packet.payload).unwrap();
+    let outgoing = test_mux::encode_packet(6, 2, 1, 0xffff, packet.payload).unwrap();
     assert_eq!(&outgoing[8..12], &[0xfe, 0xed, 0xfa, 0xce]);
     assert!(mux::decode_packet(&outgoing, 2).is_ok());
     for invalid in [0u32, 0xcefaedfe, 0xcefacefa, 0xdeadbeef] {
@@ -397,11 +397,10 @@ fn mux_reset_refuses_connection_and_bad_frames_fail() {
     let (usb, _) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 0, 4, &[])]);
     let session = Session::new(usb).unwrap();
     assert!(session.connect(62078).is_err());
-    let mut bad = mux::encode_packet(6, 2, 0, 0, &[0; 20]).unwrap();
+    let mut bad = test_mux::encode_packet(6, 2, 0, 0, &[0; 20]).unwrap();
     bad[8] = 0;
     assert!(mux::decode_packet(&bad, 2).is_err());
     assert!(mux::decode_packet(&bad[..4], 2).is_err());
-    assert!(mux::encode_packet(6, 2, 0, 0, &[0; 50000]).is_err());
 }
 
 #[test]

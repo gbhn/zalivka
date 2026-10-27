@@ -17,7 +17,7 @@ fn tss_requests_bind_hardware_nonce_and_component_digests() {
         d.ap_nonce
     );
     assert!(wire::get(&request, &["iBSS", "Info"]).is_err());
-    assert!(wire::boolean(&request, &["iBSS", "ESEC"]));
+    assert!(crate::test_support::boolean(&request, &["iBSS", "ESEC"]));
     assert_eq!(
         wire::get(&request, &["iBSS", "Digest"]).unwrap(),
         wire::get(&id.value, &["Manifest", "iBSS", "Digest"]).unwrap()
@@ -550,7 +550,10 @@ fn local_policy_omits_firmware_metadata_without_changing_firmware_requests() {
                 wire::get(&firmware, &[key]).unwrap()
             );
         }
-        assert_eq!(wire::boolean(&policy, &["Ap,LocalBoot"]), args.is_some());
+        assert_eq!(
+            crate::test_support::boolean(&policy, &["Ap,LocalBoot"]),
+            args.is_some()
+        );
     }
 }
 

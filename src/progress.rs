@@ -18,16 +18,6 @@ pub enum Event {
     Transfer(Update),
     RestoreCompleted,
     RebootRequired,
-    InternetWaiting,
-    InternetPreparing,
-    InternetReady,
-    InternetSpeed {
-        upload_bytes_per_second: f64,
-        download_bytes_per_second: f64,
-    },
-    InternetUnavailable {
-        error: String,
-    },
     Checkpoint {
         name: String,
         complete: bool,
@@ -71,15 +61,6 @@ impl Event {
                                 .is_none_or(|weight| completed > weight)
                     })
                 } =>
-            {
-                None
-            }
-            Self::InternetSpeed {
-                upload_bytes_per_second,
-                download_bytes_per_second,
-            } if [upload_bytes_per_second, download_bytes_per_second]
-                .iter()
-                .any(|speed| !speed.is_finite() || **speed < 0.0) =>
             {
                 None
             }

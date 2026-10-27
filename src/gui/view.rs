@@ -1,7 +1,8 @@
 //! Main window layout, journal and frame updates.
-use super::widgets::{caption, card, tint};
-use super::{App, Level, Picker, SCAN_INTERVAL, UI_REFRESH_INTERVAL};
+use super::widgets::{caption, pill, tint};
+use super::{App, Level, Notice, Picker, SCAN_INTERVAL, Tone, UI_REFRESH_INTERVAL};
 use eframe::egui::{self, Color32, RichText, Vec2};
+use std::time::Instant;
 
 impl App {
     pub(super) fn header(&mut self, ctx: &egui::Context) {
@@ -71,28 +72,33 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 ui.horizontal_wrapped(|ui| {
                     ui.strong("Журнал");
-                    ui.checkbox(&mut self.log_details, "Технические подробности");
-                    if ui
-                        .add_enabled(
-                            !self.logs.is_empty(),
-                            egui::Button::new("Копировать").small(),
-                        )
-                        .clicked()
-                    {
-                        ctx.copy_text(self.journal_text(self.log_details));
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.logs.is_empty() && !self.picking,
-                            egui::Button::new("Сохранить журнал").small(),
-                        )
-                        .clicked()
-                    {
-                        self.pick(Picker::Log, ctx);
-                    }
-                    if ui.small_button("Скрыть").clicked() {
-                        self.journal_open = false;
-                    }
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true),
+                        |ui| {
+                            if ui.small_button("Скрыть").clicked() {
+                                self.journal_open = false;
+                            }
+                            if ui
+                                .add_enabled(
+                                    !self.logs.is_empty() && !self.picking,
+                                    egui::Button::new("Сохранить журнал").small(),
+                                )
+                                .clicked()
+                            {
+                                self.pick(Picker::Log, ctx);
+                            }
+                            if ui
+                                .add_enabled(
+                                    !self.logs.is_empty(),
+                                    egui::Button::new("Копировать").small(),
+                                )
+                                .clicked()
+                            {
+                                ctx.copy_text(self.journal_text(self.log_details));
+                            }
+                            ui.checkbox(&mut self.log_details, "Технические подробности");
+                        },
+                    );
                 });
                 ui.separator();
                 let records: Vec<_> = self
@@ -133,6 +139,88 @@ impl App {
                     });
             });
     }
+
+    fn notification(&mut self, ctx: &egui::Context, bounds: egui::Rect) {
+        let Some(notice) = &self.notice else { return };
+        if let Some(deadline) = notice.expires_at {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.notice = None;
+                return;
+            }
+            ctx.request_repaint_after(remaining);
+        }
+        let mut dismiss = false;
+        egui::Area::new(egui::Id::new("notification"))
+            .order(egui::Order::Foreground)
+            .movable(false)
+            .anchor(egui::Align2::RIGHT_TOP, Vec2::ZERO)
+            .constrain_to(bounds)
+            .show(ctx, |ui| {
+                let color = match notice.tone {
+                    Tone::Neutral => ui.visuals().hyperlink_color,
+                    tone => tone.color(ui.visuals()),
+                };
+                let frame = egui::Frame::popup(ui.style())
+                    .corner_radius(12)
+                    .inner_margin(14)
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        tint(color, ui.visuals().window_fill),
+                    ));
+                let width = bounds.width().min(420.0) - frame.total_margin().sum().x;
+                frame.show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.horizontal_top(|ui| {
+                        pill(
+                            ui,
+                            match notice.tone {
+                                Tone::Neutral => "i",
+                                Tone::Success => "✓",
+                                Tone::Error => "!",
+                            },
+                            color,
+                        );
+                        let text_width = ui.available_width() - 24.0 - ui.spacing().item_spacing.x;
+                        ui.vertical(|ui| {
+                            ui.set_width(text_width);
+                            ui.add(egui::Label::new(RichText::new(&notice.title).strong()).wrap());
+                            if !notice.detail.is_empty() {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("notification_detail")
+                                    .max_height((bounds.height() - 110.0).clamp(24.0, 140.0))
+                                    .show(ui, |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&notice.detail)
+                                                    .size(13.0)
+                                                    .color(ui.visuals().weak_text_color()),
+                                            )
+                                            .wrap(),
+                                        );
+                                    });
+                            }
+                            if notice.tone == Tone::Error
+                                && !self.logs.is_empty()
+                                && ui.small_button("Открыть журнал").clicked()
+                            {
+                                self.journal_open = true;
+                            }
+                        });
+                        dismiss = ui
+                            .add_sized(
+                                [24.0, 24.0],
+                                egui::Button::new(RichText::new("×").size(20.0)).frame(false),
+                            )
+                            .on_hover_text("Закрыть уведомление")
+                            .clicked();
+                    });
+                });
+            });
+        if dismiss {
+            self.notice = None;
+        }
+    }
 }
 
 impl App {
@@ -170,6 +258,8 @@ impl App {
                 });
             });
         self.journal(ctx);
+        let mut notification_bounds = ctx.content_rect().shrink(14.0);
+        notification_bounds.min.y = ctx.available_rect().top() + 14.0;
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -183,27 +273,6 @@ impl App {
                     .show(ui, |ui| {
                         ui.heading("Восстановление Mac");
                         ui.add_space(9.0);
-                        if let Some(notice) = &self.notice {
-                            let mut dismiss = false;
-                            let color = notice.tone.color(ui.visuals());
-                            card(ui.ctx())
-                                .fill(tint(color, ui.visuals().window_fill))
-                                .show(ui, |ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(
-                                            RichText::new(&notice.title).strong().color(color),
-                                        );
-                                        if ui.small_button("Скрыть").clicked() {
-                                            dismiss = true;
-                                        }
-                                    });
-                                    caption(ui, &notice.detail);
-                                });
-                            if dismiss {
-                                self.notice = None;
-                            }
-                            ui.add_space(12.0);
-                        }
                         if self.job.is_some() {
                             self.active_job(ui);
                         } else {
@@ -239,12 +308,17 @@ impl App {
                         }
                     });
             });
+        self.notification(ctx, notification_bounds);
         self.settings(ctx);
         self.confirmation(ctx);
     }
 }
 
 impl eframe::App for App {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         if self.job.is_none() && !self.picking && self.last_scan.elapsed() >= SCAN_INTERVAL {
@@ -260,10 +334,12 @@ impl eframe::App for App {
         {
             if !job.can_stop() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.error(
-                    "Операция ещё выполняется",
-                    "Дождитесь завершения перед закрытием окна.",
-                );
+                self.notice = Some(Notice {
+                    title: "Операция ещё выполняется".into(),
+                    detail: "Дождитесь завершения перед закрытием окна.".into(),
+                    tone: Tone::Neutral,
+                    expires_at: Some(Instant::now() + super::NOTICE_LIFETIME),
+                });
             } else if let Err(error) = job.stop() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.error("Не удалось остановить операцию", error);

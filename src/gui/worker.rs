@@ -1,5 +1,4 @@
 //! Child-process lifetime, progress and completion for one GUI operation.
-use super::widgets::elapsed_text;
 use super::{Action, Event, Level, Notice, Record, Setup, Tone, UI_REFRESH_INTERVAL, progress};
 use anyhow::{Context, Result};
 use eframe::egui;
@@ -24,7 +23,6 @@ pub(super) struct Job {
     pub(super) readers: u8,
     pub(super) cancelled: bool,
     pub(super) restore_completed: bool,
-    internet: Internet,
     pub(super) transfers: BTreeMap<u64, Transfer>,
     overall_operations: BTreeMap<u64, Operation>,
     pub(super) overall_fraction: Option<f32>,
@@ -69,17 +67,6 @@ impl Transfer {
     }
 }
 
-enum Internet {
-    Idle,
-    Preparing,
-    Ready {
-        upload: f64,
-        download: f64,
-        received: Instant,
-    },
-    Unavailable(String),
-}
-
 /// Both output pipes belong to one job; only stdout carries state events.
 pub(super) enum Output {
     Line(String),
@@ -111,7 +98,6 @@ impl Job {
             readers: 2,
             cancelled: false,
             restore_completed: false,
-            internet: Internet::Idle,
             transfers: BTreeMap::new(),
             overall_operations: BTreeMap::new(),
             overall_fraction: None,
@@ -125,24 +111,8 @@ impl Job {
     }
 
     pub(super) fn can_stop(&self) -> bool {
-        (!self.action.writes_device() || self.restore_completed)
+        !self.action.writes_device()
             && !matches!(self.action, Action::PrepareWindows | Action::ResetDrivers)
-            && !matches!(self.internet, Internet::Preparing)
-    }
-
-    pub(super) fn internet_speed(&self, now: Instant) -> Option<(f64, f64)> {
-        match self.internet {
-            Internet::Ready {
-                upload,
-                download,
-                received,
-            } => Some(if now.duration_since(received) > Duration::from_secs(2) {
-                (0.0, 0.0)
-            } else {
-                (upload, download)
-            }),
-            _ => None,
-        }
     }
 
     pub(super) fn stop(&mut self) -> std::io::Result<()> {
@@ -216,38 +186,6 @@ impl Job {
                 self.set_phase("Восстановление завершено");
             }
             progress::Event::RebootRequired => {}
-            progress::Event::InternetWaiting => {
-                self.internet = Internet::Idle;
-                self.set_phase("Ожидание USB-сети Mac");
-            }
-            progress::Event::InternetPreparing => {
-                self.internet = Internet::Preparing;
-                self.set_phase("Подтвердите запрос прав администратора Windows");
-            }
-            progress::Event::InternetReady => {
-                self.internet = Internet::Ready {
-                    upload: 0.0,
-                    download: 0.0,
-                    received: Instant::now(),
-                };
-                self.set_phase("Интернет по USB, оставьте Zalivka открытой");
-            }
-            progress::Event::InternetSpeed {
-                upload_bytes_per_second,
-                download_bytes_per_second,
-            } => {
-                if matches!(self.internet, Internet::Ready { .. }) {
-                    self.internet = Internet::Ready {
-                        upload: upload_bytes_per_second,
-                        download: download_bytes_per_second,
-                        received: Instant::now(),
-                    };
-                }
-            }
-            progress::Event::InternetUnavailable { error } => {
-                self.internet = Internet::Unavailable(error);
-                self.set_phase("Интернет по USB недоступен");
-            }
             progress::Event::Checkpoint { name, complete } => {
                 if !complete {
                     self.phase = format!("Этап: {}", name.replace('_', " "));
@@ -332,17 +270,8 @@ impl Job {
     }
 
     pub(super) fn completion_notice(&self, success: bool, reboot_required: bool) -> Notice {
-        let elapsed = elapsed_text(self.started.elapsed().as_secs());
         let (title, mut detail, mut tone) = if self.cancelled {
-            (
-                if self.action == Action::Restore && self.restore_completed {
-                    "Восстановление завершено, раздача остановлена".into()
-                } else {
-                    "Операция остановлена".into()
-                },
-                elapsed,
-                Tone::Neutral,
-            )
+            ("Операция остановлена".into(), String::new(), Tone::Neutral)
         } else if !success {
             (
                 format!("{}: ошибка", self.action.title()),
@@ -357,28 +286,25 @@ impl Job {
                 "Драйвер установлен. Перезагрузите компьютер перед восстановлением Mac.".into(),
                 Tone::Neutral,
             )
-        } else if let Internet::Unavailable(error) = &self.internet {
-            (
-                "Восстановление завершено, интернет по USB недоступен".into(),
-                error.clone(),
-                Tone::Neutral,
-            )
         } else {
             (
                 self.action.completed_title().into(),
                 if self.action.writes_device() {
-                    format!("{elapsed}, Проверьте запуск Mac.")
+                    "Проверьте запуск Mac.".into()
                 } else if self.action == Action::ResetDrivers {
-                    format!("{elapsed}. Подключите Mac заново и введите его в DFU.")
+                    "Подключите Mac заново и введите его в DFU.".into()
                 } else {
-                    elapsed
+                    String::new()
                 },
                 Tone::Success,
             )
         };
         if let Some(error) = &self.log_error {
+            if !detail.is_empty() {
+                detail.push(' ');
+            }
             detail.push_str(&format!(
-                " Журнал на диске неполный: {error}. В окне доступна последняя часть журнала."
+                "Журнал на диске неполный: {error}. В окне доступна последняя часть журнала."
             ));
             if tone == Tone::Success {
                 tone = Tone::Neutral;
@@ -388,6 +314,11 @@ impl Job {
             title,
             detail,
             tone,
+            expires_at: if self.log_error.is_none() && (tone == Tone::Success || self.cancelled) {
+                Some(Instant::now() + super::NOTICE_LIFETIME)
+            } else {
+                None
+            },
         }
     }
 

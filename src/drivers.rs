@@ -7,30 +7,16 @@ use std::{fs::File, io::Write, path::Path};
 pub const UDEV_RULES: &str = include_str!("../packaging/70-zalivka.rules");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct UsbNetworkInterfaceStatus {
-    pub serial: String,
-    pub interface: u8,
-    pub instance_id: String,
-    pub ready: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct HostStatus {
     pub apple_service_installed: bool,
     pub apple_service_running: bool,
     pub apple_driver_installed: bool,
     pub compatible_usb_driver: bool,
-    pub usb_network_driver_available: bool,
-    pub usb_network_interfaces: Vec<UsbNetworkInterfaceStatus>,
 }
 
 impl HostStatus {
     pub fn needs_preparation(&self) -> bool {
-        self.apple_service_running
-            || !self.apple_driver_installed
-            || !self.usb_network_driver_available
-            || self.usb_network_interfaces.iter().any(|i| !i.ready)
+        self.apple_service_running || !self.apple_driver_installed
     }
 
     pub fn blocking_reason(&self) -> Option<&'static str> {

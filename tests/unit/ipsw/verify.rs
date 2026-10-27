@@ -1,5 +1,5 @@
 use super::*;
-use crate::{firmware::Ftab, img4};
+use crate::{img4, test_support::Ftab};
 use sha2::{Digest, Sha256, Sha384};
 use std::io::Cursor;
 
@@ -97,8 +97,7 @@ fn fragmented_reads_and_interrupts_preserve_container_and_retagged_digests() {
         header,
         entries: vec![(*b"rkos", payload.clone(), 0)],
     }
-    .encode()
-    .unwrap();
+    .encode();
     let mut fields = img4::element(0x16, b"IM4P");
     fields.extend(img4::element(0x16, b"krnl"));
     fields.extend(img4::element(0x16, b"test"));

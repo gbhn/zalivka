@@ -7,7 +7,7 @@ use zalivka::{
     device::{Mode, parse_ecid},
     drivers,
     ipsw::{Behavior, Ipsw},
-    net, progress, restore, tss, usb, usb_internet, wire,
+    net, progress, restore, tss, usb, wire,
 };
 
 #[derive(Parser)]
@@ -28,11 +28,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Temporary internet access for a connected Mac through USB Ethernet.
-    UsbInternet {
-        #[command(subcommand)]
-        command: InternetCommand,
-    },
     #[cfg(feature = "gui")]
     /// Open the native desktop interface.
     Gui,
@@ -121,41 +116,8 @@ enum Command {
     Revive(RestoreArgs),
 }
 
-#[derive(Subcommand)]
-enum InternetCommand {
-    /// Inspect Mac USB network interfaces without changing drivers.
-    Status,
-    /// Prepare only the connected Mac's USB network interfaces (Windows UAC).
-    Prepare {
-        #[arg(long)]
-        serial: Option<String>,
-        /// Restore the driver settings saved before preparation.
-        #[arg(long)]
-        restore: bool,
-    },
-    #[cfg(windows)]
-    #[command(hide = true)]
-    PrepareElevated {
-        #[arg(long)]
-        serial: String,
-        #[arg(long)]
-        restore: bool,
-    },
-    /// Share this computer's internet with the connected Mac.
-    Share {
-        #[arg(long)]
-        serial: Option<String>,
-        /// Stop sharing after this many seconds; omitted means no time limit.
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86400))]
-        seconds: Option<u64>,
-    },
-}
-
 #[derive(Args)]
 struct RestoreArgs {
-    /// After successful erase restore, share internet with the same USB port until stopped.
-    #[arg(long)]
-    share_internet: bool,
     /// Local IPSW; omitted to automatically download the current compatible image.
     ipsw: Option<PathBuf>,
     /// Firmware cache for automatic downloads.
@@ -182,14 +144,6 @@ struct RestoreArgs {
 impl RestoreArgs {
     fn run(self, behavior: Behavior) -> Result<()> {
         ensure!(self.experimental, "--experimental is required");
-        ensure!(
-            !self.share_internet || behavior == Behavior::Erase,
-            "--share-internet is available for erase restore only"
-        );
-        let internet_target = self
-            .share_internet
-            .then(|| usb_internet::Target::for_ecid(self.ecid))
-            .transpose()?;
         drivers::check_host()?;
         let assets = net::AssetClient::from_files(
             self.authorization_tokens.as_deref(),
@@ -219,28 +173,15 @@ impl RestoreArgs {
         )?;
         zalivka::log!(Info, "restore", "Восстановление завершено");
         progress::Event::RestoreCompleted.emit();
-        if let Some(target) = internet_target
-            && let Err(error) = usb_internet::share(None, Some(&target), None)
-        {
-            progress::Event::InternetUnavailable {
-                error: format!("{error:#}"),
-            }
-            .emit();
-            zalivka::log!(
-                Warning,
-                "usb-internet",
-                "Интернет по USB недоступен: {error:#}"
-            );
-        }
         Ok(())
     }
 }
 
 #[derive(Subcommand)]
 enum DriverCommand {
-    /// Check Apple USB, USB network interface drivers and the Apple service.
+    /// Check Apple USB drivers and the Apple service.
     Status,
-    /// Install missing Apple USB / USB network drivers and stop AMDS (Windows UAC).
+    /// Install missing Apple USB drivers and stop AMDS (Windows UAC).
     Prepare,
     #[cfg(windows)]
     #[command(hide = true)]
@@ -293,6 +234,17 @@ pub(super) fn run() -> Result<()> {
     if std::env::args_os().len() == 1 {
         return crate::gui::run();
     }
+    #[cfg(all(windows, feature = "gui"))]
+    #[allow(unsafe_code)]
+    if !zalivka::logging::worker() {
+        // GUI builds never allocate a console. CLI calls can reuse their parent's
+        // terminal; redirected standard handles remain inherited from the caller.
+        unsafe {
+            windows_sys::Win32::System::Console::AttachConsole(
+                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+    }
     let cli = Cli::parse();
     zalivka::logging::init(cli.verbose);
     #[cfg(windows)]
@@ -300,21 +252,6 @@ pub(super) fn run() -> Result<()> {
         zalivka::logging::connect_elevated(id)?;
     }
     match cli.command {
-        Command::UsbInternet { command } => match command {
-            InternetCommand::Status => print_json(&usb_internet::status()?)?,
-            InternetCommand::Prepare { serial, restore } => {
-                usb_internet::prepare(serial.as_deref(), restore)?
-            }
-            #[cfg(windows)]
-            InternetCommand::PrepareElevated { serial, restore } => {
-                usb_internet::prepare_elevated(&serial, restore)?
-            }
-            InternetCommand::Share { serial, seconds } => usb_internet::share(
-                serial.as_deref(),
-                None,
-                seconds.map(std::time::Duration::from_secs),
-            )?,
-        },
         #[cfg(feature = "gui")]
         Command::Gui => crate::gui::run()?,
         Command::Doctor => {
@@ -328,9 +265,8 @@ pub(super) fn run() -> Result<()> {
                 zalivka::log!(
                     Info,
                     "drivers",
-                    "Драйвер Apple: {}; драйвер USB-сети: {}; служба Apple запущена: {}",
+                    "Драйвер Apple: {}; служба Apple запущена: {}",
                     host.apple_driver_installed,
-                    host.usb_network_driver_available,
                     host.apple_service_running
                 );
                 if let Some(reason) = host.blocking_reason() {

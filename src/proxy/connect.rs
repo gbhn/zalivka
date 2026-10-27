@@ -1,4 +1,4 @@
-//! HTTP CONNECT authentication shared by HTTP, FDR and USB internet tunnels.
+//! HTTP CONNECT authentication shared by HTTP and FDR tunnels.
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use std::{

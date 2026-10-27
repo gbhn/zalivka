@@ -110,16 +110,28 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             for (automatic, title) in [(true, "Автоматически"), (false, "Локальный IPSW")]
             {
-                let color = if self.setup.automatic == automatic {
+                let selected = self.setup.automatic == automatic;
+                let color = if selected {
                     Color32::WHITE
                 } else {
                     ui.visuals().text_color()
                 };
-                ui.selectable_value(
-                    &mut self.setup.automatic,
-                    automatic,
-                    RichText::new(title).color(color),
-                );
+                let stroke = if selected {
+                    egui::Stroke::new(1.0_f32, BLUE)
+                } else {
+                    ui.visuals().widgets.noninteractive.bg_stroke
+                };
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(title).color(color))
+                            .selected(selected)
+                            .stroke(stroke)
+                            .min_size(Vec2::new(152.0, 38.0)),
+                    )
+                    .clicked()
+                {
+                    self.setup.automatic = automatic;
+                }
             }
         });
         ui.add_space(5.0);
@@ -265,26 +277,11 @@ impl App {
                     }
                 }
             });
-            if let Some(reason) = self.blocked_reason() {
+            if let Some(reason) = self.blocked_reason()
+                && reason != "Подключите Mac в режиме DFU"
+            {
                 ui.add_space(5.0);
                 caption(ui, reason);
-            }
-            if cfg!(windows) {
-                ui.add_space(10.0);
-                ui.separator();
-                ui.checkbox(
-                    &mut self.setup.share_internet,
-                    "Давать Mac интернет по USB после восстановления",
-                );
-                if ui
-                    .add_enabled(
-                        !self.picking,
-                        egui::Button::new("Дать подключённому Mac интернет по USB"),
-                    )
-                    .clicked()
-                {
-                    self.start(Action::UsbInternet, ui.ctx());
-                }
             }
         });
     }
@@ -295,35 +292,15 @@ impl App {
                 pill(ui, "В работе", BLUE);
                 ui.label(RichText::new(job.action.title()).size(21.0).strong());
             });
-            let now = Instant::now();
-            let internet_speed = job.internet_speed(now);
             ui.add_space(12.0);
             ui.label(RichText::new(&job.phase).size(16.0));
             if job.action.writes_device() {
                 progress_bar(ui, job.overall_fraction);
-            } else if internet_speed.is_none() && job.transfers.is_empty() {
+            } else if job.transfers.is_empty() {
                 progress_bar(ui, None);
             }
             ui.add_space(14.0);
-            ui.columns(3, |columns| {
-                metric(
-                    &mut columns[0],
-                    "Прошло",
-                    &elapsed_text(job.started.elapsed().as_secs()),
-                );
-                if let Some((upload, download)) = internet_speed {
-                    metric(
-                        &mut columns[1],
-                        "↑ Up",
-                        &format!("{}/с", human_bytes(upload as u64)),
-                    );
-                    metric(
-                        &mut columns[2],
-                        "↓ Down",
-                        &format!("{}/с", human_bytes(download as u64)),
-                    );
-                }
-            });
+            metric(ui, "Прошло", &elapsed_text(job.started.elapsed().as_secs()));
             ui.add_space(14.0);
             let idle = job.last_activity.elapsed();
             if !job.can_stop() && !job.action.writes_device() {
@@ -427,32 +404,9 @@ impl App {
             if !host.apple_driver_installed {
                 ui.label("USB-драйвер Apple не найден. Установим подписанный драйвер из Zalivka — интернет и iTunes не нужны.");
             }
-            if !host.usb_network_driver_available {
-                ui.label(
-                    RichText::new("Штатный WinUSB отсутствует. Требуется восстановить системные файлы Windows.")
-                        .color(ui.visuals().error_fg_color),
-                );
-            } else if host.usb_network_interfaces.is_empty() {
-                caption(ui, "Драйвер USB-сети есть в Windows. Привязки проверятся после подключения загруженного Mac; в DFU они недоступны.");
-            } else {
-                for interface in &host.usb_network_interfaces {
-                    let status = if interface.ready {
-                        "драйвер готов"
-                    } else {
-                        "требуется подготовка"
-                    };
-                    ui.label(format!(
-                        "USB-сеть, {}, интерфейс {}: {status}",
-                        interface.serial, interface.interface,
-                    ))
-                    .on_hover_text(interface.error.as_deref().unwrap_or("WinUSB готов"));
-                }
-            }
             if host.needs_preparation() {
                 ui.add_space(6.0);
-                let label = if !host.apple_driver_installed
-                    || host.usb_network_interfaces.iter().any(|i| !i.ready)
-                {
+                let label = if !host.apple_driver_installed {
                     "Установить недостающие драйверы"
                 } else if host.apple_service_running {
                     "Остановить службу Apple"

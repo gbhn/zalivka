@@ -1,6 +1,5 @@
 //! Apple Software Restore image transfer, including validation reads and SHA-1 chunks.
 use crate::wire;
-pub use crate::wire::data_port;
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use sha1::{Digest, Sha1};

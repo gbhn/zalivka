@@ -136,8 +136,6 @@ pub(crate) fn status() -> Result<HostStatus> {
         apple_service_running: active,
         apple_driver_installed: apple_driver_installed()?,
         compatible_usb_driver,
-        usb_network_driver_available: super::ncm::available()?,
-        usb_network_interfaces: super::ncm::status()?,
     })
 }
 
@@ -244,39 +242,6 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
     crate::log!(
         Info,
         "drivers",
-        "Проверка штатного драйвера USB-сети: {}",
-        windows_directory()?.join(r"INF\winusb.inf").display()
-    );
-    ensure!(
-        super::ncm::available()?,
-        "В Windows отсутствует штатный драйвер winusb.inf. Восстановите системные файлы Windows и повторите подготовку."
-    );
-    let interfaces = super::ncm::status()?;
-    crate::log!(
-        Info,
-        "drivers",
-        "Состояние сетевых USB-интерфейсов: {}",
-        serde_json::to_string(&interfaces)?
-    );
-    let mut serials: Vec<_> = interfaces
-        .iter()
-        .filter(|i| !i.ready)
-        .map(|i| i.serial.as_str())
-        .collect();
-    serials.sort_unstable();
-    serials.dedup();
-    for serial in serials {
-        crate::log!(
-            Info,
-            "drivers",
-            "Установка сетевых USB-драйверов Mac: {serial}"
-        );
-        super::ncm::prepare(serial, false)
-            .with_context(|| format!("Подготовка Windows: USB-сеть Mac {serial}"))?;
-    }
-    crate::log!(
-        Info,
-        "drivers",
         "Итоговая проверка драйверов и службы Apple"
     );
     let host = status()?;
@@ -298,13 +263,6 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
         !host.needs_preparation(),
         "Windows не подтвердила готовность всех драйверов. Откройте диагностику USB."
     );
-    if host.usb_network_interfaces.is_empty() {
-        crate::log!(
-            Info,
-            "drivers",
-            "USB-сеть: проверка привязок будет доступна после подключения загруженного Mac."
-        );
-    }
     crate::log!(
         Info,
         "drivers",
@@ -335,13 +293,6 @@ pub(crate) fn prepare() -> Result<bool> {
             "drivers",
             "Все доступные драйверы уже готовы; повторная установка не требуется."
         );
-        if host.usb_network_interfaces.is_empty() {
-            crate::log!(
-                Info,
-                "drivers",
-                "USB-сеть: проверка привязок будет доступна после подключения загруженного Mac."
-            );
-        }
         return Ok(false);
     }
     if unsafe { IsUserAnAdmin() } != 0 {

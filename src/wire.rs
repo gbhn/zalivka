@@ -117,13 +117,6 @@ pub fn number(v: &Value) -> Result<u64> {
     bail!("expected plist integer")
 }
 
-pub fn boolean(v: &Value, path: &[&str]) -> bool {
-    get(v, path)
-        .ok()
-        .and_then(Value::as_boolean)
-        .unwrap_or(false)
-}
-
 pub fn xml(v: &Value) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     v.to_writer_xml(LimitedWriter {

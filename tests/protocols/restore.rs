@@ -124,8 +124,11 @@ fn revive_selects_only_upgrade_and_omits_formatting_options_and_boot_argument() 
         wire::string(&options, &["AuthInstallRestoreBehavior"]).unwrap(),
         "Update"
     );
-    assert!(!wire::boolean(&options, &["CreateFilesystemPartitions"]));
-    assert!(!wire::boolean(&options, &["FormatForAPFS"]));
+    assert!(!crate::test_support::boolean(
+        &options,
+        &["CreateFilesystemPartitions"]
+    ));
+    assert!(!crate::test_support::boolean(&options, &["FormatForAPFS"]));
     assert!(
         !restore::boot_arguments(&upgrade)
             .unwrap()
@@ -207,7 +210,7 @@ fn personalized_data_enables_early_iboot_dcp_and_keeps_ean_separate() {
     // restored's copy_ibfw_ean checks this key's presence before requesting
     // ImageType=IsiBootEANFirmware. Protocol compatibility alone permits its
     // absence because it is optional, silently skipping early DCP firmware.
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &restore::supported_data_types(),
         &["PersonalizedData"]
     ));
@@ -310,7 +313,7 @@ fn personalized_data_enables_early_iboot_dcp_and_keeps_ean_separate() {
             .unwrap(),
         personalized
     );
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &wire::receive(&mut replies).unwrap(),
         &["FileDataDone"]
     ));
@@ -416,7 +419,7 @@ fn untrusted_input_device_uses_img4_for_fud_and_personalized_boot_objects() {
             .as_data()
             .unwrap(),
     );
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &wire::receive(&mut replies).unwrap(),
         &["FileDataDone"]
     ));
@@ -428,7 +431,7 @@ fn untrusted_input_device_uses_img4_for_fud_and_personalized_boot_objects() {
             .unwrap(),
         bytes
     );
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &wire::receive(&mut replies).unwrap(),
         &["FileDataDone"]
     ));
@@ -520,7 +523,7 @@ fn restored_dispatch_transfers_identity_ticket_signed_boot_object_and_asr_image(
         .as_data()
         .unwrap();
     assert!(data.windows(4).any(|w| w == b"IMG4"));
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &wire::receive(&mut control).unwrap(),
         &["FileDataDone"]
     ));
@@ -665,7 +668,7 @@ fn ticket_selection_uses_request_type_with_distinct_macos_identity() {
     let (signed_ticket, _) = img4::parse(fields).unwrap();
     assert_eq!(signed_ticket.tag, 0xa0);
     assert_eq!(signed_ticket.content, normal);
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &wire::receive(&mut input).unwrap(),
         &["FileDataDone"]
     ));
@@ -1029,11 +1032,11 @@ fn optional_global_manifest_completes_without_data_but_required_manifest_must_ex
         .serve(&session, &mut main, &request(false, ""))
         .unwrap();
     let mut data = mux_output(&output, 62078);
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &wire::receive(&mut data).unwrap(),
         &["FileDataDone"]
     ));
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &wire::receive(&mut data).unwrap(),
         &["FileDataDone"]
     ));
@@ -1042,7 +1045,7 @@ fn optional_global_manifest_completes_without_data_but_required_manifest_must_ex
         wire::get(&file, &["FileData"]).unwrap().as_data().unwrap(),
         global
     );
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &wire::receive(&mut data).unwrap(),
         &["FileDataDone"]
     ));
@@ -1079,7 +1082,10 @@ fn missing_optional_recovery_assets_are_reported_for_absent_or_unmatched_identit
         let mut data = mux_output(&output, 62078);
         for _ in 0..3 {
             let reply = wire::receive(&mut data).unwrap();
-            assert!(wire::boolean(&reply, &["RecoveryOSNoAssetFound"]));
+            assert!(crate::test_support::boolean(
+                &reply,
+                &["RecoveryOSNoAssetFound"]
+            ));
             assert!(wire::get(&reply, &["AdditionalBootImages"]).is_err());
         }
     }
@@ -1108,7 +1114,7 @@ fn recovery_ticket_has_recovery_images_and_local_policy_uses_device_arguments() 
         ),
     ]);
     let policy = tss::local_policy_request(&device_info(), &ticket(), Some(&args)).unwrap();
-    assert!(wire::boolean(&policy, &["Ap,LocalBoot"]));
+    assert!(crate::test_support::boolean(&policy, &["Ap,LocalBoot"]));
     assert!(wire::get(&policy, &["ApNonce"]).is_err());
     assert_eq!(
         wire::get(&policy, &["Ap,VolumeUUID"])
@@ -1353,7 +1359,7 @@ fn macos_27_source_v5_and_device_info_preflight_use_their_service_ports() {
             .unwrap(),
         im4p(b"test")
     );
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &wire::receive(&mut source).unwrap(),
         &["FileDataDone"]
     ));
@@ -1369,8 +1375,14 @@ fn macos_27_source_v5_and_device_info_preflight_use_their_service_ports() {
     assert!(mux_output(&output, 62078).get_ref().is_empty());
     let options = restore::options(&identity()).unwrap();
     for kind in ["SourceBootObjectV5", "DeviceRestoreInfoPreflight"] {
-        assert!(wire::boolean(&options, &["SupportedDataTypes", kind]));
-        assert!(wire::boolean(&options, &["SupportedAsyncDataTypes", kind]));
+        assert!(crate::test_support::boolean(
+            &options,
+            &["SupportedDataTypes", kind]
+        ));
+        assert!(crate::test_support::boolean(
+            &options,
+            &["SupportedAsyncDataTypes", kind]
+        ));
     }
 }
 
@@ -1390,7 +1402,10 @@ fn implemented_async_data_handlers_are_advertised() {
         "SystemImageRootHash",
         "SystemImageCanonicalMetadata",
     ] {
-        assert!(wire::boolean(&options, &["SupportedAsyncDataTypes", kind]));
+        assert!(crate::test_support::boolean(
+            &options,
+            &["SupportedAsyncDataTypes", kind]
+        ));
     }
     assert!(wire::get(&options, &["SupportedAsyncDataTypes", "BasebandData"]).is_err());
     let file = fixture(None, false);
@@ -2028,7 +2043,10 @@ fn large_nor_reply_crosses_mux_windows_and_allows_the_next_checkpoint() {
         wire::string(&checkpoint, &["CHECKPOINT_NAME"]).unwrap(),
         "load_sep_os"
     );
-    assert!(wire::boolean(&checkpoint, &["CHECKPOINT_COMPLETE"]));
+    assert!(crate::test_support::boolean(
+        &checkpoint,
+        &["CHECKPOINT_COMPLETE"]
+    ));
     drop(main);
     drop(session);
     let reply = peer.join().unwrap();

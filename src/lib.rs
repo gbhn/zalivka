@@ -18,7 +18,6 @@ pub mod restore;
 pub mod storage;
 pub mod tss;
 pub mod usb;
-pub mod usb_internet;
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
@@ -30,3 +29,7 @@ pub const VERSION: &str = env!("ZALIVKA_VERSION");
 #[cfg(test)]
 #[path = "../tests/support/mux.rs"]
 mod test_mux;
+
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;

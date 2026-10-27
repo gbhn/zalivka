@@ -32,6 +32,7 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 // Progress arrives twice per second. Background work must not drive the GPU
 // at the display's refresh rate; egui still repaints immediately for user input.
 const UI_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+const NOTICE_LIFETIME: Duration = Duration::from_secs(5);
 
 fn logo_icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo.png"))
@@ -45,7 +46,6 @@ pub fn run() -> Result<()> {
                 "../assets/window-icon.png"
             ))?)
             .with_inner_size([1280.0, 900.0])
-            .with_maximized(true)
             .with_min_inner_size([480.0, 360.0]),
         ..Default::default()
     };
@@ -53,12 +53,6 @@ pub fn run() -> Result<()> {
         "Zalivka",
         options,
         Box::new(|cc| {
-            #[cfg(windows)]
-            #[allow(unsafe_code)]
-            {
-                // Detach this GUI process after window creation. CLI workers retain their pipes.
-                unsafe { windows_sys::Win32::System::Console::FreeConsole() };
-            }
             configure(&cc.egui_ctx);
             Ok(Box::new(App::new()))
         }),
@@ -89,6 +83,7 @@ struct Notice {
     title: String,
     detail: String,
     tone: Tone,
+    expires_at: Option<Instant>,
 }
 struct Confirmation {
     action: Action,
@@ -203,6 +198,7 @@ impl App {
             title: title.into(),
             detail: error.to_string(),
             tone: Tone::Error,
+            expires_at: None,
         });
     }
     fn journal_text(&self, details: bool) -> String {

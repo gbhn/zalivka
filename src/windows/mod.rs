@@ -29,7 +29,6 @@ type Ioctl = unsafe extern "system" fn(
 ) -> i32;
 
 pub(crate) mod apple;
-pub(crate) mod ncm;
 pub(crate) mod negotiate;
 mod package;
 pub(crate) mod proxy;

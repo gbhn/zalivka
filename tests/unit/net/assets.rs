@@ -86,7 +86,7 @@ fn get_and_post_forward_headers_binary_body_and_http_error_responses() {
                 .unwrap(),
             b"denied"
         );
-        assert!(wire::boolean(&reply, &["ResponseBodyDone"]));
+        assert!(crate::test_support::boolean(&reply, &["ResponseBodyDone"]));
         assert_eq!(
             wire::string(&reply, &["ResponseHeaders", "x-fixture"]).unwrap(),
             "yes"

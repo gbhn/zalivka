@@ -12,7 +12,6 @@ pub(super) enum Action {
     Doctor,
     PrepareWindows,
     ResetDrivers,
-    UsbInternet,
 }
 
 impl Action {
@@ -25,7 +24,6 @@ impl Action {
             Self::Doctor => "Диагностика USB",
             Self::PrepareWindows => "Подготовка Windows",
             Self::ResetDrivers => "Сброс USB-драйверов Apple",
-            Self::UsbInternet => "Интернет по USB",
         }
     }
     pub(super) fn command(self) -> &'static str {
@@ -36,7 +34,6 @@ impl Action {
             Self::Verify => "verify",
             Self::Doctor => "doctor",
             Self::PrepareWindows | Self::ResetDrivers => "drivers",
-            Self::UsbInternet => "usb-internet",
         }
     }
     pub(super) fn completed_title(self) -> &'static str {
@@ -48,7 +45,6 @@ impl Action {
             Self::Doctor => "Диагностика завершена",
             Self::PrepareWindows => "Подготовка Windows завершена",
             Self::ResetDrivers => "Сброс USB-драйверов завершён",
-            Self::UsbInternet => "Раздача интернета по USB остановлена",
         }
     }
     pub(super) fn writes_device(self) -> bool {
@@ -63,7 +59,6 @@ pub(super) struct Setup {
     pub(super) cache: String,
     pub(super) tokens: String,
     pub(super) connect_data: String,
-    pub(super) share_internet: bool,
 }
 
 impl Default for Setup {
@@ -75,7 +70,6 @@ impl Default for Setup {
             cache: String::new(),
             tokens: String::new(),
             connect_data: String::new(),
-            share_internet: false,
         }
     }
 }
@@ -97,10 +91,6 @@ impl Setup {
         transcript: Option<&Path>,
     ) -> Result<Vec<OsString>> {
         let mut args = vec![action.command().into()];
-        if action == Action::UsbInternet {
-            args.push("share".into());
-            return Ok(args);
-        }
         if action == Action::PrepareWindows {
             args.push("prepare".into());
             return Ok(args);
@@ -128,9 +118,6 @@ impl Setup {
             args.push("--experimental".into());
             if action == Action::Restore {
                 args.push("--erase".into());
-                if self.share_internet {
-                    args.push("--share-internet".into());
-                }
             }
             if let Some(path) = transcript {
                 args.extend(["--transcript".into(), path.as_os_str().into()]);

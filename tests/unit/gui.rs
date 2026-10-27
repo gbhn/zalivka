@@ -27,13 +27,31 @@ fn render_app(app: &mut App, ctx: &egui::Context, frame: u32) -> egui::FullOutpu
 }
 
 #[test]
+fn startup_keeps_a_normal_window_and_clears_with_the_selected_background() {
+    for preference in [egui::ThemePreference::Light, egui::ThemePreference::Dark] {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        theme::apply_preference(&ctx, preference);
+        let mut app = App::new();
+        app.scanning = true;
+        for frame in 0..3 {
+            let output = render_app(&mut app, &ctx, frame);
+            let maximizes = output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::Maximized(_)));
+            assert!(!maximizes, "{preference:?}, frame {frame}");
+            let visuals = ctx.style().visuals.clone();
+            let clear = eframe::App::clear_color(&app, &visuals);
+            assert_eq!(clear, visuals.panel_fill.to_normalized_gamma_f32());
+            assert_eq!(clear[3], 1.0);
+        }
+    }
+}
+
+#[test]
 fn active_operations_wait_for_updates_instead_of_redrawing_at_monitor_refresh_rate() {
-    for action in [
-        Action::Restore,
-        Action::Download,
-        Action::Verify,
-        Action::UsbInternet,
-    ] {
+    for action in [Action::Restore, Action::Download, Action::Verify] {
         for fraction in [None, Some(0.5)] {
             let mut app = App::new();
             let mut job = job(action);
@@ -267,26 +285,12 @@ fn disconnected_or_recovery_target_blocks_a_write() {
         apple_service_running: false,
         apple_driver_installed: true,
         compatible_usb_driver: false,
-        usb_network_driver_available: true,
-        usb_network_interfaces: vec![],
     }));
     app.setup.ecid = "2a".into();
     assert!(app.blocked_reason().is_some());
     app.devices.push(device(42, Mode::Recovery));
     assert!(app.blocked_reason().is_some());
     app.devices[0].mode = Mode::Dfu;
-    assert!(app.blocked_reason().is_none());
-    if let Ok(Some(host)) = &mut app.host {
-        host.usb_network_interfaces
-            .push(drivers::UsbNetworkInterfaceStatus {
-                serial: "TEST".into(),
-                interface: 1,
-                instance_id: "TEST_MI_01".into(),
-                ready: false,
-                error: Some("WinUSB is missing".into()),
-            });
-        assert!(host.needs_preparation());
-    }
     assert!(app.blocked_reason().is_none());
     app.setup.automatic = false;
     assert!(app.blocked_reason().is_some());
@@ -301,8 +305,6 @@ fn windows_conflicts_and_failed_checks_block_restore_before_worker_start() {
         apple_service_running: true,
         apple_driver_installed: true,
         compatible_usb_driver: false,
-        usb_network_driver_available: true,
-        usb_network_interfaces: vec![],
     };
     app.host = Ok(Some(host.clone()));
     app.start(Action::Revive, &egui::Context::default());
@@ -458,7 +460,7 @@ fn failed_journal_writes_keep_worker_state_and_report_partial_logging() {
     );
     assert_eq!(app.logs[1].message, "next record");
     send_worker(&mut app, progress::Event::RestoreCompleted);
-    assert!(app.job.as_ref().unwrap().can_stop());
+    assert!(!app.job.as_ref().unwrap().can_stop());
     for _ in 0..2 {
         app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
     }
@@ -467,6 +469,7 @@ fn failed_journal_writes_keep_worker_state_and_report_partial_logging() {
     assert_eq!(notice.title, Action::Restore.completed_title());
     assert_eq!(notice.tone, Tone::Neutral);
     assert!(notice.detail.contains("Журнал на диске неполный"));
+    assert!(notice.expires_at.is_none());
     assert!(std::fs::read(log.path()).unwrap().is_empty());
 }
 
@@ -489,6 +492,7 @@ fn a_failure_writing_the_final_record_cannot_report_a_complete_journal() {
     assert_eq!(notice.title, Action::Verify.completed_title());
     assert_eq!(notice.tone, Tone::Neutral);
     assert!(notice.detail.contains("Журнал на диске неполный"));
+    assert!(notice.expires_at.is_none());
 }
 
 #[test]
@@ -551,9 +555,11 @@ fn exited_worker_keeps_final_lines_until_both_readers_finish() {
         .send(Event::Worker(
             7,
             Output::parse(
-                worker_line(progress::Event::InternetUnavailable {
-                    error: "disconnected".into(),
-                }),
+                worker_line(progress::Event::Log(Record::new(
+                    Level::Warning,
+                    "test",
+                    "final worker message",
+                ))),
                 true,
             ),
         ))
@@ -562,34 +568,27 @@ fn exited_worker_keeps_final_lines_until_both_readers_finish() {
     app.poll(&ctx);
     assert!(app.job.is_none());
     let notice = app.notice.as_ref().unwrap();
-    assert_eq!(notice.tone, Tone::Neutral);
-    assert_eq!(notice.detail, "disconnected");
+    assert_eq!(notice.tone, Tone::Success);
+    assert_eq!(notice.title, Action::Restore.completed_title());
+    assert_eq!(notice.detail, "Проверьте запуск Mac.");
     assert!(
         std::fs::read_to_string(log.path())
             .unwrap()
-            .contains("disconnected")
+            .contains("final worker message")
     );
 }
 
 #[test]
 fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
     let mut job = job(Action::Restore);
-    job.output(Output::State(progress::Event::InternetUnavailable {
-        error: "no network".into(),
-    }));
     job.cancelled = true;
     for success in [false, true] {
         let notice = job.completion_notice(success, true);
         assert_eq!(notice.title, "Операция остановлена");
+        assert!(notice.detail.is_empty());
         assert_eq!(notice.tone, Tone::Neutral);
+        assert!(notice.expires_at.is_some());
     }
-    job.restore_completed = true;
-    let notice = job.completion_notice(false, true);
-    assert_eq!(
-        notice.title,
-        "Восстановление завершено, раздача остановлена"
-    );
-    assert_eq!(notice.tone, Tone::Neutral);
     job.action = Action::Revive;
     assert_eq!(
         job.completion_notice(false, true).title,
@@ -605,34 +604,66 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
         let notice = job.completion_notice(false, true);
         assert_eq!(notice.tone, Tone::Error);
         assert!(notice.title.ends_with(": ошибка"));
+        assert!(notice.expires_at.is_none());
     }
     let notice = job.completion_notice(true, true);
     assert_eq!(notice.title, "Перезагрузите Windows");
     assert_eq!(notice.tone, Tone::Neutral);
-    job.action = Action::Restore;
-    let notice = job.completion_notice(true, true);
-    assert_eq!(notice.detail, "no network");
-    assert_eq!(notice.tone, Tone::Neutral);
-    job.output(Output::State(progress::Event::InternetReady));
+    assert!(notice.expires_at.is_none());
     for action in [
         Action::Restore,
         Action::Revive,
         Action::Download,
-        Action::UsbInternet,
+        Action::Verify,
+        Action::Doctor,
+        Action::PrepareWindows,
+        Action::ResetDrivers,
     ] {
         job.action = action;
-        let notice = job.completion_notice(true, true);
+        let notice = job.completion_notice(true, false);
         assert_eq!(notice.title, action.completed_title());
         assert_eq!(notice.tone, Tone::Success);
-        assert_eq!(
-            notice.detail.contains("Проверьте запуск Mac"),
-            action.writes_device()
-        );
+        assert!(notice.expires_at.is_some());
+        let expected_detail = match action {
+            Action::Restore | Action::Revive => "Проверьте запуск Mac.",
+            Action::ResetDrivers => "Подключите Mac заново и введите его в DFU.",
+            _ => "",
+        };
+        assert_eq!(notice.detail, expected_detail);
     }
 }
 
 #[test]
-fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore() {
+fn completion_records_label_duration_without_adding_it_to_notifications() {
+    for (action, expected_detail, expected_record) in [
+        (
+            Action::ResetDrivers,
+            "Подключите Mac заново и введите его в DFU.",
+            "Сброс USB-драйверов завершён. Длительность: 00:00:01. Подключите Mac заново и введите его в DFU.",
+        ),
+        (Action::Verify, "", "IPSW проверен. Длительность: 00:00:01."),
+    ] {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let mut operation = job(action);
+        operation.log = log.reopen().unwrap();
+        operation.started = Instant::now() - Duration::from_secs(1);
+        let mut app = App::new();
+        app.job = Some(operation);
+        for _ in 0..2 {
+            app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
+        }
+        app.poll(&egui::Context::default());
+        assert!(app.job.is_none());
+        assert_eq!(app.notice.as_ref().unwrap().detail, expected_detail);
+        assert_eq!(app.logs.back().unwrap().message, expected_record);
+        let saved = std::fs::read_to_string(log.path()).unwrap();
+        assert!(saved.contains(expected_record));
+        assert_eq!(saved.lines().count(), 1);
+    }
+}
+
+#[test]
+fn worker_state_survives_journal_eviction_and_protects_restore_from_stopping() {
     let mut app = App::new();
     app.job = Some(job(Action::Restore));
     assert!(!app.job.as_ref().unwrap().can_stop());
@@ -677,33 +708,17 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
     );
     assert_eq!(app.job.as_ref().unwrap().phase, "Этап: update firmware");
     send_worker(&mut app, progress::Event::RestoreCompleted);
-    send_worker(&mut app, progress::Event::InternetWaiting);
-    assert!(app.job.as_ref().unwrap().can_stop());
-    send_worker(&mut app, progress::Event::InternetPreparing);
-    assert!(!app.job.as_ref().unwrap().can_stop());
-    send_worker(&mut app, progress::Event::InternetReady);
-    assert!(app.job.as_ref().unwrap().can_stop());
-    assert_eq!(
-        app.job.as_ref().unwrap().phase,
-        "Интернет по USB, оставьте Zalivka открытой"
-    );
-    send_worker(
-        &mut app,
-        progress::Event::InternetUnavailable {
-            error: "no network".into(),
-        },
-    );
     for index in 0..4001 {
         app.journal_line(Record::new(Level::Info, "test", format!("message {index}")));
     }
     assert_eq!(app.logs.len(), 4000);
     let job = app.job.as_mut().unwrap();
-    assert_eq!(job.completion_notice(true, false).detail, "no network");
-    job.cancelled = true;
     assert_eq!(
-        job.completion_notice(false, false).title,
-        "Восстановление завершено, раздача остановлена"
+        job.completion_notice(true, false).detail,
+        "Проверьте запуск Mac."
     );
+    assert!(!job.can_stop());
+    assert!(job.stop().is_err());
     job.action = Action::PrepareWindows;
     job.cancelled = false;
     assert!(!job.can_stop());
@@ -756,19 +771,14 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
     assert!(!app.job.as_ref().unwrap().transfers.contains_key(&1));
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, None);
     send_worker(&mut app, progress::Event::RestoreCompleted);
-    send_worker(&mut app, progress::Event::InternetWaiting);
-    send_worker(&mut app, progress::Event::InternetReady);
     let line = worker_line(progress::Event::Transfer(update));
     app.tx
         .send(Event::Worker(7, Output::parse(line.clone(), false)))
         .unwrap();
     app.poll(&egui::Context::default());
     assert!(app.job.as_ref().unwrap().transfers.is_empty());
-    assert!(app.job.as_ref().unwrap().can_stop());
-    assert_eq!(
-        app.job.as_ref().unwrap().phase,
-        "Интернет по USB, оставьте Zalivka открытой"
-    );
+    assert!(!app.job.as_ref().unwrap().can_stop());
+    assert_eq!(app.job.as_ref().unwrap().phase, "Восстановление завершено");
     assert_eq!(app.logs.back().unwrap().message, line);
 }
 
@@ -990,14 +1000,6 @@ fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.99));
     send_worker(&mut app, progress::Event::RestoreCompleted);
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(1.0));
-    for event in [
-        progress::Event::InternetWaiting,
-        progress::Event::InternetPreparing,
-        progress::Event::InternetReady,
-    ] {
-        send_worker(&mut app, event);
-        assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(1.0));
-    }
 }
 
 #[test]
@@ -1247,36 +1249,6 @@ fn saving_a_journal_through_a_hard_link_preserves_the_active_source() {
 }
 
 #[test]
-fn failed_network_preparation_releases_stop_and_clears_stale_progress() {
-    let mut app = App::new();
-    app.job = Some(job(Action::Restore));
-    assert!(app.job.as_mut().unwrap().stop().is_err());
-    assert!(!app.job.as_ref().unwrap().cancelled);
-    send_worker(&mut app, progress::Event::RestoreCompleted);
-    send_worker(&mut app, progress::Event::InternetPreparing);
-    assert!(!app.job.as_ref().unwrap().can_stop());
-    send_worker(
-        &mut app,
-        progress::Event::InternetUnavailable {
-            error: "UAC cancelled".into(),
-        },
-    );
-    let operation = app.job.as_ref().unwrap();
-    assert!(operation.can_stop());
-    assert_eq!(operation.phase, "Интернет по USB недоступен");
-    assert!(operation.transfers.is_empty());
-    assert_eq!(
-        operation.completion_notice(true, false).detail,
-        "UAC cancelled"
-    );
-
-    send_worker(&mut app, progress::Event::InternetWaiting);
-    send_worker(&mut app, progress::Event::InternetReady);
-    let operation = app.job.as_ref().unwrap();
-    assert_eq!(operation.completion_notice(true, false).tone, Tone::Success);
-}
-
-#[test]
 fn dialogs_stay_open_and_escape_cancels_without_starting_a_job() {
     for (theme, action) in [egui::Theme::Dark, egui::Theme::Light]
         .into_iter()
@@ -1421,6 +1393,122 @@ fn visible_text_rect(output: &egui::FullOutput, value: &str) -> Option<egui::Rec
 }
 
 #[test]
+fn ordinary_notifications_expire_after_five_seconds_and_replacements_restart_the_timer() {
+    let ctx = egui::Context::default();
+    configure(&ctx);
+    let mut app = App::new();
+    app.scanning = true;
+    let before = Instant::now();
+    app.tx
+        .send(Event::Saved(Ok(PathBuf::from("first.log"))))
+        .unwrap();
+    let mut output = egui::FullOutput::default();
+    for frame in 0..12 {
+        output = render_app(&mut app, &ctx, frame);
+    }
+    let deadline = app.notice.as_ref().unwrap().expires_at.unwrap();
+    assert!(deadline >= before + Duration::from_secs(5));
+    assert!(deadline <= Instant::now() + Duration::from_secs(5));
+    assert!(
+        output.viewport_output[&egui::ViewportId::ROOT].repaint_delay >= Duration::from_millis(400),
+        "waiting for notification expiry must not cause continuous redraws"
+    );
+
+    app.notice.as_mut().unwrap().expires_at = Some(Instant::now());
+    let _ = render_app(&mut app, &ctx, 12);
+    assert!(app.notice.is_none());
+
+    for (frame, path) in [(13, "second.log"), (14, "third.log")] {
+        let before = Instant::now();
+        app.tx.send(Event::Saved(Ok(PathBuf::from(path)))).unwrap();
+        let _ = render_app(&mut app, &ctx, frame);
+        let notice = app.notice.as_mut().unwrap();
+        assert_eq!(notice.detail, path);
+        let deadline = notice.expires_at.unwrap();
+        assert!(deadline >= before + Duration::from_secs(5));
+        assert!(deadline <= Instant::now() + Duration::from_secs(5));
+        notice.expires_at = Some(Instant::now());
+    }
+
+    app.error("Ошибка", "Критическое сообщение");
+    for frame in 15..18 {
+        let _ = render_app(&mut app, &ctx, frame);
+        let notice = app.notice.as_ref().unwrap();
+        assert_eq!(notice.tone, Tone::Error);
+        assert!(notice.expires_at.is_none());
+    }
+}
+
+#[test]
+fn notifications_keep_content_in_place_and_their_actions_work_in_small_windows() {
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        for size in [egui::vec2(1280.0, 900.0), egui::vec2(480.0, 360.0)] {
+            let ctx = egui::Context::default();
+            configure(&ctx);
+            ctx.set_theme(theme);
+            let mut app = App::new();
+            app.journal_line(Record::new(Level::Error, "test", "Подробности ошибки"));
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let baseline = ctx.run(input.clone(), |ctx| app.view(ctx));
+            let heading = visible_text_rect(&baseline, "Восстановление Mac").unwrap();
+            for tone in [Tone::Neutral, Tone::Success, Tone::Error] {
+                app.notice = Some(Notice {
+                    title: "Уведомление".into(),
+                    detail: "Подробности сообщения. ".repeat(50),
+                    tone,
+                    expires_at: None,
+                });
+                let mut output = egui::FullOutput::default();
+                for _ in 0..3 {
+                    output = ctx.run(input.clone(), |ctx| app.view(ctx));
+                }
+                assert_eq!(
+                    visible_text_rect(&output, "Восстановление Mac"),
+                    Some(heading)
+                );
+                for label in ["Уведомление", "×"] {
+                    let rect = visible_text_rect(&output, label)
+                        .unwrap_or_else(|| panic!("{label} clipped at {size:?}, {theme:?}"));
+                    assert!(screen.contains_rect(rect));
+                }
+                let click = |pos| egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..input.clone()
+                };
+                if tone == Tone::Error {
+                    let pos = visible_text_rect(&output, "Открыть журнал")
+                        .unwrap()
+                        .center();
+                    output = ctx.run(click(pos), |ctx| app.view(ctx));
+                    assert!(app.journal_open);
+                }
+                let pos = visible_text_rect(&output, "×").unwrap().center();
+                let _ = ctx.run(click(pos), |ctx| app.view(ctx));
+                assert!(app.notice.is_none());
+            }
+        }
+    }
+}
+
+#[test]
 fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_open() {
     for size in [
         egui::vec2(1020.0, 630.0),
@@ -1436,8 +1524,6 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
             apple_service_running: false,
             apple_driver_installed: false,
             compatible_usb_driver: false,
-            usb_network_driver_available: true,
-            usb_network_interfaces: vec![],
         }));
         for _ in 0..20 {
             app.journal_line(Record::new(Level::Error, "test", "Проверка журнала"));
@@ -1665,35 +1751,6 @@ fn small_dialogs_scroll_to_their_controls() {
         assert!(action.is_some() || compact_folder_row);
         assert!(app.job.is_none());
     }
-}
-
-#[test]
-fn usb_internet_can_start_without_dfu_or_firmware_and_only_follows_erase_restore() {
-    let mut setup = Setup::default();
-    assert_eq!(
-        setup.arguments(Action::UsbInternet, None).unwrap(),
-        vec![OsString::from("usb-internet"), OsString::from("share")]
-    );
-    setup.ecid = "2a".into();
-    setup.share_internet = true;
-    assert!(
-        setup
-            .arguments(Action::Restore, None)
-            .unwrap()
-            .contains(&OsString::from("--share-internet"))
-    );
-    assert!(
-        !setup
-            .arguments(Action::Revive, None)
-            .unwrap()
-            .contains(&OsString::from("--share-internet"))
-    );
-    assert!(
-        !setup
-            .arguments(Action::Download, None)
-            .unwrap()
-            .contains(&OsString::from("--share-internet"))
-    );
 }
 
 fn firmware_card_text(app: &mut App, ctx: &egui::Context) -> String {

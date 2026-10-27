@@ -93,7 +93,6 @@ fn verify_bundle_payload(payload: &[u8], digest: &[u8]) -> Result<()> {
 pub(super) struct FtabEntry {
     pub(super) tag: [u8; 4],
     pub(super) range: Range<u64>,
-    padding: u32,
 }
 
 /// Validate the complete index before either hashing ranges or copying payloads.
@@ -121,7 +120,6 @@ pub(super) fn ftab_index(bytes: &[u8], length: u64) -> Result<Vec<FtabEntry>> {
         entries.push(FtabEntry {
             tag,
             range: offset..offset + size,
-            padding: u32::from_le_bytes(row[12..16].try_into()?),
         });
     }
     let mut ranges: Vec<_> = entries.iter().map(|entry| &entry.range).collect();
@@ -215,52 +213,6 @@ fn uarp_ranges(prefix: &[u8], length: u64) -> Result<Vec<Range<u64>>> {
         "overlapping UARP payloads"
     );
     Ok(ranges)
-}
-
-/// FTAB stores a 48-byte header, followed by 16-byte index entries and payloads.
-pub struct Ftab {
-    pub header: [u8; 48],
-    pub entries: Vec<([u8; 4], Vec<u8>, u32)>,
-}
-impl Ftab {
-    pub fn parse(bytes: &[u8]) -> Result<Self> {
-        let entries = ftab_index(bytes, bytes.len() as u64)?;
-        Ok(Self {
-            header: bytes[..48].try_into()?,
-            // Validate the entire index before copying any firmware payload.
-            entries: entries
-                .into_iter()
-                .map(|entry| {
-                    (
-                        entry.tag,
-                        bytes[entry.range.start as usize..entry.range.end as usize].to_vec(),
-                        entry.padding,
-                    )
-                })
-                .collect(),
-        })
-    }
-    pub fn encode(&self) -> Result<Vec<u8>> {
-        ensure!(&self.header[36..40] == b"ftab", "invalid FTAB header");
-        ensure!(self.entries.len() <= 65536, "too many FTAB entries");
-        let index_end = 48 + self.entries.len() * 16;
-        let mut output = self.header.to_vec();
-        output[40..44].copy_from_slice(&(self.entries.len() as u32).to_le_bytes());
-        output.resize(index_end, 0);
-        let mut seen = HashSet::new();
-        for (i, (tag, data, padding)) in self.entries.iter().enumerate() {
-            ensure!(seen.insert(tag), "duplicate FTAB tag");
-            let offset = u32::try_from(output.len())?;
-            let size = u32::try_from(data.len())?;
-            let position = 48 + i * 16;
-            output[position..position + 4].copy_from_slice(tag);
-            output[position + 4..position + 8].copy_from_slice(&offset.to_le_bytes());
-            output[position + 8..position + 12].copy_from_slice(&size.to_le_bytes());
-            output[position + 12..position + 16].copy_from_slice(&padding.to_le_bytes());
-            output.extend_from_slice(data);
-        }
-        Ok(output)
-    }
 }
 
 #[cfg(test)]

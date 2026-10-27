@@ -1,4 +1,4 @@
-//! TCP tunnels shared by FDR and USB forwarding, with blocking and polling I/O.
+//! Blocking TCP tunnels for FDR, including HTTP, HTTPS and SOCKS proxies.
 use anyhow::{Context, Result, bail, ensure};
 #[cfg(any(not(windows), test))]
 use rustls::RootCertStore;
@@ -7,45 +7,24 @@ use rustls::{ClientConfig, ClientConnection, StreamOwned, pki_types::ServerName}
 use std::sync::OnceLock;
 use std::{
     io::{self, Read, Write},
-    net::{IpAddr, Shutdown, TcpStream, ToSocketAddrs},
+    net::{IpAddr, TcpStream, ToSocketAddrs},
     sync::Arc,
     time::{Duration, Instant},
 };
 use ureq::{Proxy, ProxyProtocol};
 
-const TIMEOUT: Duration = Duration::from_secs(10);
 enum Transport {
     Tcp(TcpStream),
     Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
 }
 pub(crate) struct Stream {
     transport: Transport,
-    shutdown_pending: bool,
-    write_closed: bool,
 }
 impl Stream {
     fn tcp(&self) -> &TcpStream {
         match &self.transport {
             Transport::Tcp(s) => s,
             Transport::Tls(s) => &s.sock,
-        }
-    }
-    pub(crate) fn shutdown_write(&mut self) -> io::Result<()> {
-        if self.write_closed {
-            return Ok(());
-        }
-        if !self.shutdown_pending {
-            self.shutdown_pending = true;
-            if let Transport::Tls(s) = &mut self.transport {
-                s.conn.send_close_notify();
-            }
-        }
-        self.flush()
-    }
-    pub(crate) fn poll(&mut self) -> io::Result<()> {
-        match self.flush() {
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
-            result => result,
         }
     }
 }
@@ -62,13 +41,6 @@ impl Read for Stream {
 }
 impl Write for Stream {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.shutdown_pending || self.write_closed {
-            return if bytes.is_empty() {
-                Ok(0)
-            } else {
-                Err(io::ErrorKind::BrokenPipe.into())
-            };
-        }
         match &mut self.transport {
             Transport::Tcp(s) => s.write(bytes),
             Transport::Tls(s) => s.write(bytes),
@@ -76,15 +48,9 @@ impl Write for Stream {
     }
     fn flush(&mut self) -> io::Result<()> {
         match &mut self.transport {
-            Transport::Tcp(s) => s.flush()?,
-            Transport::Tls(s) => s.flush()?,
+            Transport::Tcp(s) => s.flush(),
+            Transport::Tls(s) => s.flush(),
         }
-        if self.shutdown_pending {
-            self.tcp().shutdown(Shutdown::Write)?;
-            self.shutdown_pending = false;
-            self.write_closed = true;
-        }
-        Ok(())
     }
 }
 
@@ -114,10 +80,6 @@ fn tls_config() -> Result<Arc<ClientConfig>> {
     }
 }
 
-pub(crate) fn connect(host: &str, port: u16) -> Result<Stream> {
-    let uri = super::target_uri(host, port)?;
-    connect_via(host, port, super::for_url(&uri)?)
-}
 fn socket_host(host: &str) -> &str {
     host.strip_prefix('[')
         .and_then(|host| host.strip_suffix(']'))
@@ -150,16 +112,7 @@ fn tcp_connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
         .unwrap_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "upstream connection timed out"))
         .into())
 }
-pub(crate) fn connect_via(host: &str, port: u16, proxy: Option<Proxy>) -> Result<Stream> {
-    let mut stream = open(host, port, proxy, TIMEOUT)?;
-    stream.tcp().set_read_timeout(None)?;
-    stream.tcp().set_write_timeout(None)?;
-    stream.tcp().set_nonblocking(true)?;
-    stream.poll()?;
-    Ok(stream)
-}
-
-pub(super) fn connect_blocking(host: &str, port: u16, proxy: Option<Proxy>) -> Result<Stream> {
+pub(crate) fn connect_blocking(host: &str, port: u16, proxy: Option<Proxy>) -> Result<Stream> {
     let stream = open(host, port, proxy, Duration::from_secs(30))?;
     stream
         .tcp()
@@ -192,8 +145,6 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
         crate::log!(Debug, "proxy", "Прямое соединение с {host}:{port}");
         Stream {
             transport: Transport::Tcp(tcp_connect(host, port, timeout)?),
-            shutdown_pending: false,
-            write_closed: false,
         }
     };
     stream.flush()?;
@@ -208,11 +159,7 @@ fn proxy_stream(proxy: &Proxy, timeout: Duration) -> Result<Stream> {
     } else {
         Transport::Tcp(tcp)
     };
-    Ok(Stream {
-        transport,
-        shutdown_pending: false,
-        write_closed: false,
-    })
+    Ok(Stream { transport })
 }
 
 impl super::connect::Connection for Stream {

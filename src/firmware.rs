@@ -5,7 +5,7 @@ mod request;
 use crate::{device::DeviceInfo, ipsw::Identity, wire};
 use anyhow::{Context, Result};
 pub use canary::canary_response;
-pub use containers::{Ftab, payload_ranges};
+pub use containers::payload_ranges;
 pub(crate) use containers::{MAX_PLIST_BUNDLE, plist_prefix, verify_plist_bundle};
 use plist::Value;
 use std::io::Write;

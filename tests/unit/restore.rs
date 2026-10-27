@@ -24,10 +24,10 @@ fn reconnection_rechecks_hardware_and_security_before_sending_firmware() {
         assert!(super::boot::validate_reconnected_device(&device, &changed).is_err());
     }
 }
+use crate::dfu;
 use crate::mux::Session;
 use crate::mux::{self, PacketTransport};
 use crate::test_mux::{self, version_packet};
-use crate::{asr, dfu};
 use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
@@ -107,7 +107,7 @@ fn data_ports_require_explicit_asr_ports_and_keep_all_bounds() {
                     .unwrap()
                     .insert("DataPort".into(), port);
             }
-            let explicit = asr::data_port(&message, 0).unwrap();
+            let explicit = wire::data_port(&message, 0).unwrap();
             let required = matches!(kind, DataType::Asr | DataType::RecoveryAsr);
             if required && explicit == 0 {
                 assert!(kind.data_port(&message, false).is_err());
@@ -937,7 +937,7 @@ fn verify_file_data(output: &Arc<Mutex<Vec<Vec<u8>>>>, image: &[u8]) -> usize {
     let mut frames = 0;
     loop {
         let message = wire::receive(&mut input).unwrap();
-        if wire::boolean(&message, &["FileDataDone"]) {
+        if crate::test_support::boolean(&message, &["FileDataDone"]) {
             break;
         }
         let data = wire::get(&message, &["FileData"])
@@ -1577,7 +1577,7 @@ fn aea_async_asset_replies_use_the_requested_ports_and_image_transfer_continues(
             expected
         );
     }
-    assert!(wire::boolean(
+    assert!(crate::test_support::boolean(
         &wire::receive(&mut input).unwrap(),
         &["FileDataDone"]
     ));

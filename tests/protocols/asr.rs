@@ -188,14 +188,14 @@ fn asr_repeated_initiate_preserves_or_updates_checksum_mode() {
 #[test]
 fn asr_uses_default_for_zero_port_and_rejects_invalid_port() {
     assert_eq!(
-        asr::data_port(&wire::dict([("DataPort", 0u64.into())]), 12345).unwrap(),
+        wire::data_port(&wire::dict([("DataPort", 0u64.into())]), 12345).unwrap(),
         12345
     );
     assert_eq!(
-        asr::data_port(&wire::dict([("DataPort", 4567u64.into())]), 12345).unwrap(),
+        wire::data_port(&wire::dict([("DataPort", 4567u64.into())]), 12345).unwrap(),
         4567
     );
-    assert!(asr::data_port(&wire::dict([("DataPort", 65536u64.into())]), 12345).is_err());
+    assert!(wire::data_port(&wire::dict([("DataPort", 65536u64.into())]), 12345).is_err());
 }
 
 #[test]

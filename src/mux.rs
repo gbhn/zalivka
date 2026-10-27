@@ -5,7 +5,7 @@ use crate::usb::MuxUsb;
 use anyhow::{Context, Result, ensure};
 use bytes::{Bytes, BytesMut};
 use packet::encode_header;
-pub use packet::{Packet, decode_packet, encode_packet};
+pub use packet::{Packet, decode_packet};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{

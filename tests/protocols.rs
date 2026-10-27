@@ -20,6 +20,8 @@ use zalivka::{
 
 #[path = "support/mux.rs"]
 mod test_mux;
+#[path = "support/mod.rs"]
+mod test_support;
 use test_mux::{tcp, version_packet};
 
 #[path = "protocols/asr.rs"]

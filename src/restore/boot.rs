@@ -1,5 +1,5 @@
 //! iBoot preparation and the explicitly requested RAM-only boot-state probe.
-use super::{ContextState, options::behavior_boot_arguments};
+use super::{ContextState, options::boot_arguments};
 use crate::{
     device::{DeviceInfo, Mode},
     dfu, img4,
@@ -63,7 +63,7 @@ pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>>
     steps.extend([
         IBootStep::Command("setenv auto-boot false"),
         IBootStep::Command("saveenv"),
-        IBootStep::Command(behavior_boot_arguments(id.behavior()?)),
+        IBootStep::Command(boot_arguments(id)?),
     ]);
     for tag in [b"ibdt", b"rdcp"] {
         if let Some(priority) = id.component_by_type(tag)?

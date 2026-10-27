@@ -171,13 +171,9 @@ pub fn options(id: &Identity) -> Result<Value> {
 }
 
 pub fn boot_arguments(id: &Identity) -> Result<&'static str> {
-    Ok(behavior_boot_arguments(id.behavior()?))
-}
-
-pub(super) fn behavior_boot_arguments(behavior: Behavior) -> &'static str {
-    if behavior == Behavior::Update {
+    Ok(if id.behavior()? == Behavior::Update {
         "setenvnp boot-args rd=md0 -progress -restore"
     } else {
         "setenvnp boot-args rd=md0 nand-enable-reformat=1 -progress -restore"
-    }
+    })
 }

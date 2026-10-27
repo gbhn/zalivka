@@ -345,8 +345,6 @@ pub(super) fn run(
             }
         })();
         match outcome {
-            // Returning releases the restore channels before the caller starts
-            // USB networking. A booted Mac need not advertise its DFU ECID.
             Ok(()) => return Ok(()),
             Err(error) if !final_received && session.disconnected() && attempt < 3 => {
                 session.cancel();

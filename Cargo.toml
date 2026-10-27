@@ -16,7 +16,6 @@ asn1-rs = "0.7"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1.5"
-domain = { version = "0.12", default-features = false, features = ["std"] }
 fs4 = { version = "1.1", default-features = false }
 hex = "0.4"
 oxiri = "0.3"
@@ -38,7 +37,6 @@ uuid = { version = "1", features = ["v4"] }
 oxitls-rustcrypto-provider = "0.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
-smoltcp = { version = "=0.12.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-tcp", "socket-udp"] }
 eframe = { version = "=0.33.3", optional = true, default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 rfd = { version = "0.17.2", optional = true }
 
@@ -52,7 +50,7 @@ cab = "0.6"
 rustls-platform-verifier = { version = "0.7", default-features = false }
 ureq = { version = "3.4", default-features = false, features = ["platform-verifier"] }
 windows-service = "0.8"
-windows-sys = { version = "0.61", features = ["Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_Devices_Usb", "Win32_Foundation", "Win32_Networking_WinHttp", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_Security_Credentials", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_Devices_Usb", "Win32_Foundation", "Win32_Networking_WinHttp", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_Security_Credentials", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
 sha2 = "0.10"
