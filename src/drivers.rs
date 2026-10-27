@@ -75,6 +75,19 @@ pub fn prepare_windows_elevated() -> Result<bool> {
     crate::windows::setup::prepare_elevated()
 }
 
+/// Remove Apple restore device records and reinstall the signed USB package.
+pub fn reset_windows() -> Result<bool> {
+    #[cfg(windows)]
+    return crate::windows::setup::cleanup::reset();
+    #[cfg(not(windows))]
+    anyhow::bail!("Сброс USB-драйверов доступен только в Windows")
+}
+
+#[cfg(windows)]
+pub fn reset_windows_elevated(reboot: &mut bool) -> Result<()> {
+    crate::windows::setup::cleanup::reset_elevated(reboot)
+}
+
 pub fn open_installed_apps() -> Result<()> {
     #[cfg(windows)]
     return crate::windows::setup::open_installed_apps();
@@ -250,13 +263,29 @@ pub fn export(directory: &Path, pid: u16, interface: Option<u8>) -> Result<()> {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 pub fn install(inf: &Path) -> Result<bool> {
-    let inf = inf.canonicalize()?;
+    use std::{
+        io::{Read, Seek, SeekFrom},
+        time::Instant,
+    };
+    let inf = inf
+        .canonicalize()
+        .with_context(|| format!("Открытие INF: {}", inf.display()))?;
     ensure!(
         inf.extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("inf")),
         "expected a signed driver package's .inf file"
     );
-    let path = crate::windows::wide(inf);
+    let setupapi = crate::windows::windows_directory()?.join(r"INF\setupapi.dev.log");
+    let offset = std::fs::metadata(&setupapi).map(|m| m.len()).unwrap_or(0);
+    crate::log!(
+        Info,
+        "drivers",
+        "Установка подписанного драйвера: {}; API=DiInstallDriverW; flags=0; журнал Windows: {}",
+        inf.display(),
+        setupapi.display()
+    );
+    let path = crate::windows::wide(&inf);
+    let started = Instant::now();
     let mut reboot = 0;
     // Use Windows' normal signature and driver ranking enforcement. No FORCE flag.
     let ok = unsafe {
@@ -267,10 +296,73 @@ pub fn install(inf: &Path) -> Result<bool> {
             &mut reboot,
         )
     };
-    ensure!(
-        ok != 0,
-        "driver installation failed: {} (requires administrator rights and a signed package)",
-        std::io::Error::last_os_error()
+    if ok == 0 {
+        let error = std::io::Error::last_os_error();
+        let code = error.raw_os_error().unwrap_or(0) as u32;
+        crate::log!(
+            Error,
+            "drivers",
+            "DiInstallDriverW: ошибка {code} (0x{code:08X}), {error}; время={:.3} с; INF={}",
+            started.elapsed().as_secs_f64(),
+            inf.display()
+        );
+        let read_log = (|| -> Result<()> {
+            let mut file = File::open(&setupapi)?;
+            let end = file.metadata()?.len();
+            // Include only this attempt; bound memory if Windows logs heavily.
+            let start = if offset <= end { offset } else { 0 };
+            let bounded = start.max(end.saturating_sub(65536));
+            file.seek(SeekFrom::Start(bounded))?;
+            let mut bytes = Vec::new();
+            file.take(65536).read_to_end(&mut bytes)?;
+            if bytes.is_empty() {
+                crate::log!(
+                    Info,
+                    "setupapi",
+                    "Новых записей установки в {} нет",
+                    setupapi.display()
+                );
+            } else {
+                crate::log!(
+                    Info,
+                    "setupapi",
+                    "Записи установки Windows, смещение {bounded}..{end}: {}",
+                    setupapi.display()
+                );
+                // SetupAPI logs can be UTF-16LE; detect its BOM or ASCII NULs.
+                let text = if bytes.starts_with(&[0xff, 0xfe]) || bytes.get(1) == Some(&0) {
+                    let bytes = bytes.strip_prefix(&[0xff, 0xfe]).unwrap_or(&bytes);
+                    String::from_utf16_lossy(
+                        &bytes
+                            .chunks_exact(2)
+                            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    String::from_utf8_lossy(&bytes).into_owned()
+                };
+                for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                    crate::log!(Info, "setupapi", "{line}");
+                }
+            }
+            Ok(())
+        })();
+        if let Err(log_error) = read_log {
+            crate::log!(
+                Warning,
+                "setupapi",
+                "Не удалось прочитать {}: {log_error:#}",
+                setupapi.display()
+            );
+        }
+        return Err(error).with_context(|| format!("driver installation failed: DiInstallDriverW, Win32 {code} (0x{code:08X}), INF={} (requires administrator rights and a signed package)", inf.display()));
+    }
+    crate::log!(
+        Info,
+        "drivers",
+        "DiInstallDriverW: успешно за {:.3} с; требуется перезагрузка: {}",
+        started.elapsed().as_secs_f64(),
+        reboot != 0
     );
     Ok(reboot != 0)
 }

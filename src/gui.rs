@@ -44,7 +44,8 @@ pub fn run() -> Result<()> {
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!(
                 "../assets/window-icon.png"
             ))?)
-            .with_inner_size([1020.0, 800.0])
+            .with_inner_size([1280.0, 900.0])
+            .with_maximized(true)
             .with_min_inner_size([480.0, 360.0]),
         ..Default::default()
     };
@@ -354,7 +355,10 @@ impl App {
             self.error("Операция недоступна", reason);
             return;
         }
-        if matches!(action, Action::Doctor | Action::PrepareWindows) {
+        if matches!(
+            action,
+            Action::Doctor | Action::PrepareWindows | Action::ResetDrivers
+        ) {
             self.journal_open = true;
         }
         self.next_job += 1;

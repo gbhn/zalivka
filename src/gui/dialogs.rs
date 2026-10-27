@@ -195,6 +195,18 @@ impl App {
                                     "Установка недостающих драйверов и остановка службы Apple.",
                                 );
                                 ui.add_space(8.0);
+                                if ui
+                                    .add_sized(
+                                        egui::vec2(ui.available_width(), 34.0),
+                                        egui::Button::new("Сбросить USB-драйверы Apple"),
+                                    )
+                                    .clicked()
+                                {
+                                    close = true;
+                                    self.start(Action::ResetDrivers, ctx);
+                                }
+                                caption(ui, "Удаляет записи подключений DFU / Recovery / Restore, включая отключённые устройства, переустанавливает драйвер Apple и запускает поиск устройств. После сброса подключите Mac заново и введите его в DFU.");
+                                ui.add_space(8.0);
                             }
                             if ui
                                 .add_sized(

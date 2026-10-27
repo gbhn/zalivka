@@ -1,11 +1,14 @@
 //! TCP tunnels shared by FDR and USB forwarding, with blocking and polling I/O.
 use anyhow::{Context, Result, bail, ensure};
-use base64::{Engine, prelude::BASE64_STANDARD};
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned, pki_types::ServerName};
+#[cfg(any(not(windows), test))]
+use rustls::RootCertStore;
+use rustls::{ClientConfig, ClientConnection, StreamOwned, pki_types::ServerName};
+#[cfg(not(windows))]
+use std::sync::OnceLock;
 use std::{
     io::{self, Read, Write},
     net::{IpAddr, Shutdown, TcpStream, ToSocketAddrs},
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use ureq::{Proxy, ProxyProtocol};
@@ -85,22 +88,30 @@ impl Write for Stream {
     }
 }
 
-fn tls_config() -> Arc<ClientConfig> {
-    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            Arc::new(
-                ClientConfig::builder_with_provider(Arc::new(
-                    oxitls_rustcrypto_provider::provider(),
-                ))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_root_certificates(roots)
-                .with_no_client_auth(),
-            )
-        })
-        .clone()
+fn tls_config() -> Result<Arc<ClientConfig>> {
+    #[cfg(windows)]
+    {
+        crate::windows::tls::config(None)
+    }
+    #[cfg(not(windows))]
+    {
+        static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+        Ok(CONFIG
+            .get_or_init(|| {
+                let roots =
+                    RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                Arc::new(
+                    ClientConfig::builder_with_provider(Arc::new(
+                        oxitls_rustcrypto_provider::provider(),
+                    ))
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+                )
+            })
+            .clone())
+    }
 }
 
 pub(crate) fn connect(host: &str, port: u16) -> Result<Stream> {
@@ -165,18 +176,7 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
             "Соединение с {host}:{port} через прокси {:?}",
             proxy.protocol()
         );
-        let tcp = tcp_connect(proxy.host(), proxy.port(), timeout)
-            .context("connecting configured proxy")?;
-        let transport = if proxy.protocol() == ProxyProtocol::Https {
-            tls_transport(tcp, proxy.host(), tls_config())?
-        } else {
-            Transport::Tcp(tcp)
-        };
-        let mut stream = Stream {
-            transport,
-            shutdown_pending: false,
-            write_closed: false,
-        };
+        let mut stream = proxy_stream(&proxy, timeout)?;
         match proxy.protocol() {
             ProxyProtocol::Http | ProxyProtocol::Https => {
                 http_connect(&mut stream, host, port, &proxy, timeout)?
@@ -199,6 +199,29 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
     stream.flush()?;
     Ok(stream)
 }
+
+fn proxy_stream(proxy: &Proxy, timeout: Duration) -> Result<Stream> {
+    let tcp =
+        tcp_connect(proxy.host(), proxy.port(), timeout).context("connecting configured proxy")?;
+    let transport = if proxy.protocol() == ProxyProtocol::Https {
+        tls_transport(tcp, proxy.host(), tls_config()?)?
+    } else {
+        Transport::Tcp(tcp)
+    };
+    Ok(Stream {
+        transport,
+        shutdown_pending: false,
+        write_closed: false,
+    })
+}
+
+impl super::connect::Connection for Stream {
+    fn timeout(&mut self, remaining: Duration) -> Result<()> {
+        self.tcp().set_read_timeout(Some(remaining))?;
+        self.tcp().set_write_timeout(Some(remaining))?;
+        Ok(())
+    }
+}
 fn tls_transport(tcp: TcpStream, host: &str, config: Arc<ClientConfig>) -> Result<Transport> {
     let host = socket_host(host);
     let name = ServerName::try_from(host.to_owned()).context("invalid HTTPS proxy hostname")?;
@@ -215,46 +238,9 @@ fn http_connect(
     proxy: &Proxy,
     timeout: Duration,
 ) -> Result<()> {
-    write!(
-        stream,
-        "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n"
-    )?;
-    if proxy.username().is_some() || proxy.password().is_some() {
-        let token = BASE64_STANDARD.encode(format!(
-            "{}:{}",
-            proxy.username().unwrap_or(""),
-            proxy.password().unwrap_or("")
-        ));
-        write!(stream, "Proxy-Authorization: Basic {token}\r\n")?;
-    }
-    stream.write_all(b"\r\n")?;
-    stream.flush()?;
-    let mut header = vec![];
-    let deadline = Instant::now() + timeout;
-    // Read only the header; opaque target bytes in the same packet must survive.
-    while !header.ends_with(b"\r\n\r\n") {
-        ensure!(header.len() < 16384, "proxy response header exceeds 16 KiB");
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        ensure!(!remaining.is_zero(), "proxy response header timed out");
-        stream.tcp().set_read_timeout(Some(remaining))?;
-        let mut byte = [0];
-        stream.read_exact(&mut byte)?;
-        header.push(byte[0]);
-    }
-    let mut headers =
-        vec![httparse::EMPTY_HEADER; header.iter().filter(|b| **b == b'\n').count() - 2];
-    let mut response = httparse::Response::new(&mut headers);
-    ensure!(
-        matches!(response.parse(&header)?, httparse::Status::Complete(end) if end == header.len())
-            && matches!(response.version, Some(0 | 1)),
-        "invalid HTTP proxy response"
-    );
-    let code = response.code.context("missing proxy status")?;
-    ensure!(
-        (200..300).contains(&code),
-        "proxy refused CONNECT (HTTP {code}); direct fallback is disabled"
-    );
-    Ok(())
+    super::connect::connect(stream, (host, port), proxy, timeout, |remaining| {
+        proxy_stream(proxy, remaining)
+    })
 }
 fn socks_connect(stream: &mut Stream, host: &str, port: u16, proxy: &Proxy) -> Result<()> {
     let host = socket_host(host);

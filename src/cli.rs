@@ -19,6 +19,9 @@ struct Cli {
     /// Include protocol details and transfer timings in terminal diagnostics.
     #[arg(short, long, global = true)]
     verbose: bool,
+    #[cfg(windows)]
+    #[arg(long, hide = true, global = true)]
+    elevated_log: Option<uuid::Uuid>,
     #[command(subcommand)]
     command: Command,
 }
@@ -242,6 +245,11 @@ enum DriverCommand {
     #[cfg(windows)]
     #[command(hide = true)]
     PrepareElevated,
+    /// Reset Apple DFU / Recovery / Restore device records and reinstall the USB driver (Windows UAC).
+    Reset,
+    #[cfg(windows)]
+    #[command(hide = true)]
+    ResetElevated,
     /// Export a targeted WinUSB INF source and Linux udev rule; does not install.
     Export {
         directory: PathBuf,
@@ -287,6 +295,10 @@ pub(super) fn run() -> Result<()> {
     }
     let cli = Cli::parse();
     zalivka::logging::init(cli.verbose);
+    #[cfg(windows)]
+    if let Some(id) = cli.elevated_log {
+        zalivka::logging::connect_elevated(id)?;
+    }
     match cli.command {
         Command::UsbInternet { command } => match command {
             InternetCommand::Status => print_json(&usb_internet::status()?)?,
@@ -387,6 +399,24 @@ pub(super) fn run() -> Result<()> {
             #[cfg(windows)]
             DriverCommand::PrepareElevated => {
                 let reboot = drivers::prepare_windows_elevated()?;
+                std::process::exit(if reboot { 3010 } else { 0 });
+            }
+            DriverCommand::Reset => {
+                let reboot = drivers::reset_windows()?;
+                zalivka::log!(
+                    Info,
+                    "drivers",
+                    "Сброс USB-драйверов завершён. Перезагрузка требуется: {reboot}. Подключите Mac заново и введите его в DFU."
+                );
+            }
+            #[cfg(windows)]
+            DriverCommand::ResetElevated => {
+                let mut reboot = false;
+                if let Err(error) = drivers::reset_windows_elevated(&mut reboot) {
+                    zalivka::log!(Error, "drivers", "Сброс USB-драйверов: {error:#}");
+                    // ERROR_FAIL_REBOOT_REQUIRED preserves a pending reboot even on failure.
+                    std::process::exit(if reboot { 3017 } else { 1 });
+                }
                 std::process::exit(if reboot { 3010 } else { 0 });
             }
             DriverCommand::Export {

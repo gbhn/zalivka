@@ -235,6 +235,12 @@ fn worker_arguments_preserve_mode_authorization_and_transcript() {
             .unwrap(),
         vec![OsString::from("drivers"), OsString::from("prepare")]
     );
+    assert_eq!(
+        Setup::default()
+            .arguments(Action::ResetDrivers, None)
+            .unwrap(),
+        vec![OsString::from("drivers"), OsString::from("reset")]
+    );
 }
 #[test]
 fn local_firmware_is_required_and_does_not_pass_a_cache_option() {
@@ -590,7 +596,11 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
         "Операция остановлена"
     );
     job.cancelled = false;
-    for action in [Action::Restore, Action::PrepareWindows] {
+    for action in [
+        Action::Restore,
+        Action::PrepareWindows,
+        Action::ResetDrivers,
+    ] {
         job.action = action;
         let notice = job.completion_notice(false, true);
         assert_eq!(notice.tone, Tone::Error);
@@ -697,8 +707,28 @@ fn worker_state_survives_journal_eviction_and_allows_stopping_only_after_restore
     job.action = Action::PrepareWindows;
     job.cancelled = false;
     assert!(!job.can_stop());
+    job.action = Action::ResetDrivers;
+    assert!(!job.can_stop());
+    assert_eq!(
+        job.completion_notice(true, true).title,
+        "Перезагрузите Windows"
+    );
     send_worker(&mut app, progress::Event::RebootRequired);
     assert!(app.windows_reboot_required);
+}
+
+#[test]
+fn driver_reset_waits_for_completion_and_prompts_to_reconnect_or_reboot() {
+    let job = job(Action::ResetDrivers);
+    assert!(!job.can_stop());
+    let notice = job.completion_notice(true, false);
+    assert_eq!(notice.title, Action::ResetDrivers.completed_title());
+    assert!(notice.detail.contains("введите его в DFU"));
+    assert_eq!(
+        job.completion_notice(true, true).title,
+        "Перезагрузите Windows"
+    );
+    assert_eq!(job.completion_notice(false, true).tone, Tone::Error);
 }
 
 #[test]

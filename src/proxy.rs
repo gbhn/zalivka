@@ -7,6 +7,7 @@ use std::{
 use ureq::unversioned::transport::{ConnectionDetails, Connector, DefaultConnector, Transport};
 use ureq::{Proxy, http::Uri};
 
+mod connect;
 pub(crate) mod socket;
 
 pub(crate) fn for_url(uri: &Uri) -> Result<Option<Proxy>> {
@@ -64,6 +65,8 @@ fn environment_proxy(uri: &Uri, read: impl Fn(&str) -> Option<String>) -> Result
 pub(crate) struct HttpConnector {
     target: DefaultConnector,
     proxy_config: Arc<ureq::config::Config>,
+    #[cfg(windows)]
+    windows_tss: bool,
 }
 
 impl HttpConnector {
@@ -71,6 +74,16 @@ impl HttpConnector {
         Self {
             target: DefaultConnector::default(),
             proxy_config: Arc::new(proxy_config),
+            #[cfg(windows)]
+            windows_tss: false,
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn for_tss(proxy_config: ureq::config::Config) -> Self {
+        Self {
+            windows_tss: true,
+            ..Self::new(proxy_config)
         }
     }
 }
@@ -83,6 +96,28 @@ impl Connector for HttpConnector {
         details: &ConnectionDetails,
         chained: Option<()>,
     ) -> Result<Option<Self::Out>, ureq::Error> {
+        if chained.is_none()
+            && let Some(proxy) = details.config.proxy()
+            && matches!(
+                proxy.protocol(),
+                ureq::ProxyProtocol::Http | ureq::ProxyProtocol::Https
+            )
+            && !proxy.is_no_proxy(details.uri)
+        {
+            return self.connect_http(details, proxy).map(Some);
+        }
+        #[cfg(windows)]
+        if self.windows_tss && details.needs_tls() {
+            // HTTP proxies were handled above. Remaining paths are direct or
+            // SOCKS; establish their transport before native TSS TLS validation.
+            use ureq::unversioned::transport::{SocksConnector, TcpConnector};
+            let raw =
+                ().chain(SocksConnector::default())
+                    .chain(TcpConnector::default())
+                    .connect(details, None)?
+                    .ok_or(ureq::Error::ConnectionFailed)?;
+            return crate::windows::tls::connect_tss(details, raw.boxed()).map(Some);
+        }
         let proxy_config = self.proxy_config.clone();
         let target_details = ConnectionDetails {
             uri: details.uri,
@@ -111,6 +146,108 @@ impl Connector for HttpConnector {
             }),
         };
         self.target.connect(&target_details, chained)
+    }
+}
+
+impl HttpConnector {
+    fn connect_http(
+        &self,
+        details: &ConnectionDetails,
+        proxy: &Proxy,
+    ) -> Result<Box<dyn Transport>, ureq::Error> {
+        use std::time::Duration;
+        use ureq::unversioned::transport::{RustlsConnector, TransportAdapter};
+        let timeout = details
+            .timeout
+            .not_zero()
+            .map(|duration| *duration)
+            .unwrap_or(Duration::from_secs(30));
+        let make = |remaining: Duration| -> anyhow::Result<_> {
+            let timeout = ureq::unversioned::transport::NextTimeout {
+                after: remaining.into(),
+                reason: details.timeout.reason,
+            };
+            let addrs = details
+                .resolver
+                .resolve(proxy.uri(), &self.proxy_config, timeout)?;
+            let proxy_details = ConnectionDetails {
+                uri: proxy.uri(),
+                addrs,
+                config: &self.proxy_config,
+                request_level: true,
+                resolver: details.resolver,
+                now: details.now,
+                timeout,
+                current_time: details.current_time.clone(),
+                run_connector: details.run_connector.clone(),
+            };
+            let transport = DefaultConnector::default()
+                .connect(&proxy_details, None)?
+                .context("connecting configured HTTP proxy")?;
+            Ok(TransportAdapter::new(transport))
+        };
+        let result = (|| -> anyhow::Result<_> {
+            let mut stream = make(timeout)?;
+            let host = details
+                .uri
+                .host()
+                .context("HTTP proxy target has no hostname")?;
+            let port = details
+                .uri
+                .port_u16()
+                .unwrap_or(if details.needs_tls() { 443 } else { 80 });
+            connect::connect(&mut stream, (host, port), proxy, timeout, make)?;
+            Ok(TunnelTransport(stream.into_inner()))
+        })()
+        .map_err(|error| ureq::Error::Other(error.into()))?;
+        // TLS to the proxy is already verified against its own roots. Add a
+        // separate TLS layer to the destination using the request's trust roots.
+        #[cfg(windows)]
+        if self.windows_tss && details.needs_tls() {
+            return crate::windows::tls::connect_tss(details, result.boxed());
+        }
+        RustlsConnector::default()
+            .connect(details, Some(result))?
+            .map(Transport::boxed)
+            .ok_or(ureq::Error::ConnectionFailed)
+    }
+}
+
+impl<T: Transport> connect::Connection for ureq::unversioned::transport::TransportAdapter<T> {
+    fn timeout(&mut self, remaining: std::time::Duration) -> anyhow::Result<()> {
+        self.set_timeout(ureq::unversioned::transport::NextTimeout {
+            after: remaining.into(),
+            reason: ureq::Timeout::Connect,
+        });
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct TunnelTransport(Box<dyn Transport>);
+impl Transport for TunnelTransport {
+    fn buffers(&mut self) -> &mut dyn ureq::unversioned::transport::Buffers {
+        self.0.buffers()
+    }
+    fn transmit_output(
+        &mut self,
+        amount: usize,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<(), ureq::Error> {
+        self.0.transmit_output(amount, timeout)
+    }
+    fn await_input(
+        &mut self,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<bool, ureq::Error> {
+        self.0.await_input(timeout)
+    }
+    fn is_open(&mut self) -> bool {
+        self.0.is_open()
+    }
+    // TLS, if any, currently terminates at the proxy rather than the target.
+    fn is_tls(&self) -> bool {
+        false
     }
 }
 

@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn driver_reset_is_a_separate_command_without_a_device_or_firmware() {
+    assert!(matches!(
+        Cli::try_parse_from(["zalivka", "drivers", "reset"])
+            .unwrap()
+            .command,
+        Command::Drivers {
+            command: DriverCommand::Reset
+        }
+    ));
+    #[cfg(windows)]
+    assert!(matches!(
+        Cli::try_parse_from(["zalivka", "drivers", "reset-elevated"])
+            .unwrap()
+            .command,
+        Command::Drivers {
+            command: DriverCommand::ResetElevated
+        }
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn elevated_logging_accepts_only_pipe_identifiers() {
+    let id = uuid::Uuid::new_v4().to_string();
+    let cli = Cli::try_parse_from([
+        "zalivka",
+        "--elevated-log",
+        &id,
+        "drivers",
+        "prepare-elevated",
+    ])
+    .unwrap();
+    assert_eq!(cli.elevated_log.unwrap().to_string(), id);
+    for name in ["C:/Windows/System32/file", "../file", r"\\server\pipe\file"] {
+        assert!(
+            Cli::try_parse_from([
+                "zalivka",
+                "--elevated-log",
+                name,
+                "drivers",
+                "prepare-elevated"
+            ])
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn boot_state_requires_an_explicit_flag_to_load_ibss() {
     for load in [false, true] {
         let mut args = vec!["zalivka", "boot-state", "firmware.ipsw", "--ecid", "1234"];

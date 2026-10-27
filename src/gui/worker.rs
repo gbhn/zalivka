@@ -115,7 +115,7 @@ impl Job {
             transfers: BTreeMap::new(),
             overall_operations: BTreeMap::new(),
             overall_fraction: None,
-            phase: if action == Action::PrepareWindows {
+            phase: if matches!(action, Action::PrepareWindows | Action::ResetDrivers) {
                 "Подтвердите запрос прав администратора Windows".into()
             } else {
                 "Подготовка".into()
@@ -126,7 +126,7 @@ impl Job {
 
     pub(super) fn can_stop(&self) -> bool {
         (!self.action.writes_device() || self.restore_completed)
-            && self.action != Action::PrepareWindows
+            && !matches!(self.action, Action::PrepareWindows | Action::ResetDrivers)
             && !matches!(self.internet, Internet::Preparing)
     }
 
@@ -349,7 +349,9 @@ impl Job {
                 "Подробности в журнале.".into(),
                 Tone::Error,
             )
-        } else if self.action == Action::PrepareWindows && reboot_required {
+        } else if matches!(self.action, Action::PrepareWindows | Action::ResetDrivers)
+            && reboot_required
+        {
             (
                 "Перезагрузите Windows".into(),
                 "Драйвер установлен. Перезагрузите компьютер перед восстановлением Mac.".into(),
@@ -366,6 +368,8 @@ impl Job {
                 self.action.completed_title().into(),
                 if self.action.writes_device() {
                     format!("{elapsed}, Проверьте запуск Mac.")
+                } else if self.action == Action::ResetDrivers {
+                    format!("{elapsed}. Подключите Mac заново и введите его в DFU.")
                 } else {
                     elapsed
                 },

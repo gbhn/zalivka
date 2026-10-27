@@ -22,7 +22,12 @@ use windows_sys::{
     core::GUID,
 };
 fn check(ok: i32, what: &str) -> Result<()> {
-    ensure!(ok != 0, "{what}: {}", io::Error::last_os_error());
+    if ok == 0 {
+        let error = io::Error::last_os_error();
+        let code = error.raw_os_error().unwrap_or(0) as u32;
+        anyhow::bail!("{what}: Win32 {code} (0x{code:08X}): {error}");
+    }
+    crate::log!(Debug, "drivers", "USB-сеть: {what}: успешно");
     Ok(())
 }
 struct Set(HDEVINFO);
@@ -201,6 +206,13 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
     )?;
     let key = parameters(instance)?;
     let path = backup_path(instance)?;
+    crate::log!(
+        Info,
+        "drivers",
+        "USB-сеть: резервная копия исходных настроек: {}; существует={}",
+        path.display(),
+        path.exists()
+    );
     let backup = if path.exists() {
         let bytes = crate::storage::read_limited(
             std::fs::File::open(&path)?,
@@ -266,6 +278,13 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
     };
     let class_guid = parse_guid(class).context("invalid saved NCM class GUID")?;
     let inf = inf_name.map(windows_inf).transpose()?;
+    crate::log!(
+        Info,
+        "drivers",
+        "USB-сеть: интерфейс={instance}; исходный INF={:?}; исходная секция={:?}; целевой INF={inf_name:?}; класс={class}",
+        backup.inf,
+        backup.section
+    );
     // The caller owns rollback, including a partially changed current interface.
     // Failures before this point have neither changed bindings nor registry values.
     *changed = true;
@@ -354,6 +373,11 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
             None
         };
         let mut reboot = 0;
+        crate::log!(
+            Info,
+            "drivers",
+            "USB-сеть: вызов DiInstallDevice для {instance}"
+        );
         check(
             unsafe {
                 DiInstallDevice(
@@ -375,6 +399,12 @@ pub(super) fn install(instance: &str, restore: bool, changed: &mut bool) -> Resu
                 "restoring an unassigned USB interface"
             },
         )?;
+        crate::log!(
+            Info,
+            "drivers",
+            "USB-сеть: DiInstallDevice завершён; требуется перезагрузка={}",
+            reboot != 0
+        );
         ensure!(
             reboot == 0,
             "Windows requires a restart to finish the USB network driver change"

@@ -1,5 +1,40 @@
 use super::*;
 
+#[cfg(windows)]
+#[test]
+fn http_requests_automatically_answer_negotiate_using_the_current_windows_user() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = ureq::Proxy::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let first = read_header(&mut stream);
+        assert!(first.starts_with("CONNECT apple.example:80 "));
+        assert!(!first.to_lowercase().contains("proxy-authorization"));
+        stream.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0\r\n\r\n").unwrap();
+        let retry = read_header(&mut stream);
+        assert!(retry.contains("Proxy-Authorization: Negotiate "));
+        assert!(!retry.contains("Proxy-Authorization: Basic"));
+        stream
+            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            .unwrap();
+        let request = read_header(&mut stream);
+        assert!(request.starts_with("GET /asset HTTP/1.1"));
+        assert!(!request.to_lowercase().contains("proxy-authorization"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            .unwrap();
+    });
+    let request = Request::get("http://apple.example/asset")
+        .body(Vec::new())
+        .unwrap();
+    let mut reply = send_http_via(&agent(), &request, Some(proxy)).unwrap();
+    assert_eq!(reply.body_mut().read_to_string().unwrap(), "OK");
+    server.join().unwrap();
+}
+
 #[test]
 fn https_proxy_uses_its_own_roots_with_tss_destination_trust() {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -208,9 +243,15 @@ fn tss_tls_validates_apple_chain_hostname_signature_and_expiration() {
             .is_err()
     );
     // This extra root must never broaden the normal CDN/asset trust configuration.
+    #[cfg(not(windows))]
     assert!(matches!(
         super::agent().config().tls_config().root_certs(),
         ureq::tls::RootCerts::WebPki
+    ));
+    #[cfg(windows)]
+    assert!(matches!(
+        super::agent().config().tls_config().root_certs(),
+        ureq::tls::RootCerts::PlatformVerifier
     ));
 }
 

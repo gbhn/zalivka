@@ -12,6 +12,23 @@ use std::{
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
 static VERBOSE: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static ELEVATED: OnceLock<std::sync::Mutex<std::fs::File>> = OnceLock::new();
+
+/// Only a local named pipe can receive elevated logs, never an arbitrary file.
+#[cfg(windows)]
+pub fn connect_elevated(id: uuid::Uuid) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
+    let pipe = std::fs::OpenOptions::new()
+        .write(true)
+        // The unprivileged log reader must not impersonate the elevated writer.
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(format!(r"\\.\pipe\zalivka-elevated-{id}"))?;
+    ELEVATED
+        .set(std::sync::Mutex::new(pipe))
+        .map_err(|_| io::Error::other("elevated logging is already connected"))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +127,16 @@ pub fn emit(level: Level, source: &str, message: fmt::Arguments<'_>) {
 }
 
 pub fn publish(record: Record) {
+    #[cfg(windows)]
+    if let Some(pipe) = ELEVATED.get() {
+        let mut pipe = pipe.lock().unwrap_or_else(|error| error.into_inner());
+        if crate::progress::Event::Log(record.clone())
+            .write_to(&mut *pipe)
+            .is_ok()
+        {
+            return;
+        }
+    }
     if record.level == Level::Debug && !worker() && !VERBOSE.load(Ordering::Relaxed) {
         return;
     }

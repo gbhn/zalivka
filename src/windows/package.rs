@@ -25,10 +25,17 @@ pub(super) fn unpack(directory: &Path, arch: &str) -> Result<PathBuf> {
         "arm64" => (ARM64_CAB, ARM64_SHA256),
         _ => bail!("Неподдерживаемая архитектура драйвера: {arch}"),
     };
+    crate::log!(
+        Info,
+        "drivers",
+        "Проверка SHA-256 встроенного CAB: архитектура={arch}; размер={} байт; ожидается={expected}",
+        bytes.len()
+    );
     ensure!(
         Sha256::digest(bytes).as_slice() == crate::device::decode_hex(expected)?,
         "Повреждён встроенный пакет драйвера Apple"
     );
+    crate::log!(Info, "drivers", "SHA-256 встроенного CAB подтверждён");
     let mut cabinet = cab::Cabinet::new(Cursor::new(bytes))
         .context("Чтение встроенного пакета драйвера Apple")?;
     // Only these fixed filenames can be extracted into the temporary directory.
@@ -37,11 +44,20 @@ pub(super) fn unpack(directory: &Path, arch: &str) -> Result<PathBuf> {
             .get_file_entry(name)
             .with_context(|| format!("В пакете драйвера отсутствует {name}"))?
             .uncompressed_size();
-        let mut reader = cabinet.read_file(name)?;
+        crate::log!(
+            Info,
+            "drivers",
+            "Распаковка {name}: {size} байт -> {}",
+            directory.join(name).display()
+        );
+        let mut reader = cabinet
+            .read_file(name)
+            .with_context(|| format!("Чтение {name} из CAB"))?;
         let mut output = File::options()
             .write(true)
             .create_new(true)
-            .open(directory.join(name))?;
+            .open(directory.join(name))
+            .with_context(|| format!("Создание {}", directory.join(name).display()))?;
         let copied = std::io::copy(&mut reader, &mut output)
             .with_context(|| format!("Распаковка драйвера Apple: {name}"))?;
         ensure!(

@@ -11,6 +11,7 @@ pub(super) enum Action {
     Verify,
     Doctor,
     PrepareWindows,
+    ResetDrivers,
     UsbInternet,
 }
 
@@ -23,6 +24,7 @@ impl Action {
             Self::Verify => "Проверка IPSW",
             Self::Doctor => "Диагностика USB",
             Self::PrepareWindows => "Подготовка Windows",
+            Self::ResetDrivers => "Сброс USB-драйверов Apple",
             Self::UsbInternet => "Интернет по USB",
         }
     }
@@ -33,7 +35,7 @@ impl Action {
             Self::Download => "fetch",
             Self::Verify => "verify",
             Self::Doctor => "doctor",
-            Self::PrepareWindows => "drivers",
+            Self::PrepareWindows | Self::ResetDrivers => "drivers",
             Self::UsbInternet => "usb-internet",
         }
     }
@@ -45,6 +47,7 @@ impl Action {
             Self::Verify => "IPSW проверен",
             Self::Doctor => "Диагностика завершена",
             Self::PrepareWindows => "Подготовка Windows завершена",
+            Self::ResetDrivers => "Сброс USB-драйверов завершён",
             Self::UsbInternet => "Раздача интернета по USB остановлена",
         }
     }
@@ -100,6 +103,10 @@ impl Setup {
         }
         if action == Action::PrepareWindows {
             args.push("prepare".into());
+            return Ok(args);
+        }
+        if action == Action::ResetDrivers {
+            args.push("reset".into());
             return Ok(args);
         }
         if action == Action::Doctor {

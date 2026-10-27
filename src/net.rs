@@ -10,11 +10,22 @@ use std::{sync::Arc, time::Duration};
 use ureq::http::{Method, Request, Response, StatusCode, Uri};
 
 pub fn agent() -> ureq::Agent {
-    agent_with_body_timeout(Some(Duration::from_secs(120)), ureq::tls::RootCerts::WebPki)
+    agent_with_body_timeout(Some(Duration::from_secs(120)), public_roots())
+}
+
+pub(crate) fn public_roots() -> ureq::tls::RootCerts {
+    #[cfg(windows)]
+    {
+        ureq::tls::RootCerts::PlatformVerifier
+    }
+    #[cfg(not(windows))]
+    {
+        ureq::tls::RootCerts::WebPki
+    }
 }
 
 /// gs.apple.com uses Apple's private PKI, absent from Mozilla's public roots.
-/// Keep this trust anchor scoped to TSS; CDN/assets continue to use WebPKI.
+/// Keep this additional trust anchor scoped to TSS; Windows trust applies too.
 pub(crate) fn tss_agent() -> ureq::Agent {
     let root =
         ureq::tls::Certificate::from_der(include_bytes!("../certs/AppleIncRootCertificate.cer"));
@@ -23,12 +34,16 @@ pub(crate) fn tss_agent() -> ureq::Agent {
         ureq::tls::RootCerts::new_with_certs(&[root]),
     );
     let proxy_config = ureq::Agent::config_builder()
-        .tls_config(tls_config(ureq::tls::RootCerts::WebPki))
+        .tls_config(tls_config(public_roots()))
         .proxy(None)
         .build();
+    #[cfg(windows)]
+    let connector = crate::proxy::HttpConnector::for_tss(proxy_config);
+    #[cfg(not(windows))]
+    let connector = crate::proxy::HttpConnector::new(proxy_config);
     ureq::Agent::with_parts(
         tss.config().clone(),
-        crate::proxy::HttpConnector::new(proxy_config),
+        connector,
         ureq::unversioned::resolver::DefaultResolver::default(),
     )
 }
@@ -44,15 +59,20 @@ fn agent_with_body_timeout(
     body_timeout: Option<Duration>,
     roots: ureq::tls::RootCerts,
 ) -> ureq::Agent {
-    ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
+        .proxy(None)
         .tls_config(tls_config(roots))
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_recv_response(Some(Duration::from_secs(120)))
         .timeout_recv_body(body_timeout)
         .max_redirects(0)
         .user_agent(concat!("zalivka/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into()
+        .build();
+    ureq::Agent::with_parts(
+        config.clone(),
+        crate::proxy::HttpConnector::new(config),
+        ureq::unversioned::resolver::DefaultResolver::default(),
+    )
 }
 
 /// Limit firmware/asset downloads to Apple's public HTTPS distribution hosts.

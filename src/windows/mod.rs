@@ -30,10 +30,12 @@ type Ioctl = unsafe extern "system" fn(
 
 pub(crate) mod apple;
 pub(crate) mod ncm;
+pub(crate) mod negotiate;
 mod package;
 pub(crate) mod proxy;
 pub(crate) mod reset;
 pub(crate) mod setup;
+pub(crate) mod tls;
 
 pub(crate) fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain(Some(0)).collect()

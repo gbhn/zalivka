@@ -247,26 +247,49 @@ fn prepare_interfaces(
     let result: Result<()> = (|| {
         for (id, ready) in interfaces {
             if !restore && *ready {
+                crate::log!(
+                    Debug,
+                    "drivers",
+                    "USB-сеть: пропуск готового интерфейса {id}"
+                );
                 continue;
             }
+            crate::log!(
+                Info,
+                "drivers",
+                "USB-сеть: начало изменения {id}; восстановление исходного драйвера={restore}"
+            );
             let mut modified = false;
             let result = install(id, restore, &mut modified);
             if modified {
                 changed.push(id.as_str());
             }
-            result?;
+            result.with_context(|| format!("USB-сеть: изменение драйвера {id}"))?;
+            crate::log!(
+                Info,
+                "drivers",
+                "USB-сеть: изменение драйвера {id} завершено"
+            );
         }
         if !restore {
             for (id, _) in interfaces {
+                crate::log!(Info, "drivers", "USB-сеть: проверка готовности {id}");
                 check_ready(id).context("USB network driver installation was not confirmed")?;
             }
         }
         Ok(())
     })();
     if let Err(mut error) = result {
+        crate::log!(Error, "drivers", "USB-сеть: {error:#}");
         if !restore {
             for id in changed.into_iter().rev() {
+                crate::log!(Warning, "drivers", "USB-сеть: откат драйвера {id}");
                 if let Err(rollback) = install(id, true, &mut false) {
+                    crate::log!(
+                        Error,
+                        "drivers",
+                        "USB-сеть: ошибка отката {id}: {rollback:#}"
+                    );
                     error = error.context(format!("NCM rollback failed for {id}: {rollback:#}"));
                 }
             }

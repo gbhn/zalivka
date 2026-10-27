@@ -8,8 +8,11 @@ fn empty_tls_read_does_not_start_a_handshake_or_touch_the_socket() {
     socket.set_nonblocking(true).unwrap();
     let (mut peer, _) = listener.accept().unwrap();
     peer.set_nonblocking(true).unwrap();
-    let connection =
-        ClientConnection::new(tls_config(), ServerName::try_from("localhost").unwrap()).unwrap();
+    let connection = ClientConnection::new(
+        tls_config().unwrap(),
+        ServerName::try_from("localhost").unwrap(),
+    )
+    .unwrap();
     let mut stream = Stream {
         transport: Transport::Tls(Box::new(StreamOwned::new(connection, socket))),
         shutdown_pending: false,
@@ -305,7 +308,7 @@ fn https_proxy_verifies_the_certificate_and_preserves_target_bytes() {
     for (host, config, success) in [
         ("localhost", trusted.clone(), true),
         ("wrong.invalid", trusted, false),
-        ("localhost", tls_config(), false),
+        ("localhost", tls_config().unwrap(), false),
     ] {
         let l = listener();
         let address = l.local_addr().unwrap();
