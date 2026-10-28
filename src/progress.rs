@@ -1,16 +1,155 @@
 //! Transfer identities, byte counters and operation progress shared with the GUI.
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::RefCell,
     io::{self, Write},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 pub const EVENT_PREFIX: &str = "ZALIVKA_EVENT ";
-pub const WORKER_EVENTS_ENV: &str = "ZALIVKA_WORKER_EVENTS";
-pub const MAC_STARTUP_HINT: &str = "Проверьте запуск Mac. Если появился экран «Активировать Mac», подключите сам Mac к Wi-Fi или Ethernet и завершите активацию.";
+pub const MAC_STARTUP_HINT: &str = "Check that the Mac starts. If it shows the Activate Mac screen, connect the Mac to Wi-Fi or Ethernet and complete activation.";
 const INTERVAL: Duration = Duration::from_millis(500);
 static NEXT_TRANSFER: AtomicU64 = AtomicU64::new(1);
+thread_local! {
+    static CURRENT: RefCell<Option<Context>> = const { RefCell::new(None) };
+}
+type CancelAction = Box<dyn FnOnce() + Send>;
+
+/// One native operation: typed events, complete diagnostics and cooperative stop.
+#[derive(Clone)]
+pub struct Context {
+    output: Arc<dyn Fn(Event) + Send + Sync>,
+    logs: Option<crate::logging::Queue>,
+    cancelled: Arc<AtomicBool>,
+    cancel_actions: Arc<Mutex<Vec<CancelAction>>>,
+}
+
+impl Context {
+    pub fn new(output: impl Fn(Event) + Send + Sync + 'static) -> Self {
+        Self {
+            output: Arc::new(output),
+            logs: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_actions: Arc::default(),
+        }
+    }
+
+    /// Keep progress immediate while formatting and writing diagnostics separately.
+    pub fn with_async_logs(mut self, flush: impl Fn() + Send + 'static) -> io::Result<Self> {
+        let output = self.output.clone();
+        self.logs = Some(crate::logging::Queue::new(move |record| match record {
+            Some(record) => output(Event::Log(record)),
+            None => flush(),
+        })?);
+        Ok(self)
+    }
+
+    /// Called at completion and before taking a complete journal snapshot.
+    pub fn flush_logs(&self) -> io::Result<()> {
+        match &self.logs {
+            Some(logs) => logs.flush(),
+            None => Ok(()),
+        }
+    }
+
+    fn log(&self, record: crate::logging::Record) {
+        let record = match &self.logs {
+            Some(logs) => match logs.record(record) {
+                Ok(()) => return,
+                Err(record) => record,
+            },
+            None => record,
+        };
+        (self.output)(Event::Log(record));
+    }
+
+    pub fn run<T>(&self, task: impl FnOnce() -> T) -> T {
+        struct Reset(Option<Context>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                CURRENT.with(|slot| slot.replace(self.0.take()));
+            }
+        }
+        let _reset = Reset(CURRENT.with(|slot| slot.replace(Some(self.clone()))));
+        task()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        let actions = std::mem::take(
+            &mut *self
+                .cancel_actions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        for action in actions {
+            action();
+        }
+    }
+    pub fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+pub(crate) fn active() -> bool {
+    CURRENT.with(|slot| slot.borrow().is_some())
+}
+
+pub(crate) fn log_queue() -> Option<crate::logging::Queue> {
+    CURRENT.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|context| context.logs.clone())
+    })
+}
+
+pub(crate) fn log(record: crate::logging::Record) -> Result<(), crate::logging::Record> {
+    let context = CURRENT.with(|slot| slot.borrow().clone());
+    match context {
+        Some(context) => {
+            context.log(record);
+            Ok(())
+        }
+        None => Err(record),
+    }
+}
+
+/// Carry the current operation into its FDR, USB and request threads.
+pub(crate) fn inherit<T>(task: impl FnOnce() -> T) -> impl FnOnce() -> T {
+    let context = CURRENT.with(|slot| slot.borrow().clone());
+    move || match context {
+        Some(context) => context.run(task),
+        None => task(),
+    }
+}
+
+pub fn check_cancelled() -> io::Result<()> {
+    if CURRENT.with(|slot| slot.borrow().as_ref().is_some_and(Context::cancelled)) {
+        Err(io::Error::other("Operation stopped"))
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn on_cancel(action: impl FnOnce() + Send + 'static) {
+    let context = CURRENT.with(|slot| slot.borrow().clone());
+    if let Some(context) = context {
+        let mut actions = context
+            .cancel_actions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if context.cancelled() {
+            drop(actions);
+            action();
+        } else {
+            actions.push(Box::new(action));
+        }
+    }
+}
 /// Worker state is independent of human-readable logs and their retained history.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -78,10 +217,13 @@ impl Event {
     }
 
     pub fn emit(&self) {
-        // State and logs share one ordered worker pipe. State is private to the
-        // GUI protocol; a terminal only receives formatted log records.
-        if crate::logging::worker() {
-            let _ = self.write_to(std::io::stdout().lock());
+        let context = CURRENT.with(|slot| slot.borrow().clone());
+        if let Some(context) = context {
+            if let Self::Log(record) = self {
+                context.log(record.clone());
+            } else {
+                (context.output)(self.clone());
+            }
         }
     }
 }
@@ -121,8 +263,8 @@ impl Drop for TransferProfile {
             self.read.unwrap_or_default() + self.prepare + self.write + self.key_exchange;
         crate::log!(
             Debug,
-            "transfer",
-            "Профиль {}: bytes={}, finished={}, elapsed={:.3}s, read={:?}, prepare={:.3}s, write={:.3}s, key_exchange={:.3}s, other={:.3}s",
+            "transfer:stats",
+            "Profile {}: bytes={}, finished={}, elapsed={:.3}s, read={:?}, prepare={:.3}s, write={:.3}s, key_exchange={:.3}s, other={:.3}s",
             self.stage,
             self.bytes,
             self.finished,
@@ -202,11 +344,11 @@ impl Progress {
             progress.level(),
             "transfer",
             format_args!(
-                "{}: начало, {}{}",
+                "{}: starting, {}{}",
                 progress.stage,
                 human_bytes(completed),
                 total
-                    .map(|n| format!(" из {}", human_bytes(n)))
+                    .map(|n| format!(" of {}", human_bytes(n)))
                     .unwrap_or_default()
             ),
         );
@@ -308,15 +450,15 @@ impl Update {
         if self.finished {
             let speed = self.bytes_per_second / 1048576.0;
             format!(
-                "{}: завершено, {size}, {:.1} с, {speed:.1} МиБ/с",
+                "{}: complete, {size}, {:.1} s, {speed:.1} MiB/s",
                 self.stage, self.elapsed_seconds
             )
         } else {
             format!(
-                "{}: {size}{}, {:.1} МиБ/с",
+                "{}: {size}{}, {:.1} MiB/s",
                 self.stage,
                 self.total
-                    .map(|n| format!(" из {}", human_bytes(n)))
+                    .map(|n| format!(" of {}", human_bytes(n)))
                     .unwrap_or_default(),
                 self.bytes_per_second / 1048576.0
             )
@@ -326,13 +468,13 @@ impl Update {
 
 pub fn human_bytes(bytes: u64) -> String {
     if bytes >= 1073741824 {
-        format!("{:.2} ГиБ", bytes as f64 / 1073741824.0)
+        format!("{:.2} GiB", bytes as f64 / 1073741824.0)
     } else if bytes >= 1048576 {
-        format!("{:.1} МиБ", bytes as f64 / 1048576.0)
+        format!("{:.1} MiB", bytes as f64 / 1048576.0)
     } else if bytes >= 1024 {
-        format!("{:.1} КиБ", bytes as f64 / 1024.0)
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
     } else {
-        format!("{bytes} Б")
+        format!("{bytes} B")
     }
 }
 

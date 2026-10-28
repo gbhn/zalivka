@@ -127,12 +127,14 @@ pub fn xml(v: &Value) -> Result<Vec<u8>> {
 }
 
 pub fn send(w: &mut impl Write, v: &Value) -> Result<()> {
+    crate::logging::plist("plist", "TX XML", v);
     let mut bytes = Vec::new();
     append_frame(&mut bytes, |out| v.to_writer_xml(out), u32::to_be_bytes)?;
     send_frame(w, &bytes)
 }
 
 pub fn send_binary(w: &mut impl Write, v: &Value) -> Result<()> {
+    crate::logging::plist("plist", "TX binary BE", v);
     let mut bytes = Vec::new();
     append_binary(&mut bytes, v)?;
     send_frame(w, &bytes)
@@ -140,6 +142,7 @@ pub fn send_binary(w: &mut impl Write, v: &Value) -> Result<()> {
 
 /// FDR uses the same binary plist body with a little-endian frame length.
 pub(crate) fn send_binary_le(w: &mut impl Write, v: &Value) -> Result<()> {
+    crate::logging::plist("plist", "TX binary LE", v);
     let mut bytes = Vec::new();
     append_frame(&mut bytes, |out| v.to_writer_binary(out), u32::to_le_bytes)?;
     send_frame(w, &bytes)
@@ -201,6 +204,7 @@ impl Write for LimitedWriter<'_> {
 }
 
 fn send_frame(w: &mut impl Write, bytes: &[u8]) -> Result<()> {
+    crate::log!(Trace, "plist", "TX frame={} B", bytes.len());
     // A separate four-byte write becomes a separate USB transfer on MuxStream.
     w.write_all(bytes)?;
     w.flush()?;
@@ -232,7 +236,10 @@ pub(crate) fn receive_body(r: &mut impl Read, len: u32) -> Result<Value> {
     );
     let mut buf = vec![0; len];
     r.read_exact(&mut buf).context("reading plist body")?;
-    Value::from_reader(std::io::Cursor::new(buf)).context("decoding plist")
+    let value = Value::from_reader(std::io::Cursor::new(buf)).context("decoding plist")?;
+    crate::log!(Trace, "plist", "RX frame={len} B");
+    crate::logging::plist("plist", "RX", &value);
+    Ok(value)
 }
 
 /// ASR uses unframed XML. Keep the caller's buffer across messages so read-ahead
@@ -269,8 +276,10 @@ pub fn receive_xml(r: &mut impl BufRead) -> Result<Value> {
         let finished = depth == 0 && matches!(event, Event::End(_) | Event::Empty(_));
         writer.write_event(event)?;
         if finished {
-            return Value::from_reader_xml(writer.into_inner().as_slice())
-                .context("decoding ASR plist");
+            let value = Value::from_reader_xml(writer.into_inner().as_slice())
+                .context("decoding ASR plist")?;
+            crate::logging::plist("asr:plist", "RX", &value);
+            return Ok(value);
         }
         buffer.clear();
     }

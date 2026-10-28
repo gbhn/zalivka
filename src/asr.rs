@@ -36,6 +36,7 @@ pub fn transfer(
     image: &mut (impl Read + Seek),
     length: u64,
 ) -> Result<()> {
+    let _trace = crate::logging::firmware_transfer();
     let mut stream = BufReader::new(stream);
     let initiate = wire::receive_xml(&mut stream)?;
     ensure!(
@@ -77,8 +78,7 @@ pub fn transfer(
     let stride = CHUNK + if checksum { 20 } else { 0 };
     let mut buf = vec![0; BATCH_CHUNKS * stride];
     let mut total = 0;
-    let mut progress =
-        crate::progress::Progress::new("Передача файловой системы ASR", Some(length), 0);
+    let mut progress = crate::progress::Progress::new("ASR filesystem transfer", Some(length), 0);
     let mut profile = crate::progress::TransferProfile::new("ASR");
     while total < length {
         let mut payload = 0;

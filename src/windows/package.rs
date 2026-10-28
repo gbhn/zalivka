@@ -64,7 +64,7 @@ fn driver_store_inf(published: &Path) -> Result<Option<PathBuf>> {
             // A package may be removed between enumeration and this lookup.
             return Ok(None);
         }
-        return Err(error).context("Поиск INF в DriverStore через SetupAPI");
+        return Err(error).context("Finding INF in DriverStore using SetupAPI");
     }
     let end = path
         .iter()
@@ -88,7 +88,7 @@ pub(super) fn installed() -> Result<bool> {
     let set = unsafe { SetupDiCreateDeviceInfoList(&USB_DEVICE, ptr::null_mut()) };
     ensure!(
         set != INVALID_HANDLE_VALUE as isize,
-        "Список USB-драйверов: {}",
+        "USB driver list: {}",
         std::io::Error::last_os_error()
     );
     let set = DriverList(set);
@@ -98,18 +98,18 @@ pub(super) fn installed() -> Result<bool> {
     };
     ensure!(
         unsafe { SetupDiGetDeviceInstallParamsW(set.0, ptr::null(), &mut parameters) } != 0,
-        "Параметры списка USB-драйверов: {}",
+        "USB driver list parameters: {}",
         std::io::Error::last_os_error()
     );
     parameters.FlagsEx |= DI_FLAGSEX_ALLOWEXCLUDEDDRVS;
     ensure!(
         unsafe { SetupDiSetDeviceInstallParamsW(set.0, ptr::null(), &parameters) } != 0,
-        "Настройка списка USB-драйверов: {}",
+        "Configuring USB driver list: {}",
         std::io::Error::last_os_error()
     );
     ensure!(
         unsafe { SetupDiBuildDriverInfoList(set.0, ptr::null_mut(), SPDIT_CLASSDRIVER) } != 0,
-        "Перечисление установленных USB-драйверов: {}",
+        "Enumerating installed USB drivers: {}",
         std::io::Error::last_os_error()
     );
     let mut seen = HashSet::new();
@@ -126,7 +126,7 @@ pub(super) fn installed() -> Result<bool> {
             if error.raw_os_error() == Some(ERROR_NO_MORE_ITEMS as i32) {
                 break;
             }
-            return Err(error).context("Чтение списка USB-драйверов");
+            return Err(error).context("Reading USB driver list");
         }
         let mut detail = SP_DRVINFO_DETAIL_DATA_W {
             cbSize: size_of::<SP_DRVINFO_DETAIL_DATA_W>() as u32,
@@ -147,7 +147,7 @@ pub(super) fn installed() -> Result<bool> {
         if ok == 0 {
             let error = std::io::Error::last_os_error();
             if error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
-                return Err(error).context("Чтение INF USB-драйвера");
+                return Err(error).context("Reading USB driver INF");
             }
         }
         let end = detail
@@ -165,7 +165,7 @@ pub(super) fn installed() -> Result<bool> {
             crate::log!(
                 Debug,
                 "drivers",
-                "Пакет Apple подтверждён через SetupAPI: {}",
+                "Apple package verified using SetupAPI: {}",
                 inf.display()
             );
             return Ok(true);
@@ -174,7 +174,7 @@ pub(super) fn installed() -> Result<bool> {
     crate::log!(
         Debug,
         "drivers",
-        "SetupAPI не обнаружил полный пакет Apple USB для этой Windows"
+        "SetupAPI did not find a complete Apple USB package for this Windows installation"
     );
     Ok(false)
 }
@@ -183,46 +183,46 @@ pub(super) fn unpack(directory: &Path, arch: &str) -> Result<PathBuf> {
     let (bytes, expected) = match arch {
         "amd64" => (X64_CAB, X64_SHA256),
         "arm64" => (ARM64_CAB, ARM64_SHA256),
-        _ => bail!("Неподдерживаемая архитектура драйвера: {arch}"),
+        _ => bail!("Unsupported driver architecture: {arch}"),
     };
     crate::log!(
-        Info,
-        "drivers",
-        "Проверка SHA-256 встроенного CAB: архитектура={arch}; размер={} байт; ожидается={expected}",
+        Trace,
+        "drivers:cab",
+        "{arch}; size={} B; SHA-256={expected}",
         bytes.len()
     );
     ensure!(
         Sha256::digest(bytes).as_slice() == crate::device::decode_hex(expected)?,
-        "Повреждён встроенный пакет драйвера Apple"
+        "Bundled Apple driver package is corrupted"
     );
-    crate::log!(Info, "drivers", "SHA-256 встроенного CAB подтверждён");
-    let mut cabinet = cab::Cabinet::new(Cursor::new(bytes))
-        .context("Чтение встроенного пакета драйвера Apple")?;
+    crate::log!(Debug, "drivers:cab", "SHA-256 verified");
+    let mut cabinet =
+        cab::Cabinet::new(Cursor::new(bytes)).context("Reading bundled Apple driver package")?;
     // Only these fixed filenames can be extracted into the temporary directory.
     for name in FILES {
         let size = cabinet
             .get_file_entry(name)
-            .with_context(|| format!("В пакете драйвера отсутствует {name}"))?
+            .with_context(|| format!("Driver package is missing {name}"))?
             .uncompressed_size();
         crate::log!(
-            Info,
-            "drivers",
-            "Распаковка {name}: {size} байт -> {}",
+            Debug,
+            "drivers:cab",
+            "{name}: {size} B -> {}",
             directory.join(name).display()
         );
         let mut reader = cabinet
             .read_file(name)
-            .with_context(|| format!("Чтение {name} из CAB"))?;
+            .with_context(|| format!("Reading {name} from CAB"))?;
         let mut output = File::options()
             .write(true)
             .create_new(true)
             .open(directory.join(name))
-            .with_context(|| format!("Создание {}", directory.join(name).display()))?;
+            .with_context(|| format!("Creating {}", directory.join(name).display()))?;
         let copied = std::io::copy(&mut reader, &mut output)
-            .with_context(|| format!("Распаковка драйвера Apple: {name}"))?;
+            .with_context(|| format!("Extracting Apple driver: {name}"))?;
         ensure!(
             copied == u64::from(size),
-            "Неполный файл драйвера Apple: {name}"
+            "Incomplete Apple driver file: {name}"
         );
     }
     Ok(directory.join("AppleUsb.inf"))

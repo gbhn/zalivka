@@ -59,7 +59,7 @@ impl DriverPrivilege {
                     &mut token,
                 )
             } != 0,
-            "Открытие токена для поиска устройств: {}",
+            "Opening token for device rescan: {}",
             io::Error::last_os_error()
         );
         let token = unsafe { OwnedHandle::from_raw_handle(token) };
@@ -74,7 +74,7 @@ impl DriverPrivilege {
                     &mut requested.Privileges[0].Luid,
                 )
             } != 0,
-            "Поиск SeLoadDriverPrivilege: {}",
+            "Looking up SeLoadDriverPrivilege: {}",
             io::Error::last_os_error()
         );
         let mut previous: TOKEN_PRIVILEGES = unsafe { std::mem::zeroed() };
@@ -93,7 +93,7 @@ impl DriverPrivilege {
         let error = unsafe { GetLastError() };
         ensure!(
             ok != 0 && error == 0,
-            "Включение SeLoadDriverPrivilege: {}",
+            "Enabling SeLoadDriverPrivilege: {}",
             io::Error::from_raw_os_error(error as i32)
         );
         Ok(Self { token, previous })
@@ -115,7 +115,7 @@ impl Drop for DriverPrivilege {
             crate::log!(
                 Warning,
                 "drivers",
-                "Возврат привилегий токена: {}",
+                "Restoring token privileges: {}",
                 io::Error::last_os_error()
             );
         }
@@ -134,7 +134,7 @@ fn devices() -> Result<(Set, Vec<(String, SP_DEVINFO_DATA)>)> {
     };
     ensure!(
         raw != INVALID_HANDLE_VALUE as isize,
-        "Список USB-устройств: {}",
+        "USB device list: {}",
         io::Error::last_os_error()
     );
     let set = Set(raw);
@@ -147,7 +147,7 @@ fn devices() -> Result<(Set, Vec<(String, SP_DEVINFO_DATA)>)> {
             if error.raw_os_error() == Some(ERROR_NO_MORE_ITEMS as i32) {
                 break;
             }
-            return Err(error).context("Перечисление USB-устройств перед сбросом");
+            return Err(error).context("Enumerating USB devices before reset");
         }
         let mut id = [0u16; 512];
         let mut length = 0;
@@ -161,15 +161,15 @@ fn devices() -> Result<(Set, Vec<(String, SP_DEVINFO_DATA)>)> {
                     &mut length,
                 )
             } != 0,
-            "Чтение идентификатора USB-устройства: {}",
+            "Reading USB device identifier: {}",
             io::Error::last_os_error()
         );
         ensure!(
             (1..=id.len() as u32).contains(&length),
-            "Некорректная длина USB-идентификатора: {length}"
+            "Invalid USB identifier length: {length}"
         );
         let instance =
-            String::from_utf16(&id[..length as usize - 1]).context("USB-идентификатор UTF-16")?;
+            String::from_utf16(&id[..length as usize - 1]).context("UTF-16 USB identifier")?;
         if is_restore_device(&instance) {
             devices.push((instance, data));
         }
@@ -182,18 +182,11 @@ fn rescan() -> Result<()> {
     let result = unsafe { CM_Locate_DevNodeW(&mut root, ptr::null(), CM_LOCATE_DEVNODE_NORMAL) };
     ensure!(
         result == CR_SUCCESS,
-        "Корень дерева устройств: CONFIGRET {result:#x}"
+        "Device tree root: CONFIGRET {result:#x}"
     );
     let result = unsafe { CM_Reenumerate_DevNode(root, CM_REENUMERATE_NORMAL) };
-    ensure!(
-        result == CR_SUCCESS,
-        "Поиск устройств: CONFIGRET {result:#x}"
-    );
-    crate::log!(
-        Info,
-        "drivers",
-        "Запрос поиска устройств Windows выполнен. Повторное подключение Mac может потребоваться."
-    );
+    ensure!(result == CR_SUCCESS, "Device rescan: CONFIGRET {result:#x}");
+    crate::log!(Info, "drivers:usb", "Device rescan requested");
     Ok(())
 }
 
@@ -205,9 +198,9 @@ fn with_rescan(
     let result = change();
     let scanned = scan();
     match (result, scanned) {
-        (Err(error), Err(scan)) => Err(error.context(format!(
-            "Повторный поиск устройств также не выполнен: {scan:#}"
-        ))),
+        (Err(error), Err(scan)) => {
+            Err(error.context(format!("Device rescan also failed: {scan:#}")))
+        }
         (Err(error), _) | (_, Err(error)) => Err(error),
         _ => Ok(()),
     }
@@ -215,14 +208,14 @@ fn with_rescan(
 
 pub(crate) fn reset_elevated(reboot: &mut bool) -> Result<()> {
     crate::log!(
-        Info,
-        "drivers",
-        "Начало сброса USB-драйверов Apple; версия={}",
+        Debug,
+        "drivers:reset",
+        "Resetting Apple USB; version={}",
         crate::VERSION
     );
     ensure!(
         unsafe { IsUserAnAdmin() } != 0,
-        "Для сброса USB-драйверов нужны права локального администратора Windows"
+        "USB driver reset requires local Windows administrator rights"
     );
     let _privilege = DriverPrivilege::enable()?;
     let directory = tempfile::Builder::new()
@@ -232,8 +225,8 @@ pub(crate) fn reset_elevated(reboot: &mut bool) -> Result<()> {
     let (set, targets) = devices()?;
     crate::log!(
         Info,
-        "drivers",
-        "Записей DFU / Recovery / Restore для удаления: {}",
+        "drivers:reset",
+        "Records to remove: {}",
         targets.len()
     );
     // Complete all preflight checks before removing anything.
@@ -241,29 +234,24 @@ pub(crate) fn reset_elevated(reboot: &mut bool) -> Result<()> {
     with_rescan(
         || {
             for (instance, data) in &targets {
-                crate::log!(Info, "drivers", "Удаление записи подключения: {instance}");
+                crate::log!(Debug, "drivers:reset", "Removing {instance}");
                 let mut required = 0;
                 let ok =
                     unsafe { DiUninstallDevice(ptr::null_mut(), set.0, data, 0, &mut required) };
                 *reboot |= required != 0;
                 ensure!(
                     ok != 0,
-                    "Удаление {instance}: {}",
+                    "Removing {instance}: {}",
                     io::Error::last_os_error()
                 );
             }
             // Keep all DriverStore packages: reinstall the original signed package with normal ranking.
-            *reboot |=
-                crate::drivers::install(&inf).context("Повторная установка USB-драйвера Apple")?;
+            *reboot |= crate::drivers::install(&inf).context("Reinstalling Apple USB driver")?;
             Ok(())
         },
         rescan,
     )?;
-    crate::log!(
-        Info,
-        "drivers",
-        "Удаление записей и установка драйвера завершены; требуется перезагрузка: {reboot}"
-    );
+    crate::log!(Info, "drivers:reset", "Complete; reboot={reboot}");
     Ok(())
 }
 
@@ -272,13 +260,13 @@ pub(crate) fn reset() -> Result<bool> {
     let result = if unsafe { IsUserAnAdmin() } != 0 {
         reset_elevated(&mut reboot)
     } else {
-        let code = run_elevated("drivers reset-elevated")?;
+        let code = run_elevated("reset")?;
         reboot = matches!(code, 3010 | 3017);
         if code == 0 || code == 3010 {
             Ok(())
         } else {
             Err(anyhow::anyhow!(
-                "Сброс USB-драйверов завершился с кодом {code}. Причина указана в журнале выше."
+                "USB driver reset exited with code {code}. See the journal above."
             ))
         }
     };
@@ -287,7 +275,7 @@ pub(crate) fn reset() -> Result<bool> {
         crate::log!(
             Warning,
             "drivers",
-            "Перезагрузите Windows перед восстановлением Mac."
+            "Restart Windows before restoring the Mac."
         );
     }
     result?;

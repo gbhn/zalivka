@@ -65,16 +65,16 @@ impl ReadSubmitter {
     pub(crate) fn new() -> Result<Self> {
         let (requests, incoming) = mpsc::sync_channel::<ReadRequest>(1);
         let (finished, completed) = mpsc::sync_channel(1);
-        let worker = thread::Builder::new()
-            .name("zalivka-usb-in".into())
-            .spawn(move || {
+        let worker = thread::Builder::new().name("zalivka-usb-in".into()).spawn(
+            crate::progress::inherit(move || {
                 while let Ok((device, pipe, length, submit)) = incoming.recv() {
                     let result = PendingRead::begin_using(device, pipe, length, submit);
                     if finished.send(result).is_err() {
                         break;
                     }
                 }
-            })?;
+            }),
+        )?;
         Ok(Self {
             requests: Some(requests),
             completed,

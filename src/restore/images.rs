@@ -19,7 +19,7 @@ pub(super) fn serve_asr(ipsw: &mut Ipsw, id: &Identity, stream: &mut MuxStream) 
         crate::log!(
             Info,
             "filesystem",
-            "Распаковка файловой системы во временный файл ({length} байт)"
+            "Extracting filesystem to a temporary file ({length} bytes)"
         );
         crate::storage::require(&std::env::temp_dir(), length)?;
         let mut image = tempfile::tempfile()?;
@@ -33,6 +33,7 @@ pub(super) fn serve_asr(ipsw: &mut Ipsw, id: &Identity, stream: &mut MuxStream) 
 
 impl ContextState {
     pub(super) fn bootability(&mut self, out: &mut impl Write) -> Result<()> {
+        let _trace = crate::logging::firmware_transfer();
         let mut entries = Vec::new();
         let mut names = std::collections::HashSet::new();
         for path in self.ipsw.files()? {

@@ -1,14 +1,13 @@
-//! Child-process lifetime, progress and completion for one GUI operation.
+//! Native background operations, typed progress and a complete disk journal.
 use super::{Action, Event, Level, Notice, Record, Setup, Tone, UI_REFRESH_INTERVAL, progress};
 use anyhow::{Context, Result};
 use eframe::egui;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs::File,
-    io::{BufRead, BufReader, Write},
+    io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::mpsc::Sender,
+    sync::{Arc, Mutex, mpsc::Sender},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -16,11 +15,10 @@ pub(super) struct Job {
     pub(super) id: u64,
     pub(super) action: Action,
     pub(super) started: Instant,
-    child: Child,
-    pub(super) log: File,
+    pub(super) context: progress::Context,
+    pub(super) journal: Arc<Mutex<Journal>>,
     pub(super) log_error: Option<String>,
     pub(super) success: Option<bool>,
-    pub(super) readers: u8,
     pub(super) cancelled: bool,
     pub(super) restore_completed: bool,
     provisioning_warning: Option<String>,
@@ -68,35 +66,67 @@ impl Transfer {
     }
 }
 
-/// Both output pipes belong to one job; only stdout carries state events.
 pub(super) enum Output {
-    Line(String),
     State(progress::Event),
-    Closed,
+    Finished(bool),
 }
 
-impl Output {
-    pub(super) fn parse(line: String, state_events: bool) -> Self {
-        if state_events && let Some(event) = progress::Event::parse(&line) {
-            Self::State(event)
-        } else {
-            Self::Line(line)
+pub(super) struct Journal {
+    pub(super) log: BufWriter<File>,
+    error: Option<String>,
+    pending: VecDeque<Record>,
+}
+
+impl Journal {
+    fn new(log: File) -> Self {
+        Self {
+            log: BufWriter::with_capacity(256 * 1024, log),
+            error: None,
+            pending: VecDeque::new(),
         }
+    }
+    fn write(&mut self, mut record: Record) -> Record {
+        record.normalize();
+        if self.error.is_none()
+            && let Err(error) = record.write_to(&mut self.log)
+        {
+            self.error = Some(error.to_string());
+            record
+                .message
+                .push_str(&format!(" / Disk journal incomplete: {error}"));
+            if record.level != Level::Error {
+                record.level = Level::Warning;
+            }
+        }
+        record
+    }
+    fn push(&mut self, record: Record) {
+        self.pending.push_back(record);
+        super::trim_logs(&mut self.pending);
+    }
+    fn flush(&mut self) -> Option<String> {
+        if self.error.is_none()
+            && let Err(error) = self.log.flush()
+        {
+            let error = error.to_string();
+            self.error = Some(error.clone());
+            return Some(error);
+        }
+        None
     }
 }
 
 impl Job {
-    pub(super) fn new(id: u64, action: Action, child: Child, log: File) -> Self {
+    pub(super) fn new(id: u64, action: Action, context: progress::Context, log: File) -> Self {
         let now = Instant::now();
         Self {
             id,
             action,
             started: now,
-            child,
-            log,
+            context,
+            journal: Arc::new(Mutex::new(Journal::new(log))),
             log_error: None,
             success: None,
-            readers: 2,
             cancelled: false,
             restore_completed: false,
             provisioning_warning: None,
@@ -104,9 +134,9 @@ impl Job {
             overall_operations: BTreeMap::new(),
             overall_fraction: None,
             phase: if matches!(action, Action::PrepareWindows | Action::ResetDrivers) {
-                "Подтвердите запрос прав администратора Windows".into()
+                "Approve the Windows administrator prompt".into()
             } else {
-                "Подготовка".into()
+                "Preparing".into()
             },
             last_activity: now,
         }
@@ -119,10 +149,12 @@ impl Job {
 
     pub(super) fn stop(&mut self) -> std::io::Result<()> {
         if !self.can_stop() {
-            return Err(std::io::Error::other("Операцию сейчас нельзя остановить"));
+            return Err(std::io::Error::other(
+                "This operation cannot be stopped right now",
+            ));
         }
         if !self.cancelled {
-            self.child.kill()?;
+            self.context.cancel();
             self.cancelled = true;
         }
         Ok(())
@@ -130,33 +162,36 @@ impl Job {
 
     pub(super) fn record(&mut self, mut record: Record) -> Record {
         record.elapsed_ms = self.started.elapsed().as_millis() as u64;
-        record.normalize();
-        if self.log_error.is_none()
-            && let Err(error) = record.write_to(&mut self.log)
-        {
-            let error = error.to_string();
+        let mut journal = self.journal.lock().unwrap_or_else(|e| e.into_inner());
+        let mut record = journal.write(record);
+        if let Some(error) = journal.flush() {
             record
                 .message
-                .push_str(&format!(" / Журнал на диске неполный: {error}"));
+                .push_str(&format!(" / Disk journal incomplete: {error}"));
             if record.level != Level::Error {
                 record.level = Level::Warning;
             }
-            record.normalize();
-            self.log_error = Some(error);
         }
+        self.log_error = journal.error.clone();
         record
+    }
+
+    pub(super) fn pending_logs(&mut self) -> Vec<Record> {
+        // Rendering never waits for disk I/O in the journal thread.
+        let mut journal = match self.journal.try_lock() {
+            Ok(journal) => journal,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Vec::new(),
+        };
+        self.log_error = journal.error.clone();
+        journal.pending.drain(..).collect()
     }
 
     pub(super) fn output(&mut self, output: Output) -> Option<Record> {
         match output {
-            Output::Line(line) => {
-                self.last_activity = Instant::now();
-                // stderr is reserved for unexpected runtime/OS diagnostics.
-                Some(self.record(Record::new(Level::Warning, "worker", line)))
-            }
             Output::State(event) => self.worker_event(event),
-            Output::Closed => {
-                self.readers = self.readers.saturating_sub(1);
+            Output::Finished(success) => {
+                self.success = Some(success);
                 None
             }
         }
@@ -185,7 +220,7 @@ impl Job {
             progress::Event::RestoreCompleted => {
                 self.restore_completed = true;
                 self.overall_fraction = Some(1.0);
-                self.set_phase("Восстановление завершено");
+                self.set_phase("Restore complete");
             }
             progress::Event::ProvisioningWarning { message } => {
                 self.provisioning_warning = Some(message);
@@ -193,7 +228,7 @@ impl Job {
             progress::Event::RebootRequired => {}
             progress::Event::Checkpoint { name, complete } => {
                 if !complete {
-                    self.phase = format!("Этап: {}", name.replace('_', " "));
+                    self.phase = format!("Stage: {}", name.replace('_', " "));
                 }
             }
             progress::Event::OperationWeights {
@@ -266,36 +301,32 @@ impl Job {
         self.transfers.clear();
     }
 
-    // The exit code can arrive before the final stdout/stderr lines.
-    pub(super) fn finished(&mut self) -> std::io::Result<Option<bool>> {
-        if self.success.is_none() {
-            self.success = self.child.try_wait()?.map(|status| status.success());
-        }
-        Ok(self.success.filter(|_| self.readers == 0))
+    pub(super) fn finished(&self) -> Option<bool> {
+        self.success
     }
 
     pub(super) fn completion_notice(&self, success: bool, reboot_required: bool) -> Notice {
         let (title, mut detail, mut tone) = if self.cancelled {
-            ("Операция остановлена".into(), String::new(), Tone::Neutral)
+            ("Operation stopped".into(), String::new(), Tone::Neutral)
         } else if !success {
             (
-                format!("{}: ошибка", self.action.title()),
-                "Подробности в журнале.".into(),
+                format!("{}: error", self.action.title()),
+                "See the journal for details.".into(),
                 Tone::Error,
             )
         } else if matches!(self.action, Action::PrepareWindows | Action::ResetDrivers)
             && reboot_required
         {
             (
-                "Перезагрузите Windows".into(),
-                "Драйвер установлен. Перезагрузите компьютер перед восстановлением Mac.".into(),
+                "Restart Windows".into(),
+                "Driver installed. Restart Windows before restoring the Mac.".into(),
                 Tone::Neutral,
             )
         } else if self.action.writes_device()
             && let Some(warning) = &self.provisioning_warning
         {
             (
-                format!("{}: проверьте активацию", self.action.completed_title()),
+                format!("{}: check activation", self.action.completed_title()),
                 warning.clone(),
                 Tone::Neutral,
             )
@@ -305,7 +336,7 @@ impl Job {
                 if self.action.writes_device() {
                     progress::MAC_STARTUP_HINT.into()
                 } else if self.action == Action::ResetDrivers {
-                    "Подключите Mac заново и введите его в DFU.".into()
+                    "Reconnect the Mac and enter DFU mode.".into()
                 } else {
                     String::new()
                 },
@@ -317,7 +348,7 @@ impl Job {
                 detail.push(' ');
             }
             detail.push_str(&format!(
-                "Журнал на диске неполный: {error}. В окне доступна последняя часть журнала."
+                "Disk journal incomplete: {error}. Recent history is available in this window."
             ));
             if tone == Tone::Success {
                 tone = Tone::Neutral;
@@ -344,87 +375,149 @@ impl Job {
     ) -> Result<(Self, PathBuf)> {
         let directory = zalivka::storage::log_directory()?;
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let name = format!("{}-{stamp}", action.command());
+        let name = format!("{}-{stamp}", action.log_name());
         let path = directory.join(format!("{name}.log"));
         let transcript = directory.join(format!("{name}.jsonl"));
-        let args = setup.arguments(action, Some(&transcript))?;
+        setup.validate(action)?;
         let log = File::options().write(true).create_new(true).open(&path)?;
-        let mut command = Command::new(std::env::current_exe()?);
-        command
-            .args(args)
-            .env(progress::WORKER_EVENTS_ENV, "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000);
-        }
-        let mut child = command.spawn().context("starting worker")?;
-        let stdout = child.stdout.take().context("worker has no stdout")?;
-        let stderr = child.stderr.take().context("worker has no stderr")?;
-        for (pipe, state_events) in [
-            (Box::new(stdout) as Box<dyn std::io::Read + Send>, true),
-            (Box::new(stderr), false),
-        ] {
-            let tx = tx.clone();
-            let ctx = ctx.clone();
-            if let Err(e) = std::thread::Builder::new()
-                .name("zalivka-log".into())
-                .spawn(move || {
-                    for line in BufReader::new(pipe).lines() {
-                        let line = match line {
-                            Ok(line) => line,
-                            Err(e) => {
-                                let _ = tx.send(Event::Worker(
-                                    id,
-                                    Output::Line(format!("Log read error: {e}")),
-                                ));
-                                break;
-                            }
-                        };
-                        if tx
-                            .send(Event::Worker(id, Output::parse(line, state_events)))
-                            .is_err()
-                        {
-                            break;
-                        }
-                        ctx.request_repaint_after(UI_REFRESH_INTERVAL);
-                    }
-                    let _ = tx.send(Event::Worker(id, Output::Closed));
-                    ctx.request_repaint();
-                })
-            {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e.into());
+        let mut job = Self::new(id, action, progress::Context::new(|_| {}), log);
+        let record = job.record(Record::new(
+            Level::Info,
+            "session",
+            format!(
+                "Starting: {}; Zalivka {}{}",
+                action.title(),
+                zalivka::VERSION,
+                if setup.ecid.is_empty() {
+                    String::new()
+                } else {
+                    format!("; ECID: {}", setup.ecid)
+                }
+            ),
+        ));
+        job.journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(record);
+        let journal = job.journal.clone();
+        let log_started = zalivka::logging::elapsed_ms();
+        let events = tx.clone();
+        let repaint = ctx.clone();
+        let context = progress::Context::new(move |event| match event {
+            progress::Event::Log(mut record) => {
+                record.elapsed_ms = record.elapsed_ms.saturating_sub(log_started);
+                let mut journal = journal.lock().unwrap_or_else(|e| e.into_inner());
+                let wake = journal.pending.is_empty();
+                let record = journal.write(record);
+                journal.push(record);
+                drop(journal);
+                if wake {
+                    repaint.request_repaint_after(UI_REFRESH_INTERVAL);
+                }
             }
-        }
-        Ok((Self::new(id, action, child, log), path))
+            event => {
+                let _ = events.send(Event::Worker(id, Output::State(event)));
+                repaint.request_repaint_after(UI_REFRESH_INTERVAL);
+            }
+        });
+        let journal = job.journal.clone();
+        let repaint = ctx.clone();
+        let context = context
+            .with_async_logs(move || {
+                let mut journal = journal.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(error) = journal.flush() {
+                    journal.push(Record::new(
+                        Level::Warning,
+                        "journal",
+                        format!("Disk journal incomplete: {error}"),
+                    ));
+                    repaint.request_repaint_after(UI_REFRESH_INTERVAL);
+                }
+            })
+            .context("starting journal thread")?;
+        job.context = context.clone();
+        let setup = setup.clone();
+        let tx = tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name(format!("zalivka-{}", action.log_name()))
+            .spawn(move || {
+                let result = context.run(|| {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        setup.run(action, &transcript)
+                    }))
+                    .unwrap_or_else(|panic| {
+                        let message = panic
+                            .downcast_ref::<String>()
+                            .map(String::as_str)
+                            .or_else(|| panic.downcast_ref::<&str>().copied())
+                            .unwrap_or("unknown panic");
+                        Err(anyhow::anyhow!("Operation thread: {message}"))
+                    });
+                    if let Err(error) = &result
+                        && !context.cancelled()
+                    {
+                        zalivka::log!(Error, "app", "{error:#}");
+                    }
+                    result
+                });
+                // All child services have stopped: drain their final dumps before
+                // reporting completion or allowing the journal to be replaced.
+                let logs = context.flush_logs();
+                let _ = tx.send(Event::Worker(
+                    id,
+                    Output::Finished(result.is_ok() && logs.is_ok()),
+                ));
+                ctx.request_repaint();
+            })
+            .context("starting native operation")?;
+        Ok((job, path))
     }
 }
 
 impl Drop for Job {
     fn drop(&mut self) {
-        // A window can close immediately after stop(). Reap the killed child
-        // here as well as in finished(), which may never run for that window.
-        if self.cancelled {
-            let _ = self.child.wait();
+        if self.can_stop() && self.success.is_none() {
+            self.context.cancel();
         }
+        let _ = self
+            .journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .flush();
     }
 }
 
-pub(super) fn save_log(path: PathBuf, source: Option<&Path>, text: &str) -> Result<PathBuf> {
-    if let Some(source) = source {
-        let same = source
-            .canonicalize()
-            .ok()
-            .zip(path.canonicalize().ok())
-            .is_some_and(|(a, b)| a == b);
-        if same {
-            return Ok(path);
-        }
+pub(super) fn save_log(
+    path: PathBuf,
+    source: Option<&Path>,
+    text: &str,
+    journal: Option<&Mutex<Journal>>,
+) -> Result<PathBuf> {
+    let same = source
+        .and_then(|source| source.canonicalize().ok())
+        .zip(path.canonicalize().ok())
+        .is_some_and(|(source, destination)| source == destination);
+    let source = source
+        .map(File::open)
+        .transpose()?
+        .map(|file| -> Result<_> {
+            // Capture a complete record boundary, then release writers while the
+            // potentially large snapshot is copied in the background.
+            let mut journal =
+                journal.map(|journal| journal.lock().unwrap_or_else(|e| e.into_inner()));
+            if let Some(journal) = &mut journal {
+                let _ = journal.flush();
+                if let Some(error) = &journal.error {
+                    anyhow::bail!("Disk journal incomplete: {error}");
+                }
+            }
+            let length = file.metadata()?.len();
+            Ok((file, length))
+        })
+        .transpose()?;
+    if same {
+        return Ok(path);
     }
     // Write beside the destination, then replace it only after a complete copy.
     // Distinct paths can be hard links to the active log; copying directly to
@@ -434,11 +527,68 @@ pub(super) fn save_log(path: PathBuf, source: Option<&Path>, text: &str) -> Resu
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let mut saved = tempfile::NamedTempFile::new_in(directory)?;
-    if let Some(source) = source {
-        std::io::copy(&mut File::open(source)?, &mut saved)?;
+    if let Some((file, length)) = source {
+        std::io::copy(&mut file.take(length), &mut saved)?;
     } else {
         saved.write_all(text.as_bytes())?;
     }
     saved.persist(&path).context("saving operation log")?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn polling_gui_logs_does_not_wait_for_the_journal_mutex() {
+        let log = tempfile::tempfile().unwrap();
+        let mut job = Job::new(1, Action::Verify, progress::Context::new(|_| {}), log);
+        let journal = job.journal.clone();
+        let locked = journal.lock().unwrap();
+        let (done, result) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            done.send(job.pending_logs()).unwrap();
+        });
+        let pending = result.recv_timeout(Duration::from_secs(5));
+        drop(locked);
+        reader.join().unwrap();
+        assert!(pending.expect("GUI waited for the disk journal").is_empty());
+    }
+
+    #[test]
+    fn trace_history_is_bounded_while_the_disk_journal_remains_complete() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut journal = Journal::new(file.reopen().unwrap());
+        let record = journal.write(Record::new(Level::Info, "restore", "Starting stage"));
+        journal.push(record);
+        for index in 0..8000 {
+            let record = journal.write(Record::new(Level::Trace, "fdr:conn", index));
+            journal.push(record);
+        }
+        assert!(journal.flush().is_none());
+        assert_eq!(journal.pending.len(), 4000);
+        assert_eq!(journal.pending.front().unwrap().level, Level::Info);
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("saved.log");
+        let journal = Mutex::new(journal);
+        save_log(
+            destination.clone(),
+            Some(file.path()),
+            "visible tail",
+            Some(&journal),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            std::fs::read(file.path()).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(file.path())
+                .unwrap()
+                .lines()
+                .count(),
+            8001
+        );
+    }
 }

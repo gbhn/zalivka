@@ -41,11 +41,14 @@ pub(crate) fn tss_agent() -> ureq::Agent {
     let connector = crate::proxy::HttpConnector::for_tss(proxy_config);
     #[cfg(not(windows))]
     let connector = crate::proxy::HttpConnector::new(proxy_config);
-    ureq::Agent::with_parts(
+    let agent = ureq::Agent::with_parts(
         tss.config().clone(),
         connector,
         ureq::unversioned::resolver::DefaultResolver::default(),
-    )
+    );
+    let cancellation = agent.clone();
+    crate::progress::on_cancel(move || cancellation.shutdown());
+    agent
 }
 
 pub(crate) fn tls_config(roots: ureq::tls::RootCerts) -> ureq::tls::TlsConfig {
@@ -68,11 +71,14 @@ fn agent_with_body_timeout(
         .max_redirects(0)
         .user_agent(concat!("zalivka/", env!("CARGO_PKG_VERSION")))
         .build();
-    ureq::Agent::with_parts(
+    let agent = ureq::Agent::with_parts(
         config.clone(),
         crate::proxy::HttpConnector::new(config),
         ureq::unversioned::resolver::DefaultResolver::default(),
-    )
+    );
+    let cancellation = agent.clone();
+    crate::progress::on_cancel(move || cancellation.shutdown());
+    agent
 }
 
 /// Limit firmware/asset downloads to Apple's public HTTPS distribution hosts.
@@ -170,6 +176,14 @@ fn send_http_via(
     request: &Request<Vec<u8>>,
     proxy: Option<ureq::Proxy>,
 ) -> Result<Response<ureq::Body>> {
+    crate::log!(
+        Trace,
+        "http",
+        "{} {}; body={} B",
+        request.method(),
+        request.uri(),
+        request.body().len()
+    );
     let request = agent
         .configure_request(request.clone())
         .proxy(proxy)
@@ -180,7 +194,15 @@ fn send_http_via(
     } else {
         agent.run(request)
     };
-    response.context("Apple HTTPS request failed")
+    let response = response.context("Apple HTTPS request failed")?;
+    crate::log!(
+        Trace,
+        "http",
+        "HTTP {}; headers={:?}",
+        response.status(),
+        response.headers()
+    );
+    Ok(response)
 }
 
 fn redirect_request(
@@ -189,6 +211,12 @@ fn redirect_request(
     location: &str,
 ) -> Result<()> {
     let next = redirect_url(&request.uri().to_string(), location)?;
+    crate::log!(
+        Trace,
+        "http",
+        "Redirect {status}: {} -> {next}",
+        request.uri()
+    );
     let same_origin = next
         .host()
         .zip(request.uri().host())

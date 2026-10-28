@@ -292,7 +292,7 @@ fn tls_configs() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
 #[test]
 #[ignore = "local FDR laboratory; explicit PAC, simulated USB, no Apple or real Mac"]
 fn pac_connect_tls_matrix() {
-    crate::logging::init(true);
+    crate::logging::init(crate::logging::Level::Debug);
     let (server, client) = tls_configs();
     for greeting in [false, true] {
         for fragment in [1, 4096] {
@@ -342,7 +342,7 @@ fn pac_connect_tls_matrix() {
 #[test]
 #[ignore = "independent Windows curl SOCKS/HTTPS reproduction through local PAC and simulated USB"]
 fn native_curl_method_list_reproduction() {
-    crate::logging::init(true);
+    crate::logging::init(crate::logging::Level::Debug);
     let (server, client) = tls_configs();
     run_case(
         true,

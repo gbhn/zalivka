@@ -29,7 +29,7 @@ fn preparation_allows_disconnected_devices_and_checks_real_usb_access() {
                 .unwrap_err()
                 .to_string();
         assert!(error.contains(r"USB\VID_05AC&PID_1227\test"));
-        assert!(error.contains(driver.unwrap_or("не назначен")));
+        assert!(error.contains(driver.unwrap_or("not assigned")));
         assert!(error.contains("os error 5"));
     }
 }

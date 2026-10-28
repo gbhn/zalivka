@@ -24,10 +24,16 @@ fn pipe_does_not_wait_for_a_helper_that_never_connects() {
 fn pipe_keeps_utf8_levels_and_order_even_after_helper_exit() {
     let mut pipe = LogPipe::new().unwrap();
     let mut writer = writer(&pipe);
-    let expected: Vec<_> = [Level::Debug, Level::Info, Level::Warning, Level::Error]
-        .into_iter()
-        .map(|level| Record::new(level, "drivers", "Ошибка: нужны права администратора"))
-        .collect();
+    let expected: Vec<_> = [
+        Level::Trace,
+        Level::Debug,
+        Level::Info,
+        Level::Warning,
+        Level::Error,
+    ]
+    .into_iter()
+    .map(|level| Record::new(level, "drivers", "Ошибка: нужны права администратора"))
+    .collect();
     for record in &expected {
         Event::Log(record.clone()).write_to(&mut writer).unwrap();
     }
@@ -80,14 +86,12 @@ fn log_writer_subprocess() {
     let Ok(id) = std::env::var("ZALIVKA_TEST_LOG_PIPE") else {
         return;
     };
+    crate::logging::init(Level::Trace);
     crate::logging::connect_elevated(id.parse().unwrap()).unwrap();
-    crate::log!(Debug, "drivers", "Отладочные сведения установщика");
-    crate::log!(
-        Error,
-        "app",
-        "Для подготовки Windows нужны права администратора"
-    );
+    crate::log!(Debug, "drivers", "Installer debug details");
+    crate::log!(Error, "app", "Windows setup requires administrator rights");
     super::super::token::log().unwrap();
+    crate::log!(Trace, "drivers:auth", "TRACE via UAC");
 }
 
 #[test]
@@ -127,7 +131,12 @@ fn subprocess_records_and_token_diagnostics_reach_the_original_process() {
     assert!(status.success(), "{status:?}: {records:?}");
     assert_eq!(records[0].level, Level::Debug);
     assert_eq!(records[1].level, Level::Error);
-    for text in ["TokenIsElevated=", "S-1-16-", "Учётная запись процесса:"] {
+    assert!(
+        records
+            .iter()
+            .any(|record| record.level == Level::Trace && record.message == "TRACE via UAC")
+    );
+    for text in ["TokenIsElevated=", "S-1-16-", "Process account:"] {
         assert!(
             records.iter().any(|record| record.message.contains(text)),
             "{records:?}"

@@ -131,19 +131,9 @@ impl Tone {
 }
 
 fn preference_file() -> Option<PathBuf> {
-    fn absolute_env(name: &str) -> Option<PathBuf> {
-        std::env::var_os(name)
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-    }
-    let root = if cfg!(windows) {
-        absolute_env("LOCALAPPDATA")
-            .or_else(|| absolute_env("USERPROFILE").map(|path| path.join("AppData").join("Local")))
-    } else {
-        absolute_env("XDG_CONFIG_HOME")
-            .or_else(|| absolute_env("HOME").map(|home| home.join(".config")))
-    }?;
-    Some(root.join("zalivka").join("theme"))
+    zalivka::storage::config_directory()
+        .ok()
+        .map(|root| root.join("theme"))
 }
 
 fn read_preference(path: &Path) -> egui::ThemePreference {
@@ -164,7 +154,7 @@ pub(super) fn apply_preference(ctx: &egui::Context, preference: egui::ThemePrefe
 }
 
 pub(super) fn save_preference(preference: egui::ThemePreference) -> Result<()> {
-    let path = preference_file().context("Не удалось определить папку настроек")?;
+    let path = preference_file().context("Could not locate the settings folder")?;
     write_preference(&path, preference)
 }
 
@@ -185,10 +175,8 @@ fn write_preference(path: &Path, preference: egui::ThemePreference) -> Result<()
             }
             .as_bytes(),
         )
-        .context("Не удалось сохранить тему оформления")?;
-    saved
-        .persist(path)
-        .context("Не удалось сохранить тему оформления")?;
+        .context("Could not save the theme")?;
+    saved.persist(path).context("Could not save the theme")?;
     Ok(())
 }
 

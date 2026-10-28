@@ -77,6 +77,7 @@ impl Ipsw {
     }
 
     fn open_archive(path: &Path) -> Result<ZipArchive<BufReader<File>>> {
+        crate::log!(Trace, "ipsw:zip", "Opening {}", path.display());
         // IPSWs are ordinary ZIPs at offset zero. Offset autodetection scans
         // large ZIP64 images for self-extracting prefixes, which is very slow
         // over Windows filesystem bridges.
@@ -96,6 +97,7 @@ impl Ipsw {
                 "duplicate IPSW entry {name}"
             );
         }
+        crate::log!(Trace, "ipsw:zip", "Files={}", archive.len());
         Ok(archive)
     }
 
@@ -138,6 +140,7 @@ impl Ipsw {
     }
 
     pub fn read(&mut self, path: &str) -> Result<Vec<u8>> {
+        crate::log!(Trace, "ipsw:read", "{path}");
         self.read_limited(path, MAX_COMPONENT)
     }
 
@@ -150,6 +153,12 @@ impl Ipsw {
         ensure!(
             entry.size() <= limit,
             "IPSW entry exceeds memory limit {limit}"
+        );
+        crate::log!(
+            Trace,
+            "ipsw:read",
+            "{path}: {} B; limit={limit}",
+            entry.size()
         );
         crate::storage::read_limited(
             entry,
@@ -200,6 +209,7 @@ impl Ipsw {
     }
 
     pub fn personalized(&mut self, id: &Identity, name: &str, ticket: &Value) -> Result<Vec<u8>> {
+        crate::log!(Trace, "ipsw:sign", "{name}; identity={}", id.index);
         let bytes = if name == "Ap,LocalPolicy" {
             img4::empty_local_policy()
         } else {
@@ -224,6 +234,13 @@ impl Ipsw {
     pub fn stream(&mut self, path: &str, out: &mut impl Write) -> Result<u64> {
         validate_path(path)?;
         let mut entry = self.archive.by_name(path)?;
+        crate::log!(
+            Trace,
+            "ipsw:stream",
+            "{path}: {} B; compression={:?}",
+            entry.size(),
+            entry.compression()
+        );
         if entry.compression() == zip::CompressionMethod::Stored
             || entry.size() <= STREAM_CHUNK as u64
         {

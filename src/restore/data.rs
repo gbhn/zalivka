@@ -35,7 +35,7 @@ impl ContextState {
         })
         .collect::<Vec<_>>()
         .join(", ");
-        crate::log!(Debug, "restored", "Запрос {kind}: {arguments}");
+        crate::log!(Debug, "restored:data", "{kind}: {arguments}");
         let port = data_type.data_port(message, false)?;
         if port != 0 {
             let mut service = session.connect_retry(port, Duration::from_secs(60))?;
@@ -134,11 +134,7 @@ impl ContextState {
                             || global_optional,
                         "IPSW is missing required global manifest {path}"
                     );
-                    crate::log!(
-                        Debug,
-                        "restored",
-                        "В IPSW нет необязательного GlobalManifest: {path}; завершение без файла"
-                    );
+                    crate::log!(Debug, "restored:data", "GlobalManifest missing: {path}");
                     wire::send(out, &wire::dict([("FileDataDone", true.into())]))?;
                     return Ok(());
                 }
@@ -197,8 +193,18 @@ impl ContextState {
                 return crate::firmware::send_response(out, response, args);
             }
         };
+        let _trace = matches!(
+            data_type,
+            DataType::Component(_)
+                | DataType::RecoveryAsset
+                | DataType::RecoveryFirmware
+                | DataType::RecoveryLocalPolicy
+                | DataType::Images
+                | DataType::Nor
+        )
+        .then(crate::logging::firmware_transfer);
         wire::send(out, &response).with_context(|| format!("sending restored response {kind}"))?;
-        crate::log!(Debug, "restored", "Ответ на запрос {kind} отправлен");
+        crate::log!(Debug, "restored:data", "{kind}: response sent");
         Ok(())
     }
 
@@ -221,5 +227,7 @@ pub(super) fn serve_asset(
     out: &mut impl std::io::Write,
     message: &Value,
 ) -> Result<()> {
-    wire::send_binary(out, &assets.response(message)?)
+    let response = assets.response(message)?;
+    let _trace = crate::logging::firmware_transfer();
+    wire::send_binary(out, &response)
 }

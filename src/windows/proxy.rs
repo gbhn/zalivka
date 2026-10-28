@@ -175,8 +175,8 @@ pub(crate) fn for_url(uri: &Uri) -> Result<Option<Option<Proxy>>> {
                 Err(error) if !manual.is_empty() => {
                     crate::log!(
                         Warning,
-                        "proxy",
-                        "Windows PAC/WPAD unavailable ({error:#}); using configured manual proxy"
+                        "proxy:pac",
+                        "PAC/WPAD: {error:#}; using manual proxy"
                     );
                 }
                 // "Automatically detect" is commonly enabled without a WPAD

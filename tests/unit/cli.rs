@@ -10,42 +10,22 @@ fn driver_reset_is_a_separate_command_without_a_device_or_firmware() {
             command: DriverCommand::Reset
         }
     ));
-    #[cfg(windows)]
-    assert!(matches!(
-        Cli::try_parse_from(["zalivka", "drivers", "reset-elevated"])
-            .unwrap()
-            .command,
-        Command::Drivers {
-            command: DriverCommand::ResetElevated
-        }
-    ));
+    assert!(Cli::try_parse_from(["zalivka", "drivers", "reset-elevated"]).is_err());
+    assert!(Cli::try_parse_from(["zalivka", "drivers", "prepare-elevated"]).is_err());
 }
 
-#[cfg(windows)]
 #[test]
-fn elevated_logging_accepts_only_pipe_identifiers() {
-    let id = uuid::Uuid::new_v4().to_string();
-    let cli = Cli::try_parse_from([
-        "zalivka",
+fn cli_has_no_logging_switches_or_gui_service_parameters() {
+    for flag in [
+        "--trace",
+        "--verbose",
+        "-v",
         "--elevated-log",
-        &id,
-        "drivers",
-        "prepare-elevated",
-    ])
-    .unwrap();
-    assert_eq!(cli.elevated_log.unwrap().to_string(), id);
-    for name in ["C:/Windows/System32/file", "../file", r"\\server\pipe\file"] {
-        assert!(
-            Cli::try_parse_from([
-                "zalivka",
-                "--elevated-log",
-                name,
-                "drivers",
-                "prepare-elevated"
-            ])
-            .is_err()
-        );
+        "--driver-helper",
+    ] {
+        assert!(Cli::try_parse_from(["zalivka", flag, "doctor"]).is_err());
     }
+    assert!(Cli::try_parse_from(["zalivka", "revive", "--ecid", "2a", "--experimental"]).is_err());
 }
 
 #[test]
@@ -75,7 +55,6 @@ fn restore_and_revive_accept_automatic_download_and_shared_options() {
             command,
             "--ecid",
             "1234",
-            "--experimental",
             "--firmware-dir",
             "cache",
             "--identity",
@@ -108,21 +87,17 @@ fn restore_and_revive_accept_automatic_download_and_shared_options() {
             Some(PathBuf::from("tokens.plist"))
         );
         assert_eq!(args.apple_connect_data, Some(PathBuf::from("connect.data")));
-        assert!(Cli::try_parse_from(["zalivka", command, "--ecid", "1234"]).is_err());
+        assert_eq!(
+            Cli::try_parse_from(["zalivka", command, "--ecid", "1234"]).is_ok(),
+            command == "revive"
+        );
     }
 }
 
 #[test]
 fn local_restore_and_revive_reject_cache_options() {
     for command in ["restore", "revive"] {
-        let mut argv = vec![
-            "zalivka",
-            command,
-            "local.ipsw",
-            "--ecid",
-            "1234",
-            "--experimental",
-        ];
+        let mut argv = vec!["zalivka", command, "local.ipsw", "--ecid", "1234"];
         if command == "restore" {
             argv.push("--erase");
         }
@@ -158,7 +133,7 @@ fn usb_internet_commands_and_post_restore_sharing_are_rejected() {
         assert!(Cli::try_parse_from(["zalivka", "usb-internet", command]).is_err());
     }
     for command in ["restore", "revive"] {
-        let mut args = vec!["zalivka", command, "--ecid", "2a", "--experimental"];
+        let mut args = vec!["zalivka", command, "--ecid", "2a"];
         if command == "restore" {
             args.push("--erase");
         }

@@ -1,9 +1,11 @@
 //! Shared GUI widgets and display formatting.
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
+use zalivka::localization::text as tr;
 
 pub(super) fn caption(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    let text: String = text.into();
     ui.label(
-        RichText::new(text)
+        RichText::new(tr(text))
             .small()
             .color(ui.visuals().weak_text_color()),
     )
@@ -14,10 +16,10 @@ pub(super) fn path_picker(ui: &mut egui::Ui, value: &mut String, hint: &str, but
         Vec2::new(ui.available_width(), 34.0),
         egui::Layout::right_to_left(egui::Align::Center),
         |ui| {
-            let clicked = ui.button(button).clicked();
+            let clicked = ui.button(tr(button)).clicked();
             ui.add_sized(
                 Vec2::new(ui.available_width(), 34.0),
-                egui::TextEdit::singleline(value).hint_text(hint),
+                egui::TextEdit::singleline(value).hint_text(tr(hint)),
             );
             clicked
         },
@@ -39,15 +41,17 @@ pub(super) fn section(ui: &mut egui::Ui, number: &str, title: &str) {
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             caption(ui, number);
-            ui.label(RichText::new(title).strong());
+            ui.label(RichText::new(tr(title)).strong());
         },
     );
     ui.add_space(6.0);
 }
 pub(super) fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.into(), egui::FontId::proportional(12.0), color);
+    let galley = ui.painter().layout_no_wrap(
+        zalivka::localization::text(text),
+        egui::FontId::proportional(12.0),
+        color,
+    );
     let (rect, _) =
         ui.allocate_exact_size(galley.size() + Vec2::new(20.0, 10.0), egui::Sense::hover());
     ui.painter()
@@ -65,7 +69,7 @@ pub(super) fn tint(color: Color32, background: Color32) -> Color32 {
 }
 pub(super) fn metric(ui: &mut egui::Ui, label: &str, value: &str) {
     caption(ui, label);
-    ui.label(RichText::new(value).size(20.0).strong());
+    ui.label(RichText::new(tr(value)).size(20.0).strong());
 }
 pub(super) fn progress_bar(ui: &mut egui::Ui, fraction: Option<f32>) {
     let bar = egui::ProgressBar::new(fraction.unwrap_or_default())
@@ -74,12 +78,12 @@ pub(super) fn progress_bar(ui: &mut egui::Ui, fraction: Option<f32>) {
     ui.add(bar);
     if let Some(value) = fraction {
         ui.label(
-            RichText::new(format!("{:.0}%", value * 100.0))
+            RichText::new(tr(format!("{:.0}%", value * 100.0)))
                 .small()
                 .strong(),
         );
     } else {
-        caption(ui, "Процент выполнения недоступен");
+        caption(ui, "Percentage unavailable");
     }
 }
 

@@ -1,10 +1,60 @@
 use super::*;
 
 #[test]
+fn native_context_is_inherited_by_children_and_restored_after_unwinding() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let output = events.clone();
+    let context = Context::new(move |event| output.lock().unwrap().push(event));
+    context.run(|| {
+        std::thread::spawn(inherit(|| {
+            crate::log!(Trace, "child", "native child");
+            Event::RestoreCompleted.emit();
+        }))
+        .join()
+        .unwrap();
+    });
+    assert!(!active());
+    let events = events.lock().unwrap();
+    assert!(matches!(&events[0], Event::Log(record) if record.source == "child"));
+    assert_eq!(events[1], Event::RestoreCompleted);
+    drop(events);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || context.run(|| panic!("test panic"))
+        ))
+        .is_err()
+    );
+    assert!(!active());
+}
+
+#[test]
+fn cancellation_runs_each_registered_action_once_including_late_registration() {
+    let count = Arc::new(AtomicU64::new(0));
+    let context = Context::new(|_| {});
+    context.run(|| {
+        let output = count.clone();
+        on_cancel(move || {
+            output.fetch_add(1, Ordering::Relaxed);
+        });
+    });
+    context.cancel();
+    context.cancel();
+    context.run(|| {
+        assert!(check_cancelled().is_err());
+        let output = count.clone();
+        on_cancel(move || {
+            output.fetch_add(1, Ordering::Relaxed);
+        });
+    });
+    assert_eq!(count.load(Ordering::Relaxed), 2);
+    assert!(check_cancelled().is_ok());
+}
+
+#[test]
 fn dropped_streams_emit_one_terminal_event_without_claiming_all_bytes_were_sent() {
-    const CHILD: &str = "ZALIVKA_TEST_PROGRESS_DROP";
-    if std::env::var_os(CHILD).is_some() {
-        crate::logging::init(false);
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output = events.clone();
+    Context::new(move |event| output.lock().unwrap().push(event)).run(|| {
         {
             let mut interrupted = Progress::new("download", Some(100), 0);
             interrupted.advance(40);
@@ -15,18 +65,13 @@ fn dropped_streams_emit_one_terminal_event_without_claiming_all_bytes_were_sent(
         retry.finish();
         retry.advance(10);
         retry.report();
-        return;
-    }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "progress::tests::dropped_streams_emit_one_terminal_event_without_claiming_all_bytes_were_sent", "--nocapture"])
-        .env(CHILD, "1").env(WORKER_EVENTS_ENV, "1").output().unwrap();
-    assert!(output.status.success());
-    let updates: Vec<_> = String::from_utf8(output.stdout)
+    });
+    let updates: Vec<_> = events
+        .lock()
         .unwrap()
-        .lines()
-        .filter_map(|line| Event::parse(&line[line.find(EVENT_PREFIX)?..]))
+        .iter()
         .filter_map(|event| match event {
-            Event::Transfer(update) => Some(update),
+            Event::Transfer(update) => Some(update.clone()),
             _ => None,
         })
         .collect();

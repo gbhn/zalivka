@@ -1,15 +1,19 @@
 use super::*;
-use std::{ffi::OsString, fs::File, path::Path};
+use std::{fs::File, path::Path};
+
+fn english_app() -> App {
+    let mut app = App::new();
+    app.localization.select("en");
+    app
+}
 
 fn job(action: Action) -> Job {
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .arg("--help")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    assert!(child.wait().unwrap().success());
-    Job::new(7, action, child, tempfile::tempfile().unwrap())
+    Job::new(
+        7,
+        action,
+        progress::Context::new(|_| {}),
+        tempfile::tempfile().unwrap(),
+    )
 }
 
 // These layout tests have no renderer to apply GPU texture updates.
@@ -48,7 +52,7 @@ fn startup_keeps_a_normal_window_and_clears_with_the_selected_background() {
         let ctx = egui::Context::default();
         configure(&ctx);
         theme::apply_preference(&ctx, preference);
-        let mut app = App::new();
+        let mut app = english_app();
         app.scanning = true;
         for frame in 0..3 {
             let output = render_app(&mut app, &ctx, frame);
@@ -66,18 +70,64 @@ fn startup_keeps_a_normal_window_and_clears_with_the_selected_background() {
 }
 
 #[test]
+fn interface_languages_change_labels_while_diagnostics_remain_english() {
+    for (language, settings, journal, language_label) in [
+        ("en", "Settings", "Journal", "Language"),
+        ("ru", "Настройки", "Журнал", "Язык"),
+    ] {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        let mut app = english_app();
+        app.localization.select(language);
+        app.scanning = true;
+        app.journal_open = true;
+        app.journal_line(Record::new(
+            Level::Info,
+            "proxy:auth",
+            "Authentication complete",
+        ));
+        let mut output = render_app(&mut app, &ctx, 0);
+        for frame in 1..4 {
+            output = render_app(&mut app, &ctx, frame);
+        }
+        let labels: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.text()),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.contains(&settings), "{language}: {labels:?}");
+        assert!(labels.contains(&journal), "{language}: {labels:?}");
+        assert!(
+            labels
+                .iter()
+                .any(|text| text.contains("Authentication complete"))
+        );
+        assert_eq!(app.logs[0].message, "Authentication complete");
+        app.settings_open = true;
+        for frame in 4..7 {
+            output = render_app(&mut app, &ctx, frame);
+        }
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.text() == language_label)));
+    }
+}
+
+#[test]
 fn active_operations_wait_for_updates_instead_of_redrawing_at_monitor_refresh_rate() {
     for action in [Action::Restore, Action::Download, Action::Verify] {
         for fraction in [None, Some(0.5)] {
-            let mut app = App::new();
+            let mut app = english_app();
             let mut job = job(action);
             job.overall_fraction = fraction;
-            let mut update = transfer(1, "Файловая система");
+            let mut update = transfer(1, "Filesystem");
             update.total = fraction.map(|_| 100);
             job.output(Output::State(progress::Event::Transfer(update)));
             app.job = Some(job);
             app.journal_open = true;
-            app.journal_line(Record::new(Level::Info, "test", "Передача идёт"));
+            app.journal_line(Record::new(Level::Info, "test", "Transfer in progress"));
             let ctx = egui::Context::default();
             configure(&ctx);
             // Let egui's initial scrollbar animations finish before checking idle paints.
@@ -102,7 +152,7 @@ fn active_operations_wait_for_updates_instead_of_redrawing_at_monitor_refresh_ra
 
 #[test]
 fn scanning_devices_does_not_start_a_continuous_animation() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.scanning = true;
     let ctx = egui::Context::default();
     configure(&ctx);
@@ -119,7 +169,7 @@ fn scanning_devices_does_not_start_a_continuous_animation() {
 
 #[test]
 fn throttled_background_paints_do_not_delay_input_or_drop_worker_updates() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.job = Some(job(Action::Restore));
     let ctx = egui::Context::default();
     configure(&ctx);
@@ -127,7 +177,7 @@ fn throttled_background_paints_do_not_delay_input_or_drop_worker_updates() {
     for frame in 0..12 {
         let output = render_app(&mut app, &ctx, frame);
         journal_button = output.shapes.iter().find_map(|shape| match &shape.shape {
-            egui::Shape::Text(text) if text.galley.text() == "Журнал" => {
+            egui::Shape::Text(text) if text.galley.text() == "Journal" => {
                 Some(text.pos + egui::vec2(4.0, 4.0))
             }
             _ => None,
@@ -178,7 +228,7 @@ fn throttled_background_paints_do_not_delay_input_or_drop_worker_updates() {
         app.journal_open,
         "clicks must be applied in the input frame"
     );
-    assert_eq!(app.job.as_ref().unwrap().phase, "Этап: writing filesystem");
+    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: writing filesystem");
 }
 
 fn worker_line(event: progress::Event) -> String {
@@ -188,19 +238,24 @@ fn worker_line(event: progress::Event) -> String {
 }
 
 fn send_worker(app: &mut App, event: progress::Event) {
-    app.tx
-        .send(Event::Worker(7, Output::parse(worker_line(event), true)))
-        .unwrap();
+    app.tx.send(Event::Worker(7, Output::State(event))).unwrap();
     app.poll(&egui::Context::default());
 }
 
 #[test]
 fn a_log_burst_leaves_time_for_rendering_without_losing_records() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.job = Some(job(Action::Doctor));
     for index in 0..600 {
         app.tx
-            .send(Event::Worker(7, Output::Line(format!("line {index}"))))
+            .send(Event::Worker(
+                7,
+                Output::State(progress::Event::Log(Record::new(
+                    Level::Warning,
+                    "test",
+                    format!("line {index}"),
+                ))),
+            ))
             .unwrap();
     }
     let ctx = egui::Context::default();
@@ -242,67 +297,53 @@ fn erase_confirmation_is_bound_to_target_and_explicit_consent() {
     assert!(p.ready(Some(&device(42, Mode::Dfu))));
 }
 #[test]
-fn worker_arguments_preserve_mode_authorization_and_transcript() {
-    let s = Setup {
+fn native_restore_options_preserve_authorization_and_transcript() {
+    let setup = Setup {
         ecid: "2a".into(),
         cache: "cache".into(),
         tokens: "tokens.plist".into(),
         connect_data: "connect.data".into(),
         ..Setup::default()
     };
-    let revive = s
-        .arguments(Action::Revive, Some(Path::new("run.jsonl")))
-        .unwrap();
-    assert!(revive.contains(&"--experimental".into()));
-    assert!(!revive.contains(&"--erase".into()));
-    assert!(revive.contains(&"--transcript".into()));
-    assert!(revive.contains(&"run.jsonl".into()));
-    assert!(revive.contains(&"--authorization-tokens".into()));
-    assert!(
-        s.arguments(Action::Restore, None)
-            .unwrap()
-            .contains(&"--erase".into())
-    );
-    let download = s.arguments(Action::Download, None).unwrap();
-    assert!(!download.contains(&"--experimental".into()));
-    assert!(!download.contains(&"--authorization-tokens".into()));
+    let options = setup.restore_options(Some(Path::new("run.jsonl"))).unwrap();
+    assert!(options.ipsw.is_none());
+    assert_eq!(options.ecid, 42);
+    assert_eq!(options.firmware_dir.as_deref(), Some(Path::new("cache")));
+    assert_eq!(options.transcript.as_deref(), Some(Path::new("run.jsonl")));
     assert_eq!(
-        Setup::default().arguments(Action::Doctor, None).unwrap(),
-        vec![OsString::from("doctor")]
+        options.authorization_tokens.as_deref(),
+        Some(Path::new("tokens.plist"))
     );
     assert_eq!(
-        Setup::default()
-            .arguments(Action::PrepareWindows, None)
-            .unwrap(),
-        vec![OsString::from("drivers"), OsString::from("prepare")]
+        options.apple_connect_data.as_deref(),
+        Some(Path::new("connect.data"))
     );
-    assert_eq!(
-        Setup::default()
-            .arguments(Action::ResetDrivers, None)
-            .unwrap(),
-        vec![OsString::from("drivers"), OsString::from("reset")]
-    );
+    for action in [Action::Doctor, Action::PrepareWindows, Action::ResetDrivers] {
+        Setup::default().validate(action).unwrap();
+    }
+    assert!(Setup::default().validate(Action::Download).is_err());
 }
+
 #[test]
-fn local_firmware_is_required_and_does_not_pass_a_cache_option() {
+fn local_firmware_is_required_and_has_no_cache_option() {
     let file = tempfile::Builder::new().suffix(".IPSW").tempfile().unwrap();
-    let mut s = Setup {
+    let mut setup = Setup {
         automatic: false,
         ecid: "2a".into(),
         ipsw: file.path().display().to_string(),
         cache: "cache".into(),
         ..Setup::default()
     };
-    let args = s.arguments(Action::Revive, None).unwrap();
-    assert_eq!(args[1], file.path().as_os_str());
-    assert!(!args.contains(&"--firmware-dir".into()));
-    s.ipsw = "missing.ipsw".into();
-    assert!(s.arguments(Action::Revive, None).is_err());
-    assert!(s.arguments(Action::Verify, None).is_err());
+    let options = setup.restore_options(None).unwrap();
+    assert_eq!(options.ipsw.as_deref(), Some(file.path()));
+    assert!(options.firmware_dir.is_none());
+    setup.ipsw = "missing.ipsw".into();
+    assert!(setup.validate(Action::Revive).is_err());
+    assert!(setup.validate(Action::Verify).is_err());
 }
 #[test]
 fn disconnected_or_recovery_target_blocks_a_write() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.host = Ok(Some(drivers::HostStatus {
         apple_service_installed: false,
         apple_service_running: false,
@@ -320,7 +361,7 @@ fn disconnected_or_recovery_target_blocks_a_write() {
 }
 #[test]
 fn windows_conflicts_and_failed_checks_block_restore_before_worker_start() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.setup.ecid = "2a".into();
     app.devices.push(device(42, Mode::Dfu));
     let host = drivers::HostStatus {
@@ -347,11 +388,11 @@ fn windows_conflicts_and_failed_checks_block_restore_before_worker_start() {
     app.host = Err("service access denied".into());
     assert!(app.blocked_reason().is_some());
     app.windows_reboot_required = true;
-    assert!(app.blocked_reason().unwrap().contains("Перезагрузите"));
+    assert!(app.blocked_reason().unwrap().contains("Restart"));
 }
 #[test]
 fn scan_results_keep_host_and_usb_failures_independent() {
-    let mut app = App::new();
+    let mut app = english_app();
     let ctx = egui::Context::default();
     app.scanning = true;
     app.tx
@@ -384,18 +425,22 @@ fn scan_results_keep_host_and_usb_failures_independent() {
 #[test]
 fn stale_worker_events_do_not_enter_a_new_journal() {
     for active in [false, true] {
-        let mut app = App::new();
+        let mut app = english_app();
         if active {
             app.job = Some(job(Action::Restore));
         }
         for output in [
-            Output::Line("stale error".into()),
+            Output::State(progress::Event::Log(Record::new(
+                Level::Error,
+                "test",
+                "stale error",
+            ))),
             Output::State(progress::Event::RestoreCompleted),
             Output::State(progress::Event::RebootRequired),
             Output::State(progress::Event::ProvisioningWarning {
                 message: "stale activation warning".into(),
             }),
-            Output::Closed,
+            Output::Finished(true),
         ] {
             app.tx.send(Event::Worker(999, output)).unwrap();
         }
@@ -404,7 +449,7 @@ fn stale_worker_events_do_not_enter_a_new_journal() {
         assert!(app.notice.is_none());
         assert!(!app.windows_reboot_required);
         if let Some(job) = app.job {
-            assert_eq!(job.readers, 2);
+            assert_eq!(job.success, None);
             assert!(!job.restore_completed);
         }
     }
@@ -413,11 +458,12 @@ fn stale_worker_events_do_not_enter_a_new_journal() {
 #[test]
 fn structured_journal_filters_details_and_saves_each_record_once() {
     let log = tempfile::NamedTempFile::new().unwrap();
-    let mut app = App::new();
-    let mut operation = job(Action::Restore);
-    operation.log = log.reopen().unwrap();
+    let mut app = english_app();
+    let operation = job(Action::Restore);
+    operation.journal.lock().unwrap().log = std::io::BufWriter::new(log.reopen().unwrap());
     app.job = Some(operation);
     for (level, message) in [
+        (Level::Trace, "binary dump"),
         (Level::Debug, "protocol details"),
         (Level::Info, "Error: this text is informational"),
         (Level::Warning, "retry"),
@@ -428,8 +474,9 @@ fn structured_journal_filters_details_and_saves_each_record_once() {
             progress::Event::Log(Record::new(level, "test", message)),
         );
     }
-    assert_eq!(app.logs.len(), 4);
-    assert_eq!(app.logs[1].level, Level::Info);
+    assert_eq!(app.logs.len(), 5);
+    assert_eq!(app.logs[2].level, Level::Info);
+    assert!(!app.journal_text(app.log_details).contains("binary dump"));
     assert!(
         !app.journal_text(app.log_details)
             .contains("protocol details")
@@ -439,6 +486,7 @@ fn structured_journal_filters_details_and_saves_each_record_once() {
             .contains("connection failed")
     );
     app.log_details = true;
+    assert!(app.journal_text(app.log_details).contains("binary dump"));
     assert!(
         app.journal_text(app.log_details)
             .contains("protocol details")
@@ -455,9 +503,10 @@ fn structured_journal_filters_details_and_saves_each_record_once() {
             finished: false,
         }),
     );
-    assert_eq!(app.logs.len(), 4);
+    assert_eq!(app.logs.len(), 5);
     let saved = std::fs::read_to_string(log.path()).unwrap();
-    assert_eq!(saved.lines().count(), 4);
+    assert_eq!(saved.lines().count(), 5);
+    assert!(saved.contains("TRACE"));
     assert!(saved.contains("protocol details"));
     assert!(!saved.contains(progress::EVENT_PREFIX));
 }
@@ -465,9 +514,10 @@ fn structured_journal_filters_details_and_saves_each_record_once() {
 #[test]
 fn failed_journal_writes_keep_worker_state_and_report_partial_logging() {
     let log = tempfile::NamedTempFile::new().unwrap();
-    let mut operation = job(Action::Restore);
-    operation.log = File::open(log.path()).unwrap();
-    let mut app = App::new();
+    let operation = job(Action::Restore);
+    operation.journal.lock().unwrap().log =
+        std::io::BufWriter::new(File::open(log.path()).unwrap());
+    let mut app = english_app();
     app.log_path = Some(log.path().into());
     app.job = Some(operation);
     send_worker(
@@ -476,7 +526,7 @@ fn failed_journal_writes_keep_worker_state_and_report_partial_logging() {
     );
     assert!(app.log_path.is_none());
     assert!(app.journal_open);
-    assert!(app.notice.as_ref().unwrap().title.contains("неполный"));
+    assert!(app.notice.as_ref().unwrap().title.contains("incomplete"));
     assert!(app.logs[0].message.contains("original record"));
     assert_eq!(app.logs[0].level, Level::Warning);
     assert!(!app.job.as_ref().unwrap().can_stop());
@@ -488,13 +538,15 @@ fn failed_journal_writes_keep_worker_state_and_report_partial_logging() {
     send_worker(&mut app, progress::Event::RestoreCompleted);
     assert!(!app.job.as_ref().unwrap().can_stop());
     for _ in 0..2 {
-        app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
+        app.tx
+            .send(Event::Worker(7, Output::Finished(true)))
+            .unwrap();
     }
     app.poll(&egui::Context::default());
     let notice = app.notice.as_ref().unwrap();
     assert_eq!(notice.title, Action::Restore.completed_title());
     assert_eq!(notice.tone, Tone::Neutral);
-    assert!(notice.detail.contains("Журнал на диске неполный"));
+    assert!(notice.detail.contains("Disk journal incomplete"));
     assert!(notice.expires_at.is_none());
     assert!(std::fs::read(log.path()).unwrap().is_empty());
 }
@@ -502,13 +554,16 @@ fn failed_journal_writes_keep_worker_state_and_report_partial_logging() {
 #[test]
 fn a_failure_writing_the_final_record_cannot_report_a_complete_journal() {
     let log = tempfile::NamedTempFile::new().unwrap();
-    let mut operation = job(Action::Verify);
-    operation.log = File::open(log.path()).unwrap();
-    let mut app = App::new();
+    let operation = job(Action::Verify);
+    operation.journal.lock().unwrap().log =
+        std::io::BufWriter::new(File::open(log.path()).unwrap());
+    let mut app = english_app();
     app.log_path = Some(log.path().into());
     app.job = Some(operation);
     for _ in 0..2 {
-        app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
+        app.tx
+            .send(Event::Worker(7, Output::Finished(true)))
+            .unwrap();
     }
     app.poll(&egui::Context::default());
     assert!(app.job.is_none());
@@ -517,7 +572,7 @@ fn a_failure_writing_the_final_record_cannot_report_a_complete_journal() {
     let notice = app.notice.as_ref().unwrap();
     assert_eq!(notice.title, Action::Verify.completed_title());
     assert_eq!(notice.tone, Tone::Neutral);
-    assert!(notice.detail.contains("Журнал на диске неполный"));
+    assert!(notice.detail.contains("Disk journal incomplete"));
     assert!(notice.expires_at.is_none());
 }
 
@@ -525,7 +580,7 @@ fn a_failure_writing_the_final_record_cannot_report_a_complete_journal() {
 fn memory_journal_export_includes_hidden_details_and_marks_the_partial_copy() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("memory.log");
-    let mut app = App::new();
+    let mut app = english_app();
     app.journal_line(Record::new(Level::Debug, "test", "protocol details"));
     app.journal_line(Record::new(Level::Info, "test", "visible record"));
     assert!(!app.log_details);
@@ -541,56 +596,31 @@ fn memory_journal_export_includes_hidden_details_and_marks_the_partial_copy() {
     let saved = std::fs::read_to_string(path).unwrap();
     assert!(saved.contains("protocol details"));
     assert!(saved.contains("visible record"));
-    assert!(saved.starts_with("Неполный журнал:"));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn stopped_worker_is_reaped_when_the_window_drops_without_another_poll() {
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
-        .arg("--help")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let pid = child.id();
-    let mut job = Job::new(7, Action::Download, child, tempfile::tempfile().unwrap());
-    job.stop().unwrap();
-    drop(job);
-    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert!(saved.starts_with("Incomplete journal:"));
 }
 
 #[test]
-fn exited_worker_keeps_final_lines_until_both_readers_finish() {
+fn native_completion_follows_final_events_and_journal_writes() {
     let log = tempfile::NamedTempFile::new().unwrap();
-    let mut app = App::new();
+    let mut app = english_app();
     let ctx = egui::Context::default();
-    let mut operation = job(Action::Restore);
-    operation.log = log.reopen().unwrap();
+    let operation = job(Action::Restore);
+    operation.journal.lock().unwrap().log = std::io::BufWriter::new(log.reopen().unwrap());
     app.job = Some(operation);
     app.poll(&ctx);
-    assert_eq!(app.job.as_ref().unwrap().success, Some(true));
     assert!(app.notice.is_none());
-    app.tx.send(Event::Worker(999, Output::Closed)).unwrap();
-    app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
-    app.poll(&ctx);
-    assert_eq!(app.job.as_ref().unwrap().readers, 1);
-    assert!(app.notice.is_none());
-
+    assert_eq!(app.job.as_ref().unwrap().success, None);
     app.tx
-        .send(Event::Worker(
-            7,
-            Output::parse(
-                worker_line(progress::Event::Log(Record::new(
-                    Level::Warning,
-                    "test",
-                    "final worker message",
-                ))),
-                true,
-            ),
-        ))
+        .send(Event::Worker(999, Output::Finished(true)))
         .unwrap();
-    app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
+    send_worker(
+        &mut app,
+        progress::Event::Log(Record::new(Level::Warning, "test", "final worker message")),
+    );
+    assert!(app.notice.is_none());
+    app.tx
+        .send(Event::Worker(7, Output::Finished(true)))
+        .unwrap();
     app.poll(&ctx);
     assert!(app.job.is_none());
     let notice = app.notice.as_ref().unwrap();
@@ -605,12 +635,76 @@ fn exited_worker_keeps_final_lines_until_both_readers_finish() {
 }
 
 #[test]
+fn gui_verifies_an_ipsw_directly_and_keeps_trace_hidden_by_default() {
+    use std::io::Write;
+    let file = tempfile::Builder::new().suffix(".ipsw").tempfile().unwrap();
+    let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
+    zip.start_file(
+        "BuildManifest.plist",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    let manifest = zalivka::wire::dict([
+        (
+            "SupportedProductTypes",
+            plist::Value::Array(vec!["MacBookPro17,1".into()]),
+        ),
+        (
+            "BuildIdentities",
+            plist::Value::Array(vec![zalivka::wire::dict([(
+                "Manifest",
+                zalivka::wire::dict([] as [(&str, plist::Value); 0]),
+            )])]),
+        ),
+    ]);
+    manifest.to_writer_xml(&mut zip).unwrap();
+    zip.start_file("payload", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(&[0, 1, 255]).unwrap();
+    zip.finish().unwrap();
+    let mut app = english_app();
+    app.setup.ipsw = file.path().display().to_string();
+    let ctx = egui::Context::default();
+    app.start(Action::Verify, &ctx);
+    assert!(app.job.is_some());
+    let path = app.log_path.clone().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.job.is_some() && Instant::now() < deadline {
+        app.poll(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(app.job.is_none());
+    assert_eq!(app.notice.as_ref().unwrap().tone, Tone::Success);
+    assert_eq!(app.logs.front().unwrap().source, "session");
+    assert!(!app.log_details);
+    assert!(!app.journal_text(false).contains("ipsw:zip"));
+    assert!(app.journal_text(true).contains("ipsw:zip"));
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("TRACE"));
+    assert!(saved.contains("IPSW verified"));
+    assert!(!saved.contains(progress::EVENT_PREFIX));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn trace_bursts_do_not_evict_the_visible_operation_history() {
+    let mut app = english_app();
+    app.journal_line(Record::new(Level::Info, "restore", "Restore stage"));
+    for index in 0..8000 {
+        app.journal_line(Record::new(Level::Trace, "fdr:conn", index));
+    }
+    assert_eq!(app.logs.len(), 4000);
+    assert!(app.journal_text(false).contains("Restore stage"));
+    assert!(app.journal_text(true).contains("7999"));
+}
+
+#[test]
 fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
     let mut job = job(Action::Restore);
     job.cancelled = true;
     for success in [false, true] {
         let notice = job.completion_notice(success, true);
-        assert_eq!(notice.title, "Операция остановлена");
+        assert_eq!(notice.title, "Operation stopped");
         assert!(notice.detail.is_empty());
         assert_eq!(notice.tone, Tone::Neutral);
         assert!(notice.expires_at.is_some());
@@ -618,7 +712,7 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
     job.action = Action::Revive;
     assert_eq!(
         job.completion_notice(false, true).title,
-        "Операция остановлена"
+        "Operation stopped"
     );
     job.cancelled = false;
     for action in [
@@ -629,11 +723,11 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
         job.action = action;
         let notice = job.completion_notice(false, true);
         assert_eq!(notice.tone, Tone::Error);
-        assert!(notice.title.ends_with(": ошибка"));
+        assert!(notice.title.ends_with(": error"));
         assert!(notice.expires_at.is_none());
     }
     let notice = job.completion_notice(true, true);
-    assert_eq!(notice.title, "Перезагрузите Windows");
+    assert_eq!(notice.title, "Restart Windows");
     assert_eq!(notice.tone, Tone::Neutral);
     assert!(notice.expires_at.is_none());
     for action in [
@@ -652,7 +746,7 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
         assert!(notice.expires_at.is_some());
         let expected_detail = match action {
             Action::Restore | Action::Revive => progress::MAC_STARTUP_HINT,
-            Action::ResetDrivers => "Подключите Mac заново и введите его в DFU.",
+            Action::ResetDrivers => "Reconnect the Mac and enter DFU mode.",
             _ => "",
         };
         assert_eq!(notice.detail, expected_detail);
@@ -662,9 +756,9 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
 #[test]
 fn provisioning_warning_survives_completion_and_journal_eviction() {
     for action in [Action::Restore, Action::Revive] {
-        let mut app = App::new();
+        let mut app = english_app();
         app.job = Some(job(action));
-        let message = "При получении сертификатов Apple произошла ошибка. Подключите сам Mac к Wi-Fi или Ethernet и завершите активацию.";
+        let message = "Could not obtain Apple certificates. Connect the Mac to Wi-Fi or Ethernet and complete activation.";
         send_worker(
             &mut app,
             progress::Event::ProvisioningWarning {
@@ -678,7 +772,7 @@ fn provisioning_warning_survives_completion_and_journal_eviction() {
         let job = app.job.as_mut().unwrap();
         let notice = job.completion_notice(true, false);
         assert_eq!(notice.tone, Tone::Neutral);
-        assert!(notice.title.contains("проверьте активацию"));
+        assert!(notice.title.contains("check activation"));
         assert_eq!(notice.detail, message);
         assert!(notice.expires_at.is_none());
         assert_eq!(job.overall_fraction, Some(1.0));
@@ -686,11 +780,15 @@ fn provisioning_warning_survives_completion_and_journal_eviction() {
         job.cancelled = true;
         assert_eq!(
             job.completion_notice(true, false).title,
-            "Операция остановлена"
+            "Operation stopped"
         );
         job.cancelled = false;
-        app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
-        app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
+        app.tx
+            .send(Event::Worker(7, Output::Finished(true)))
+            .unwrap();
+        app.tx
+            .send(Event::Worker(7, Output::Finished(true)))
+            .unwrap();
         app.poll(&egui::Context::default());
         assert!(app.job.is_none());
         assert_eq!(app.notice.as_ref().unwrap().detail, message);
@@ -703,19 +801,21 @@ fn completion_records_label_duration_without_adding_it_to_notifications() {
     for (action, expected_detail, expected_record) in [
         (
             Action::ResetDrivers,
-            "Подключите Mac заново и введите его в DFU.",
-            "Сброс USB-драйверов завершён. Длительность: 00:00:01. Подключите Mac заново и введите его в DFU.",
+            "Reconnect the Mac and enter DFU mode.",
+            "USB driver reset complete. Duration: 00:00:01. Reconnect the Mac and enter DFU mode.",
         ),
-        (Action::Verify, "", "IPSW проверен. Длительность: 00:00:01."),
+        (Action::Verify, "", "IPSW verified. Duration: 00:00:01."),
     ] {
         let log = tempfile::NamedTempFile::new().unwrap();
         let mut operation = job(action);
-        operation.log = log.reopen().unwrap();
+        operation.journal.lock().unwrap().log = std::io::BufWriter::new(log.reopen().unwrap());
         operation.started = Instant::now() - Duration::from_secs(1);
-        let mut app = App::new();
+        let mut app = english_app();
         app.job = Some(operation);
         for _ in 0..2 {
-            app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
+            app.tx
+                .send(Event::Worker(7, Output::Finished(true)))
+                .unwrap();
         }
         app.poll(&egui::Context::default());
         assert!(app.job.is_none());
@@ -729,19 +829,23 @@ fn completion_records_label_duration_without_adding_it_to_notifications() {
 
 #[test]
 fn worker_state_survives_journal_eviction_and_protects_restore_from_stopping() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.job = Some(job(Action::Restore));
     assert!(!app.job.as_ref().unwrap().can_stop());
-    app.journal_line(Record::new(Level::Info, "test", "Восстановление завершено"));
+    app.journal_line(Record::new(Level::Info, "test", "Restore complete"));
     app.journal_line(Record::new(
         Level::Warning,
         "test",
-        "Перезагрузите Windows перед восстановлением Mac.",
+        "Restart Windows before restoring the Mac.",
     ));
     app.tx
         .send(Event::Worker(
             7,
-            Output::parse(worker_line(progress::Event::RestoreCompleted), false),
+            Output::State(progress::Event::Log(Record::new(
+                Level::Info,
+                "test",
+                worker_line(progress::Event::RestoreCompleted),
+            ))),
         ))
         .unwrap();
     app.poll(&egui::Context::default());
@@ -771,7 +875,7 @@ fn worker_state_survives_journal_eviction_and_protects_restore_from_stopping() {
             complete: false,
         },
     );
-    assert_eq!(app.job.as_ref().unwrap().phase, "Этап: update firmware");
+    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: update firmware");
     send_worker(&mut app, progress::Event::RestoreCompleted);
     for index in 0..4001 {
         app.journal_line(Record::new(Level::Info, "test", format!("message {index}")));
@@ -789,10 +893,7 @@ fn worker_state_survives_journal_eviction_and_protects_restore_from_stopping() {
     assert!(!job.can_stop());
     job.action = Action::ResetDrivers;
     assert!(!job.can_stop());
-    assert_eq!(
-        job.completion_notice(true, true).title,
-        "Перезагрузите Windows"
-    );
+    assert_eq!(job.completion_notice(true, true).title, "Restart Windows");
     send_worker(&mut app, progress::Event::RebootRequired);
     assert!(app.windows_reboot_required);
 }
@@ -803,17 +904,14 @@ fn driver_reset_waits_for_completion_and_prompts_to_reconnect_or_reboot() {
     assert!(!job.can_stop());
     let notice = job.completion_notice(true, false);
     assert_eq!(notice.title, Action::ResetDrivers.completed_title());
-    assert!(notice.detail.contains("введите его в DFU"));
-    assert_eq!(
-        job.completion_notice(true, true).title,
-        "Перезагрузите Windows"
-    );
+    assert!(notice.detail.contains("enter DFU mode"));
+    assert_eq!(job.completion_notice(true, true).title, "Restart Windows");
     assert_eq!(job.completion_notice(false, true).tone, Tone::Error);
 }
 
 #[test]
 fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.job = Some(job(Action::Restore));
     let update = progress::Update {
         id: 1,
@@ -838,12 +936,19 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
     send_worker(&mut app, progress::Event::RestoreCompleted);
     let line = worker_line(progress::Event::Transfer(update));
     app.tx
-        .send(Event::Worker(7, Output::parse(line.clone(), false)))
+        .send(Event::Worker(
+            7,
+            Output::State(progress::Event::Log(Record::new(
+                Level::Info,
+                "test",
+                line.clone(),
+            ))),
+        ))
         .unwrap();
     app.poll(&egui::Context::default());
     assert!(app.job.as_ref().unwrap().transfers.is_empty());
     assert!(!app.job.as_ref().unwrap().can_stop());
-    assert_eq!(app.job.as_ref().unwrap().phase, "Восстановление завершено");
+    assert_eq!(app.job.as_ref().unwrap().phase, "Restore complete");
     assert_eq!(app.logs.back().unwrap().message, line);
 }
 
@@ -902,9 +1007,9 @@ fn transfer(id: u64, stage: &str) -> progress::Update {
 #[test]
 fn only_current_transfers_render_cards_regardless_of_device_progress_order() {
     for transfer_first in [false, true] {
-        let mut app = App::new();
+        let mut app = english_app();
         app.job = Some(job(Action::Restore));
-        let mut update = transfer(1, "Передача файловой системы ASR");
+        let mut update = transfer(1, "ASR filesystem transfer");
         let mut events = vec![
             progress::Event::Transfer(update.clone()),
             progress::Event::OperationProgress {
@@ -925,25 +1030,25 @@ fn only_current_transfers_render_cards_regardless_of_device_progress_order() {
             assert!(
                 !labels
                     .iter()
-                    .any(|label| label == "Общий прогресс восстановления (оценка)")
+                    .any(|label| label == "Overall restore progress (estimate)")
             );
             assert!(
                 labels
                     .iter()
-                    .any(|label| label == "Передача файловой системы ASR")
+                    .any(|label| label == "ASR filesystem transfer")
             );
             assert!(labels.iter().any(|label| label == "60%"));
             assert!(
                 labels
                     .iter()
-                    .any(|label| label == "Передано: 60 Б из 100 Б")
+                    .any(|label| label == "Transferred: 60 B of 100 B")
             );
-            assert!(labels.iter().any(|label| label == "Скорость"));
-            assert!(labels.iter().any(|label| label == "До конца передачи"));
+            assert!(labels.iter().any(|label| label == "Speed"));
+            assert!(labels.iter().any(|label| label == "Time remaining"));
             assert!(
                 !labels
                     .iter()
-                    .any(|label| label == "9%" || label == "Операция 13")
+                    .any(|label| label == "9%" || label == "Operation 13")
             );
         }
         // The transfer ends independently of the device's current percentage.
@@ -958,12 +1063,12 @@ fn only_current_transfers_render_cards_regardless_of_device_progress_order() {
 
 #[test]
 fn identical_names_never_merge_transfers_or_hide_retries() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.job = Some(job(Action::Restore));
-    let mut first = transfer(1, "Одинаковое имя");
+    let mut first = transfer(1, "Same name");
     let mut second = first.clone();
     second.id = 2;
-    let third = transfer(3, "Одинаковое имя");
+    let third = transfer(3, "Same name");
     for update in [&first, &second, &third] {
         send_worker(&mut app, progress::Event::Transfer(update.clone()));
     }
@@ -973,7 +1078,7 @@ fn identical_names_never_merge_transfers_or_hide_retries() {
     }
     first.finished = true;
     send_worker(&mut app, progress::Event::Transfer(first.clone()));
-    let retry = transfer(4, "Одинаковое имя");
+    let retry = transfer(4, "Same name");
     send_worker(&mut app, progress::Event::Transfer(retry.clone()));
     send_worker(&mut app, progress::Event::Transfer(first));
     let transfers = &app.job.as_ref().unwrap().transfers;
@@ -986,7 +1091,7 @@ fn identical_names_never_merge_transfers_or_hide_retries() {
 
 #[test]
 fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.job = Some(job(Action::Restore));
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, None);
     send_worker(
@@ -1059,11 +1164,7 @@ fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
     );
     send_worker(
         &mut app,
-        progress::Event::Log(Record::new(
-            Level::Info,
-            "restore",
-            "Восстановление завершено",
-        )),
+        progress::Event::Log(Record::new(Level::Info, "restore", "Restore complete")),
     );
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.99));
     send_worker(&mut app, progress::Event::RestoreCompleted);
@@ -1072,7 +1173,7 @@ fn overall_progress_uses_device_weights_and_waits_for_confirmed_completion() {
 
 #[test]
 fn overall_progress_keeps_updates_received_before_their_weights() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.job = Some(job(Action::Restore));
     send_worker(
         &mut app,
@@ -1111,7 +1212,7 @@ fn overall_progress_keeps_updates_received_before_their_weights() {
 
 #[test]
 fn overall_progress_uses_completed_weight_units_and_apples_integer_rounding() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.job = Some(job(Action::Restore));
     send_worker(
         &mut app,
@@ -1151,7 +1252,7 @@ fn overall_progress_uses_completed_weight_units_and_apples_integer_rounding() {
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(0.33));
 
     // Each contribution is truncated before the sum, not after it.
-    let mut app = App::new();
+    let mut app = english_app();
     app.job = Some(job(Action::Restore));
     send_worker(
         &mut app,
@@ -1182,7 +1283,7 @@ fn overall_progress_replays_real_mac_messages_without_inventing_missing_operatio
         // never reports their progress. They must not be guessed complete.
         ("update", Action::Revive, 0.41),
     ] {
-        let mut app = App::new();
+        let mut app = english_app();
         app.job = Some(job(action));
         for event in &traces[name] {
             send_worker(&mut app, event.clone());
@@ -1198,7 +1299,7 @@ fn overall_progress_replays_real_mac_messages_without_inventing_missing_operatio
 
 #[test]
 fn atomic_progress_received_before_weights_is_retained_without_confirming_success() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.job = Some(job(Action::Restore));
     send_worker(
         &mut app,
@@ -1221,7 +1322,7 @@ fn atomic_progress_received_before_weights_is_retained_without_confirming_succes
 
 #[test]
 fn checkpoints_and_operation_completion_preserve_an_active_transfer() {
-    let mut app = App::new();
+    let mut app = english_app();
     app.job = Some(job(Action::Restore));
     send_worker(
         &mut app,
@@ -1264,19 +1365,20 @@ fn saving_a_journal_preserves_full_log_and_does_not_overwrite_its_source() {
     let full = "complete log\n".repeat(5000);
     std::fs::write(&source, &full).unwrap();
     assert_eq!(
-        worker::save_log(source.clone(), Some(&source), "visible tail").unwrap(),
+        worker::save_log(source.clone(), Some(&source), "visible tail", None).unwrap(),
         source
     );
     assert_eq!(std::fs::read_to_string(&source).unwrap(), full);
-    worker::save_log(target.clone(), Some(&source), "visible tail").unwrap();
+    worker::save_log(target.clone(), Some(&source), "visible tail", None).unwrap();
     assert_eq!(std::fs::read_to_string(&target).unwrap(), full);
-    worker::save_log(target.clone(), None, "visible tail").unwrap();
+    worker::save_log(target.clone(), None, "visible tail", None).unwrap();
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "visible tail");
     assert!(
         worker::save_log(
             target.clone(),
             Some(&directory.path().join("missing")),
-            "tail"
+            "tail",
+            None
         )
         .is_err()
     );
@@ -1299,7 +1401,7 @@ fn saving_a_journal_through_a_hard_link_preserves_the_active_source() {
     active.write_all(b"complete log\n").unwrap();
     std::fs::hard_link(&source, &destination).unwrap();
 
-    worker::save_log(destination.clone(), Some(&source), "tail").unwrap();
+    worker::save_log(destination.clone(), Some(&source), "tail", None).unwrap();
     assert_eq!(
         std::fs::read_to_string(&destination).unwrap(),
         "complete log\n"
@@ -1327,7 +1429,7 @@ fn dialogs_stay_open_and_escape_cancels_without_starting_a_job() {
         let ctx = egui::Context::default();
         configure(&ctx);
         ctx.set_theme(egui::ThemePreference::System);
-        let mut app = App::new();
+        let mut app = english_app();
         app.setup.ecid = "2a".into();
         app.devices.push(device(42, Mode::Dfu));
         app.settings_open = action.is_none();
@@ -1398,7 +1500,7 @@ fn stalled_transfer_hides_speed_and_eta() {
 fn main_panels_render_in_both_themes_without_light_surfaces_in_dark_mode() {
     let ctx = egui::Context::default();
     configure(&ctx);
-    let mut app = App::new();
+    let mut app = english_app();
     app.journal_open = true;
     app.logs
         .push_back(Record::new(Level::Error, "test", "example"));
@@ -1468,7 +1570,7 @@ fn visible_text_rect(output: &egui::FullOutput, value: &str) -> Option<egui::Rec
 fn ordinary_notifications_expire_after_five_seconds_and_replacements_restart_the_timer() {
     let ctx = egui::Context::default();
     configure(&ctx);
-    let mut app = App::new();
+    let mut app = english_app();
     app.scanning = true;
     let before = Instant::now();
     app.tx
@@ -1503,7 +1605,7 @@ fn ordinary_notifications_expire_after_five_seconds_and_replacements_restart_the
         notice.expires_at = Some(Instant::now());
     }
 
-    app.error("Ошибка", "Критическое сообщение");
+    app.error("Error", "Critical message");
     for frame in 33..36 {
         let _ = render_app(&mut app, &ctx, frame);
         let notice = app.notice.as_ref().unwrap();
@@ -1519,19 +1621,19 @@ fn notifications_keep_content_in_place_and_their_actions_work_in_small_windows()
             let ctx = egui::Context::default();
             configure(&ctx);
             ctx.set_theme(theme);
-            let mut app = App::new();
-            app.journal_line(Record::new(Level::Error, "test", "Подробности ошибки"));
+            let mut app = english_app();
+            app.journal_line(Record::new(Level::Error, "test", "Error details"));
             let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
             let input = egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()
             };
             let baseline = render_pass(&ctx, input.clone(), |ctx| ctx.root_ui(|ui| app.view(ui)));
-            let heading = visible_text_rect(&baseline, "Восстановление Mac").unwrap();
+            let heading = visible_text_rect(&baseline, "Mac restore").unwrap();
             for tone in [Tone::Neutral, Tone::Success, Tone::Error] {
                 app.notice = Some(Notice {
-                    title: "Уведомление".into(),
-                    detail: "Подробности сообщения. ".repeat(50),
+                    title: "Notice".into(),
+                    detail: "Message details. ".repeat(50),
                     tone,
                     expires_at: None,
                 });
@@ -1539,11 +1641,8 @@ fn notifications_keep_content_in_place_and_their_actions_work_in_small_windows()
                 for _ in 0..3 {
                     output = render_pass(&ctx, input.clone(), |ctx| ctx.root_ui(|ui| app.view(ui)));
                 }
-                assert_eq!(
-                    visible_text_rect(&output, "Восстановление Mac"),
-                    Some(heading)
-                );
-                for label in ["Уведомление", "×"] {
+                assert_eq!(visible_text_rect(&output, "Mac restore"), Some(heading));
+                for label in ["Notice", "×"] {
                     let rect = visible_text_rect(&output, label)
                         .unwrap_or_else(|| panic!("{label} clipped at {size:?}, {theme:?}"));
                     assert!(screen.contains_rect(rect));
@@ -1567,9 +1666,7 @@ fn notifications_keep_content_in_place_and_their_actions_work_in_small_windows()
                     ..input.clone()
                 };
                 if tone == Tone::Error {
-                    let pos = visible_text_rect(&output, "Открыть журнал")
-                        .unwrap()
-                        .center();
+                    let pos = visible_text_rect(&output, "Open journal").unwrap().center();
                     output = render_pass(&ctx, click(pos), |ctx| ctx.root_ui(|ui| app.view(ui)));
                     assert!(app.journal_open);
                 }
@@ -1590,7 +1687,7 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
     ] {
         let ctx = egui::Context::default();
         configure(&ctx);
-        let mut app = App::new();
+        let mut app = english_app();
         app.journal_open = true;
         app.host = Ok(Some(drivers::HostStatus {
             apple_service_installed: false,
@@ -1599,7 +1696,7 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
             compatible_usb_driver: false,
         }));
         for _ in 0..20 {
-            app.journal_line(Record::new(Level::Error, "test", "Проверка журнала"));
+            app.journal_line(Record::new(Level::Error, "test", "Journal check"));
         }
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
         let mut output = egui::FullOutput::default();
@@ -1614,10 +1711,10 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
                 |ctx| ctx.root_ui(|ui| app.view(ui)),
             );
         }
-        let heading = visible_text_rect(&output, "Восстановление Mac")
+        let heading = visible_text_rect(&output, "Mac restore")
             .unwrap_or_else(|| panic!("main content hidden at {size:?}"));
         assert!(screen.contains_rect(heading));
-        for label in ["Копировать", "Сохранить журнал", "Скрыть"] {
+        for label in ["Copy", "Save journal", "Hide"] {
             assert!(
                 visible_text_rect(&output, label).is_some(),
                 "journal control {label} clipped at {size:?}"
@@ -1626,7 +1723,7 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
         assert!(
             output.shapes.iter().any(|shape| {
                 if let egui::Shape::Text(text) = &shape.shape
-                    && text.galley.text().contains("Проверка журнала")
+                    && text.galley.text().contains("Journal check")
                 {
                     let rect = text.galley.rect.translate(text.pos.to_vec2());
                     return rect.top() >= shape.clip_rect.top()
@@ -1637,12 +1734,7 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
             "journal rows hidden at {size:?}"
         );
         let mut reached = [false; 4];
-        let labels = [
-            "Устройство",
-            "Прошивка",
-            "Запустить Revive",
-            "Стереть и восстановить",
-        ];
+        let labels = ["Device", "Firmware", "Start Revive", "Erase and restore"];
         for _ in 0..50 {
             for (reached, label) in reached.iter_mut().zip(labels) {
                 *reached |= visible_text_rect(&output, label).is_some();
@@ -1679,7 +1771,7 @@ fn narrow_cards_keep_text_and_controls_inside_their_bounds() {
         for automatic in [false, true] {
             let ctx = egui::Context::default();
             configure(&ctx);
-            let mut app = App::new();
+            let mut app = english_app();
             app.setup.automatic = automatic;
             app.setup.ecid = "2a".into();
             app.devices.push(device(42, Mode::Recovery));
@@ -1704,7 +1796,7 @@ fn narrow_cards_keep_text_and_controls_inside_their_bounds() {
                 );
                 for shape in &output.shapes {
                     if let egui::Shape::Text(text) = &shape.shape {
-                        assert_ne!(text.galley.text(), "Поиск…");
+                        assert_ne!(text.galley.text(), "Searching…");
                         let rect = text.galley.rect.translate(text.pos.to_vec2());
                         assert!(
                             shape.clip_rect.expand(1.0).contains_rect(rect),
@@ -1731,9 +1823,9 @@ fn narrow_cards_keep_text_and_controls_inside_their_bounds() {
                         })
                         .unwrap()
                 };
-                let device = card_rect("Устройство");
-                let firmware = card_rect("Прошивка");
-                let actions = card_rect("Действие");
+                let device = card_rect("Device");
+                let firmware = card_rect("Firmware");
+                let actions = card_rect("Action");
                 assert!((device.width() - firmware.width()).abs() < 1.0);
                 assert!((device.left() - actions.left()).abs() < 1.0);
                 assert!((firmware.right() - actions.right()).abs() < 1.0);
@@ -1748,8 +1840,8 @@ fn narrow_cards_keep_text_and_controls_inside_their_bounds() {
                     assert!((device.width() - actions.width()).abs() < 1.0);
                     assert!(device.bottom() < firmware.top());
                 }
-                let revive = visible_text_rect(&output, "Запустить Revive").unwrap();
-                let restore = visible_text_rect(&output, "Стереть и восстановить").unwrap();
+                let revive = visible_text_rect(&output, "Start Revive").unwrap();
+                let restore = visible_text_rect(&output, "Erase and restore").unwrap();
                 assert!(!revive.intersects(restore));
                 if width <= 700.0 {
                     assert!(revive.bottom() < restore.top());
@@ -1766,7 +1858,7 @@ fn small_dialogs_scroll_to_their_controls() {
     for action in [None, Some(Action::Revive), Some(Action::Restore)] {
         let ctx = egui::Context::default();
         configure(&ctx);
-        let mut app = App::new();
+        let mut app = english_app();
         app.setup.ecid = "2a".into();
         app.devices.push(device(42, Mode::Dfu));
         app.settings_open = action.is_none();
@@ -1777,9 +1869,9 @@ fn small_dialogs_scroll_to_their_controls() {
         });
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(480.0, 360.0));
         let label = match action {
-            None => "Диагностика USB",
-            Some(Action::Revive) => "Начать Revive",
-            _ => "Стереть Mac",
+            None => "USB diagnostics",
+            Some(Action::Revive) => "Start Revive",
+            _ => "Erase Mac",
         };
         let mut reached = false;
         let mut compact_folder_row = false;
@@ -1810,16 +1902,16 @@ fn small_dialogs_scroll_to_their_controls() {
             }
             if action.is_none() {
                 if frame >= 3 {
-                    for label in ["Настройки", "Готово"] {
+                    for label in ["Settings", "Done"] {
                         let rect = visible_text_rect(&output, label)
                             .unwrap_or_else(|| panic!("settings header {label} scrolled away"));
                         assert!(screen.contains_rect(rect));
                     }
                 }
                 if let (Some(title), Some(field), Some(button)) = (
-                    visible_text_rect(&output, "Папка прошивок"),
-                    visible_text_rect(&output, "По умолчанию"),
-                    visible_text_rect(&output, "Выбрать"),
+                    visible_text_rect(&output, "Firmware folder"),
+                    visible_text_rect(&output, "Default"),
+                    visible_text_rect(&output, "Browse"),
                 ) {
                     assert!(field.top() - title.bottom() < 34.0);
                     assert!(button.top() - title.bottom() < 34.0);
@@ -1876,8 +1968,8 @@ fn selected_release() -> catalog::Release {
 fn automatic_firmware_shows_selection_and_clears_it_after_disconnect() {
     let ctx = egui::Context::default();
     configure(&ctx);
-    let mut app = App::new();
-    assert!(firmware_card_text(&mut app, &ctx).contains("Подключите Mac"));
+    let mut app = english_app();
+    assert!(firmware_card_text(&mut app, &ctx).contains("Connect a Mac"));
     assert!(app.firmware.is_none());
     assert_eq!(app.next_firmware_request, 0);
 
@@ -1889,7 +1981,7 @@ fn automatic_firmware_shows_selection_and_clears_it_after_disconnect() {
         request: 1,
         release: None,
     });
-    assert!(firmware_card_text(&mut app, &ctx).contains("Подбираем прошивку"));
+    assert!(firmware_card_text(&mut app, &ctx).contains("Finding firmware"));
     app.tx
         .send(Event::Firmware(1, Ok(selected_release())))
         .unwrap();
@@ -1919,7 +2011,7 @@ fn automatic_firmware_shows_selection_and_clears_it_after_disconnect() {
     app.poll(&ctx);
     assert!(app.firmware.is_none());
     let text = firmware_card_text(&mut app, &ctx);
-    assert!(text.contains("Подключите Mac"));
+    assert!(text.contains("Connect a Mac"));
     assert!(!text.contains("26.0.1"));
     app.tx
         .send(Event::Firmware(1, Ok(selected_release())))
@@ -1932,7 +2024,7 @@ fn automatic_firmware_shows_selection_and_clears_it_after_disconnect() {
 fn firmware_lookup_ignores_superseded_requests_and_surfaces_network_failure() {
     let ctx = egui::Context::default();
     configure(&ctx);
-    let mut app = App::new();
+    let mut app = english_app();
     app.setup.ecid = "2a".into();
     app.devices.push(device(42, Mode::Dfu));
     app.next_firmware_request = 2;
@@ -1951,8 +2043,8 @@ fn firmware_lookup_ignores_superseded_requests_and_surfaces_network_failure() {
         .unwrap();
     app.poll(&ctx);
     let text = firmware_card_text(&mut app, &ctx);
-    assert!(text.contains("Не удалось подобрать прошивку"));
-    assert!(text.contains("Повторить"));
+    assert!(text.contains("Could not find compatible firmware"));
+    assert!(text.contains("Retry"));
     assert!(!text.contains("26.0.1"));
     assert_eq!(app.next_firmware_request, 2);
 

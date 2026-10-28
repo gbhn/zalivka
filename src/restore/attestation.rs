@@ -69,18 +69,9 @@ impl Attestation {
                 let enabled = self.level != 0;
                 if enabled {
                     self.phase = Phase::Requested;
-                    crate::log!(
-                        Info,
-                        "restore",
-                        "Запрошена аттестация восстановления: уровень {}",
-                        self.level
-                    );
+                    crate::log!(Info, "restore:baa", "Attestation: level={}", self.level);
                 } else {
-                    crate::log!(
-                        Debug,
-                        "restore",
-                        "Аттестация не предусмотрена выбранным режимом восстановления"
-                    );
+                    crate::log!(Debug, "restore:baa", "Attestation not required");
                 }
                 Ok(Some(wire::dict([("RestoreShouldAttest", enabled.into())])))
             }
@@ -118,8 +109,8 @@ impl Attestation {
                 self.phase = Phase::Verified;
                 crate::log!(
                     Info,
-                    "restore",
-                    "Аттестация проверена: цепочка Apple BAA, ECID {:016x}, restore-ticket, уровень {}",
+                    "restore:baa",
+                    "Verified: ECID={:016x}; level={}",
                     self.device.ecid,
                     self.level
                 );

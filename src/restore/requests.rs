@@ -58,9 +58,10 @@ impl AsyncRequests {
         let session = self.session.clone();
         let sender = self.sender.clone();
         let kind = kind.to_owned();
+        crate::log!(Trace, "restored:job", "{kind}: starting; port={port}");
         let worker = thread::Builder::new()
             .name(format!("zalivka-{kind}"))
-            .spawn(move || {
+            .spawn(crate::progress::inherit(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut stream = session.connect_retry(port, Duration::from_secs(60))?;
                     if let Some(state) = &mut state {
@@ -72,13 +73,18 @@ impl AsyncRequests {
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("async worker panicked")))
                 .with_context(|| format!("asynchronous {kind} on DataPort {port} failed"));
                 let failed = result.is_err();
+                crate::log!(
+                    Trace,
+                    "restored:job",
+                    "{kind}: port={port}; result={result:?}"
+                );
                 // Publish the original error before waking a blocked control read
                 // through cancellation. check() must see the cause, not just cancel.
                 let _ = sender.send((port, result));
                 if failed {
                     session.cancel();
                 }
-            })?;
+            }))?;
         self.workers.insert(port, worker);
         Ok(())
     }
@@ -99,6 +105,7 @@ impl AsyncRequests {
     }
 
     fn complete(&mut self, port: u16, result: Result<()>) -> Result<()> {
+        crate::log!(Trace, "restored:job", "Collecting result; port={port}");
         let worker = self
             .workers
             .remove(&port)

@@ -3,6 +3,7 @@ use super::widgets::{caption, pill, tint};
 use super::{App, Level, Notice, Picker, SCAN_INTERVAL, Tone, UI_REFRESH_INTERVAL};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::time::Instant;
+use zalivka::localization::text as tr;
 
 impl App {
     pub(super) fn header(&mut self, ui: &mut egui::Ui) {
@@ -29,17 +30,17 @@ impl App {
                     ui.add(
                         egui::Image::new(&*logo)
                             .fit_to_exact_size(Vec2::new(56.0, 44.0))
-                            .alt_text("Логотип Zalivka"),
+                            .alt_text(tr("Zalivka logo")),
                     );
-                    ui.label(RichText::new("Zalivka").size(20.0).strong());
+                    ui.label(RichText::new(tr("Zalivka")).size(20.0).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Настройки").clicked() {
+                        if ui.button(tr("Settings")).clicked() {
                             self.settings_open = true;
                         }
                         if ui
                             .selectable_label(
                                 self.journal_open,
-                                RichText::new("Журнал").color(if self.journal_open {
+                                RichText::new(tr("Journal")).color(if self.journal_open {
                                     Color32::WHITE
                                 } else {
                                     ui.visuals().text_color()
@@ -73,17 +74,17 @@ impl App {
                 ui.spacing_mut().interact_size.y = 24.0;
                 ui.spacing_mut().item_spacing.y = 4.0;
                 ui.horizontal_wrapped(|ui| {
-                    ui.strong("Журнал");
+                    ui.strong(tr("Journal"));
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true),
                         |ui| {
-                            if ui.small_button("Скрыть").clicked() {
+                            if ui.small_button(tr("Hide")).clicked() {
                                 self.journal_open = false;
                             }
                             if ui
                                 .add_enabled(
                                     !self.logs.is_empty() && !self.picking,
-                                    egui::Button::new("Сохранить журнал").small(),
+                                    egui::Button::new(tr("Save journal")).small(),
                                 )
                                 .clicked()
                             {
@@ -92,13 +93,13 @@ impl App {
                             if ui
                                 .add_enabled(
                                     !self.logs.is_empty(),
-                                    egui::Button::new("Копировать").small(),
+                                    egui::Button::new(tr("Copy")).small(),
                                 )
                                 .clicked()
                             {
                                 ctx.copy_text(self.journal_text(self.log_details));
                             }
-                            ui.checkbox(&mut self.log_details, "Технические подробности");
+                            ui.checkbox(&mut self.log_details, tr("Technical details"));
                         },
                     );
                 });
@@ -106,11 +107,11 @@ impl App {
                 let records: Vec<_> = self
                     .logs
                     .iter()
-                    .filter(|record| self.log_details || record.level != Level::Debug)
+                    .filter(|record| self.log_details || record.level >= Level::Info)
                     .collect();
                 if records.is_empty() {
                     ui.label(
-                        RichText::new("Здесь появится ход операции.")
+                        RichText::new(tr("Operation progress will appear here."))
                             .color(ui.visuals().weak_text_color()),
                     );
                 }
@@ -126,7 +127,7 @@ impl App {
                                 Level::Error => ui.visuals().error_fg_color,
                                 Level::Warning => ui.visuals().warn_fg_color,
                                 Level::Info => ui.visuals().text_color(),
-                                Level::Debug => ui.visuals().weak_text_color(),
+                                Level::Trace | Level::Debug => ui.visuals().weak_text_color(),
                             };
                             ui.add(
                                 egui::Label::new(
@@ -186,7 +187,9 @@ impl App {
                         let text_width = ui.available_width() - 24.0 - ui.spacing().item_spacing.x;
                         ui.vertical(|ui| {
                             ui.set_width(text_width);
-                            ui.add(egui::Label::new(RichText::new(&notice.title).strong()).wrap());
+                            ui.add(
+                                egui::Label::new(RichText::new(tr(&notice.title)).strong()).wrap(),
+                            );
                             if !notice.detail.is_empty() {
                                 egui::ScrollArea::vertical()
                                     .id_salt("notification_detail")
@@ -194,7 +197,7 @@ impl App {
                                     .show(ui, |ui| {
                                         ui.add(
                                             egui::Label::new(
-                                                RichText::new(&notice.detail)
+                                                RichText::new(tr(&notice.detail))
                                                     .size(13.0)
                                                     .color(ui.visuals().weak_text_color()),
                                             )
@@ -204,7 +207,7 @@ impl App {
                             }
                             if notice.tone == Tone::Error
                                 && !self.logs.is_empty()
-                                && ui.small_button("Открыть журнал").clicked()
+                                && ui.small_button(tr("Open journal")).clicked()
                             {
                                 self.journal_open = true;
                             }
@@ -212,9 +215,9 @@ impl App {
                         dismiss = ui
                             .add_sized(
                                 [24.0, 24.0],
-                                egui::Button::new(RichText::new("×").size(20.0)).frame(false),
+                                egui::Button::new(RichText::new(tr("×")).size(20.0)).frame(false),
                             )
-                            .on_hover_text("Закрыть уведомление")
+                            .on_hover_text(tr("Dismiss notification"))
                             .clicked();
                     });
                 });
@@ -227,6 +230,7 @@ impl App {
 
 impl App {
     pub(super) fn view(&mut self, ui: &mut egui::Ui) {
+        let _language = self.localization.enter();
         let ctx = ui.ctx().clone();
         self.header(ui);
         egui::Panel::bottom("footer")
@@ -240,17 +244,17 @@ impl App {
                     caption(
                         ui,
                         if self.job.is_some() {
-                            "Выполняется операция"
+                            "Operation in progress"
                         } else if self.target().is_some() {
-                            "Mac подключён"
+                            "Mac connected"
                         } else {
-                            "Ожидание устройства"
+                            "Waiting for a device"
                         },
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add(
                             egui::Label::new(
-                                RichText::new(format!("Zalivka {}", zalivka::VERSION))
+                                RichText::new(tr(format!("Zalivka {}", zalivka::VERSION)))
                                     .small()
                                     .color(ui.visuals().weak_text_color()),
                             )
@@ -274,7 +278,7 @@ impl App {
                     .id_salt("main_content")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.heading("Восстановление Mac");
+                        ui.heading(tr("Mac restore"));
                         ui.add_space(9.0);
                         if self.job.is_some() {
                             self.active_job(ui);
@@ -338,14 +342,14 @@ impl eframe::App for App {
             if !job.can_stop() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.notice = Some(Notice {
-                    title: "Операция ещё выполняется".into(),
-                    detail: "Дождитесь завершения перед закрытием окна.".into(),
+                    title: "Operation still in progress".into(),
+                    detail: "Wait for the operation to finish before closing this window.".into(),
                     tone: Tone::Neutral,
                     expires_at: Some(Instant::now() + super::NOTICE_LIFETIME),
                 });
             } else if let Err(error) = job.stop() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.error("Не удалось остановить операцию", error);
+                self.error("Could not stop the operation", error);
             }
         }
         if self.job.is_none() && !self.picking && self.confirmation.is_none() {

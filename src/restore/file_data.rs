@@ -44,7 +44,7 @@ impl<'a> FileDataWriter<'a> {
         total: Option<u64>,
     ) -> Self {
         Self {
-            progress: crate::progress::Progress::new(format!("Передача {name}"), total, 0),
+            progress: crate::progress::Progress::new(format!("Transferring {name}"), total, 0),
             profile: crate::progress::TransferProfile::new(name),
             stream,
             session,
@@ -105,6 +105,7 @@ impl<'a> FileDataWriter<'a> {
             self.pending.len() / crate::mux::MAX_PAYLOAD * crate::mux::MAX_PAYLOAD
         };
         if n != 0 {
+            let _trace = crate::logging::firmware_transfer();
             let started = Instant::now();
             let sent = self.stream.write_all(&self.pending[..n]);
             self.profile.write += started.elapsed();

@@ -78,6 +78,7 @@ impl Ipsw {
         };
         let mut buffer = vec![0; 2 * 1024 * 1024];
         for index in 0..self.archive.len() {
+            crate::progress::check_cancelled()?;
             let mut entry = self.archive.by_index(index)?;
             let name = entry.name()?.into_owned();
             let length = entry.size();
@@ -97,8 +98,8 @@ impl Ipsw {
             }
             crate::log!(
                 Debug,
-                "ipsw",
-                "Проверен файл {}/{}: {} ({} МиБ)",
+                "ipsw:verify",
+                "{}/{}: {} ({} MiB)",
                 index + 1,
                 report.entries,
                 name,
@@ -118,7 +119,7 @@ impl EntryDigests {
         buffer: &mut [u8],
     ) -> Result<EntryVerification> {
         let mut progress =
-            crate::progress::Progress::new(format!("Проверка {name}"), Some(length), 0);
+            crate::progress::Progress::new(format!("Verifying {name}"), Some(length), 0);
         let mut n =
             read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
         let aea = buffer[..n].starts_with(b"AEA1");
@@ -202,6 +203,7 @@ impl EntryDigests {
 fn read_chunk(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
     let mut n = 0;
     while n < buffer.len() {
+        crate::progress::check_cancelled()?;
         match reader.read(&mut buffer[n..]) {
             Ok(0) => break,
             Ok(read) => n += read,

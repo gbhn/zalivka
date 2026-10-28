@@ -164,7 +164,7 @@ pub fn obtain(
     crate::log!(
         Info,
         "firmware",
-        "Поиск прошивки в каталоге Apple: CPID {:04x}, BDID {:02x}",
+        "Searching: CPID={:04x}, BDID={:02x}",
         device.chip_id,
         device.board_id
     );
@@ -172,7 +172,7 @@ pub fn obtain(
     crate::log!(
         Info,
         "firmware",
-        "Выбрана прошивка для {}: версия {}, сборка {}",
+        "Selected {}: {} ({})",
         release.product_type,
         release.version,
         release.build
@@ -201,12 +201,7 @@ pub fn ensure_cached(
         encode_hex(&release.sha1)
     ));
     if path.exists() {
-        crate::log!(
-            Info,
-            "firmware",
-            "Проверка сохранённой прошивки: {}",
-            path.display()
-        );
+        crate::log!(Info, "firmware", "Checking cache: {}", path.display());
         net::verify_file(&path, &release.sha1).with_context(|| {
             format!(
                 "cached IPSW is corrupt; remove {} to download it again",
@@ -214,7 +209,7 @@ pub fn ensure_cached(
             )
         })?;
     } else {
-        crate::log!(Info, "firmware", "Загрузка прошивки: {}", path.display());
+        crate::log!(Info, "firmware", "Downloading firmware: {}", path.display());
         net::download_verified(&release.url, &path, &release.sha1)?;
     }
     let ipsw = Ipsw::open(&path)?;

@@ -21,9 +21,9 @@ impl HostStatus {
 
     pub fn blocking_reason(&self) -> Option<&'static str> {
         if self.apple_service_running {
-            Some("Остановите Apple Mobile Device Service перед восстановлением")
+            Some("Stop Apple Mobile Device Service before restoring")
         } else if !self.apple_driver_installed && !self.compatible_usb_driver {
-            Some("Установите USB-драйвер Apple")
+            Some("Install the Apple USB driver")
         } else {
             None
         }
@@ -42,9 +42,7 @@ pub fn check_host() -> Result<()> {
     if let Some(status) = host_status()?
         && let Some(reason) = status.blocking_reason()
     {
-        anyhow::bail!(
-            "{reason}. Откройте подготовку Windows в Zalivka или выполните zalivka drivers prepare."
-        );
+        anyhow::bail!("{reason}. Open Windows setup in Zalivka or run zalivka drivers prepare.");
     }
     Ok(())
 }
@@ -53,12 +51,12 @@ pub fn prepare_windows() -> Result<bool> {
     #[cfg(windows)]
     return crate::windows::setup::prepare();
     #[cfg(not(windows))]
-    anyhow::bail!("Подготовка драйверов доступна только в Windows")
+    anyhow::bail!("Driver setup is only available on Windows")
 }
 
 #[cfg(windows)]
-pub fn prepare_windows_elevated() -> Result<bool> {
-    crate::windows::setup::prepare_elevated()
+pub fn run_elevated_helper() -> Option<u32> {
+    crate::windows::setup::run_helper()
 }
 
 /// Remove Apple restore device records and reinstall the signed USB package.
@@ -66,19 +64,14 @@ pub fn reset_windows() -> Result<bool> {
     #[cfg(windows)]
     return crate::windows::setup::cleanup::reset();
     #[cfg(not(windows))]
-    anyhow::bail!("Сброс USB-драйверов доступен только в Windows")
-}
-
-#[cfg(windows)]
-pub fn reset_windows_elevated(reboot: &mut bool) -> Result<()> {
-    crate::windows::setup::cleanup::reset_elevated(reboot)
+    anyhow::bail!("USB driver reset is only available on Windows")
 }
 
 pub fn open_installed_apps() -> Result<()> {
     #[cfg(windows)]
     return crate::windows::setup::open_installed_apps();
     #[cfg(not(windows))]
-    anyhow::bail!("Список приложений Windows недоступен в этой ОС")
+    anyhow::bail!("Windows apps are unavailable on this operating system")
 }
 
 #[derive(Serialize)]
@@ -263,7 +256,7 @@ pub fn install(inf: &Path) -> Result<bool> {
     };
     let inf = inf
         .canonicalize()
-        .with_context(|| format!("Открытие INF: {}", inf.display()))?;
+        .with_context(|| format!("Opening INF: {}", inf.display()))?;
     ensure!(
         inf.extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("inf")),
@@ -271,11 +264,11 @@ pub fn install(inf: &Path) -> Result<bool> {
     );
     let setupapi = crate::windows::windows_directory()?.join(r"INF\setupapi.dev.log");
     let offset = std::fs::metadata(&setupapi).map(|m| m.len()).unwrap_or(0);
+    crate::log!(Info, "drivers", "Installing driver: {}", inf.display());
     crate::log!(
-        Info,
-        "drivers",
-        "Установка подписанного драйвера: {}; API=DiInstallDriverW; flags=0; журнал Windows: {}",
-        inf.display(),
+        Trace,
+        "drivers:install",
+        "DiInstallDriverW; flags=0; journal={}; offset={offset}",
         setupapi.display()
     );
     let path = crate::windows::wide(&inf);
@@ -295,10 +288,8 @@ pub fn install(inf: &Path) -> Result<bool> {
         let code = error.raw_os_error().unwrap_or(0) as u32;
         crate::log!(
             Error,
-            "drivers",
-            "DiInstallDriverW: ошибка {code} (0x{code:08X}), {error}; время={:.3} с; INF={}",
-            started.elapsed().as_secs_f64(),
-            inf.display()
+            "drivers:install",
+            "DiInstallDriverW: 0x{code:08X}; {error}"
         );
         let read_log = (|| -> Result<()> {
             let mut file = File::open(&setupapi)?;
@@ -311,16 +302,16 @@ pub fn install(inf: &Path) -> Result<bool> {
             file.take(65536).read_to_end(&mut bytes)?;
             if bytes.is_empty() {
                 crate::log!(
-                    Info,
-                    "setupapi",
-                    "Новых записей установки в {} нет",
+                    Debug,
+                    "drivers:log",
+                    "No new records: {}",
                     setupapi.display()
                 );
             } else {
                 crate::log!(
-                    Info,
-                    "setupapi",
-                    "Записи установки Windows, смещение {bounded}..{end}: {}",
+                    Trace,
+                    "drivers:log",
+                    "{bounded}..{end}: {}",
                     setupapi.display()
                 );
                 // SetupAPI logs can be UTF-16LE; detect its BOM or ASCII NULs.
@@ -338,7 +329,7 @@ pub fn install(inf: &Path) -> Result<bool> {
                     String::from_utf8_lossy(&bytes).into_owned()
                 };
                 for line in text.lines().filter(|line| !line.trim().is_empty()) {
-                    crate::log!(Info, "setupapi", "{line}");
+                    crate::log!(Debug, "drivers:log", "{line}");
                 }
             }
             Ok(())
@@ -346,8 +337,8 @@ pub fn install(inf: &Path) -> Result<bool> {
         if let Err(log_error) = read_log {
             crate::log!(
                 Warning,
-                "setupapi",
-                "Не удалось прочитать {}: {log_error:#}",
+                "drivers:log",
+                "Could not read {}: {log_error:#}",
                 setupapi.display()
             );
         }
@@ -355,8 +346,8 @@ pub fn install(inf: &Path) -> Result<bool> {
     }
     crate::log!(
         Info,
-        "drivers",
-        "DiInstallDriverW: успешно за {:.3} с; требуется перезагрузка: {}",
+        "drivers:install",
+        "Installed in {:.3} s; reboot={}",
         started.elapsed().as_secs_f64(),
         reboot != 0
     );

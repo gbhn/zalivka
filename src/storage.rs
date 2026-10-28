@@ -57,6 +57,24 @@ pub fn log_directory() -> Result<PathBuf> {
     Ok(directory)
 }
 
+pub fn config_directory() -> Result<PathBuf> {
+    let absolute_env = |name| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let root = if cfg!(windows) {
+        absolute_env("LOCALAPPDATA")
+            .or_else(|| absolute_env("USERPROFILE").map(|path| path.join("AppData/Local")))
+    } else {
+        absolute_env("XDG_CONFIG_HOME")
+            .or_else(|| absolute_env("HOME").map(|path| path.join(".config")))
+    };
+    Ok(root
+        .context("could not locate the settings folder")?
+        .join("zalivka"))
+}
+
 #[cfg(test)]
 #[path = "../tests/unit/storage.rs"]
 mod tests;

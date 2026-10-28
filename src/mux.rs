@@ -90,6 +90,7 @@ struct Channel {
     window: u32,
     connected: bool,
     closed: bool,
+    firmware_transfer: bool,
     input: VecDeque<u8>,
     consumed: usize,
 }
@@ -129,6 +130,7 @@ pub struct Session(Arc<Mutex<Link>>, Arc<AtomicBool>);
 
 impl Session {
     pub fn new(usb: impl PacketTransport + 'static) -> Result<Self> {
+        crate::log!(Trace, "usbmux", "Negotiating version");
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut link = Link {
             disconnected: false,
@@ -178,6 +180,7 @@ impl Session {
             link.rx = 0xffff;
             link.send(2, &[7], &[])?;
         }
+        crate::log!(Debug, "usbmux", "Version {}", link.version);
         Ok(Self(Arc::new(Mutex::new(link)), cancelled))
     }
 
@@ -242,11 +245,13 @@ impl Session {
                 window: 0,
                 connected: false,
                 closed: false,
+                firmware_transfer: false,
                 input: VecDeque::new(),
                 consumed: 0,
             },
         );
         let sent = link.send_tcp(source, SYN, &[]);
+        crate::log!(Trace, "usbmux:tcp", "{source} -> {destination}: SYN");
         drop(link);
         let stream = MuxStream::new(self.clone(), source, destination);
         sent?;
@@ -262,6 +267,7 @@ impl Session {
                 .into());
             }
             if c.connected {
+                crate::log!(Trace, "usbmux:tcp", "{source} -> {destination}: connected");
                 return Ok(stream);
             }
             ensure!(Instant::now() < deadline, "service connection timed out");
@@ -272,6 +278,7 @@ impl Session {
     }
 
     pub fn cancel(&self) {
+        crate::log!(Trace, "usbmux", "Cancelling session");
         self.1.store(true, Ordering::Release);
     }
 
@@ -320,6 +327,14 @@ impl Link {
         )?;
         self.output.extend_from_slice(header);
         self.output.extend_from_slice(data);
+        crate::log!(
+            Trace,
+            "usbmux:packet",
+            "TX proto={proto}, tx={}, rx={}, bytes={}",
+            self.tx,
+            self.rx,
+            self.output.len()
+        );
         let started = Instant::now();
         let sent = self.usb.write_packet(&self.output);
         self.finish_write(sent, started, 1)
@@ -377,6 +392,12 @@ impl Link {
             seq = seq.wrapping_add(payload.len() as u32);
         }
         let started = Instant::now();
+        crate::log!(
+            Trace,
+            "usbmux:packet",
+            "TX batch: packets={count}, bytes={}",
+            data.len()
+        );
         let sent = self
             .usb
             .write_packets(&self.output_batch[..count], &self.cancelled);
@@ -431,6 +452,25 @@ impl Link {
             return Ok(false);
         };
         let packet = decode_packet(&bytes, self.version)?;
+        // A different service thread can consume the firmware channel's ACKs.
+        // Keep those packets quiet without suppressing that service's own trace.
+        let source = packet
+            .payload
+            .get(2..4)
+            .map(|port| u16::from_be_bytes([port[0], port[1]]));
+        let firmware_transfer = packet.protocol == 6
+            && source
+                .and_then(|port| self.channels.get(&port))
+                .is_some_and(|channel| channel.firmware_transfer);
+        let _trace = firmware_transfer.then(crate::logging::firmware_transfer);
+        crate::log!(
+            Trace,
+            "usbmux:packet",
+            "RX proto={}, rx={}, bytes={}",
+            packet.protocol,
+            packet.rx,
+            bytes.len()
+        );
         self.rx = packet.rx;
         if packet.protocol == 1 {
             return Ok(true);
@@ -453,6 +493,13 @@ impl Link {
             "invalid mux TCP header size"
         );
         let data = &tcp[header_len..];
+        crate::log!(
+            Trace,
+            "usbmux:tcp",
+            "{peer_port} -> {source}: flags={flags:#04x}, seq={seq}, ack={ack}, window={}, bytes={}",
+            u32::from(u16::from_be_bytes(tcp[14..16].try_into()?)) << 8,
+            data.len()
+        );
         let Some(c) = self.channels.get_mut(&source) else {
             return Ok(true);
         };
@@ -465,11 +512,13 @@ impl Link {
             crate::log!(
                 Debug,
                 "usbmux",
-                "RST от Mac: {peer_port} -> {source}, seq={seq}, ack={ack}, buffered={} Б, reason={:?} (hex={}, bytes={})",
-                c.input.len(),
-                String::from_utf8_lossy(&data[..data.len().min(256)]),
-                hex::encode(&data[..data.len().min(256)]),
-                data.len()
+                "RST {peer_port} -> {source}: {}",
+                String::from_utf8_lossy(&data[..data.len().min(256)])
+            );
+            crate::logging::bytes(
+                "usbmux:tcp",
+                format_args!("RST {peer_port} -> {source}"),
+                data,
             );
             c.closed = true;
             return Ok(true);
@@ -515,7 +564,7 @@ impl Link {
             crate::log!(
                 Debug,
                 "usbmux",
-                "FIN от Mac: {peer_port} -> {source}, seq={seq}, ack={ack}, buffered={} Б",
+                "FIN {peer_port} -> {source}: buffered={} B",
                 c.input.len()
             );
             c.ack = c.ack.wrapping_add(1);

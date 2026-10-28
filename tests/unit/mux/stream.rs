@@ -57,6 +57,70 @@ struct State {
 struct EventUsb(Arc<Mutex<State>>, InputReady);
 
 #[test]
+fn fdr_reader_skips_firmware_acks_and_keeps_its_own_trace() {
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let output = records.clone();
+    crate::progress::Context::new(move |event| {
+        if let crate::progress::Event::Log(record) = event {
+            output.lock().unwrap().push(record);
+        }
+    })
+    .run(|| {
+        let state = Arc::new(Mutex::new(State::default()));
+        state.lock().unwrap().input = [
+            crate::test_mux::version_packet(),
+            crate::test_mux::tcp(12345, 1, 0, 1, 0x12, &[]),
+            crate::test_mux::tcp(45678, 2, 0, 1, 0x12, &[]),
+            crate::test_mux::tcp(12345, 1, 1, 65, ACK, &[]),
+            crate::test_mux::tcp(45678, 2, 1, 1, ACK, b"FDR"),
+        ]
+        .into();
+        let session = Session::new(EventUsb(state, InputReady::new(|_| Ok(false)))).unwrap();
+        let mut firmware = session.connect(12345).unwrap();
+        let mut fdr = session.connect(45678).unwrap();
+        fdr.set_log_source("fdr:conn");
+        records.lock().unwrap().clear();
+        {
+            let _transfer = crate::logging::firmware_transfer();
+            firmware.write_all(&[0xa5; 64]).unwrap();
+        }
+        let _fdr = std::thread::spawn(crate::progress::inherit(move || {
+            let mut bytes = [0; 3];
+            fdr.read_exact(&mut bytes).unwrap();
+            assert_eq!(&bytes, b"FDR");
+            fdr
+        }))
+        .join()
+        .unwrap();
+        // The same channel resumes tracing when it sends a control message.
+        firmware.write_all(b"control").unwrap();
+    });
+    let records = records.lock().unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.message.starts_with("RX proto="))
+            .count(),
+        1
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| record.message.starts_with("12345 -> 1:"))
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| { record.source == "fdr:conn" && record.message.ends_with("464452") })
+    );
+    assert!(
+        records.iter().any(|record| {
+            record.source == "usbmux:io" && record.message.contains("TX offset=64")
+        })
+    );
+}
+
+#[test]
 fn version_handshake_waits_for_fragmented_input_and_propagates_wait_errors() {
     for fail in [false, true] {
         let state = Arc::new(Mutex::new(State::default()));

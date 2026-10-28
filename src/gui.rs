@@ -34,6 +34,17 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const UI_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const NOTICE_LIFETIME: Duration = Duration::from_secs(5);
 
+fn trim_logs(records: &mut VecDeque<Record>) {
+    if records.len() > 4000 {
+        // Byte dumps must not evict the visible operation history.
+        let index = records
+            .iter()
+            .position(|record| record.level < Level::Info)
+            .unwrap_or(0);
+        records.remove(index);
+    }
+}
+
 fn logo_icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo.png"))
         .expect("embedded logo must be a valid PNG")
@@ -107,6 +118,7 @@ impl FirmwareSelection {
 }
 
 struct App {
+    localization: zalivka::localization::Localizer,
     logo: Option<egui::TextureHandle>,
     setup: Setup,
     devices: Vec<DeviceInfo>,
@@ -135,6 +147,7 @@ impl App {
     fn new() -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
+            localization: zalivka::localization::Localizer::load(),
             logo: None,
             setup: Setup::default(),
             devices: vec![],
@@ -165,31 +178,31 @@ impl App {
     }
     fn blocked_reason(&self) -> Option<&'static str> {
         if self.windows_reboot_required {
-            return Some("Перезагрузите Windows после установки драйвера");
+            return Some("Restart Windows after installing the driver");
         }
         match &self.host {
-            Err(_) => return Some("Не удалось проверить подготовку Windows"),
+            Err(_) => return Some("Could not check Windows readiness"),
             Ok(Some(host)) => {
                 if let Some(reason) = host.blocking_reason() {
                     return Some(reason);
                 }
             }
-            Ok(None) if cfg!(windows) => return Some("Проверяем подготовку Windows"),
+            Ok(None) if cfg!(windows) => return Some("Checking Windows readiness"),
             _ => {}
         }
         match self.target() {
             None => {
                 return Some(if self.devices.is_empty() {
-                    "Подключите Mac в режиме DFU"
+                    "Connect a Mac in DFU mode"
                 } else {
-                    "Выберите Mac"
+                    "Select a Mac"
                 });
             }
-            Some(d) if d.mode != Mode::Dfu => return Some("Переведите Mac в режим DFU"),
+            Some(d) if d.mode != Mode::Dfu => return Some("Put the Mac in DFU mode"),
             _ => {}
         }
         if !self.setup.automatic && self.setup.local_file().is_err() {
-            return Some("Выберите файл IPSW");
+            return Some("Select an IPSW file");
         }
         None
     }
@@ -204,7 +217,7 @@ impl App {
     fn journal_text(&self, details: bool) -> String {
         self.logs
             .iter()
-            .filter(|record| details || record.level != Level::Debug)
+            .filter(|record| details || record.level >= Level::Info)
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n")
@@ -215,17 +228,15 @@ impl App {
         {
             self.log_path = None;
             self.error(
-                "Журнал на диске неполный",
-                format!("{error}. Можно сохранить последнюю часть журнала из памяти."),
+                "The disk journal is incomplete",
+                format!("{error}. You can save the recent journal history from memory."),
             );
             self.journal_open = true;
         }
     }
     fn journal_line(&mut self, line: Record) {
         self.logs.push_back(line);
-        while self.logs.len() > 4000 {
-            self.logs.pop_front();
-        }
+        trim_logs(&mut self.logs);
     }
     fn background(
         &self,
@@ -235,9 +246,11 @@ impl App {
     ) -> std::io::Result<()> {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
+        let language = self.localization.clone();
         std::thread::Builder::new()
             .name(format!("zalivka-{name}"))
             .spawn(move || {
+                let _language = language.enter();
                 let _ = tx.send(task());
                 ctx.request_repaint();
             })
@@ -295,24 +308,28 @@ impl App {
             let dialog = rfd::FileDialog::new();
             let path = match picker {
                 Picker::Firmware => dialog
-                    .set_title("Выберите прошивку")
+                    .set_title(zalivka::localization::text("Select firmware"))
                     .add_filter("Apple IPSW", &["ipsw"])
                     .pick_file(),
-                Picker::Cache => dialog.set_title("Папка прошивок").pick_folder(),
+                Picker::Cache => dialog
+                    .set_title(zalivka::localization::text("Firmware folder"))
+                    .pick_folder(),
                 Picker::Tokens => dialog
-                    .set_title("Файл токенов")
+                    .set_title(zalivka::localization::text("Token file"))
                     .add_filter("Property list", &["plist"])
                     .pick_file(),
-                Picker::Connect => dialog.set_title("Файл DAWTKN").pick_file(),
+                Picker::Connect => dialog
+                    .set_title(zalivka::localization::text("DAWTKN file"))
+                    .pick_file(),
                 Picker::Log => dialog
-                    .set_title("Сохранить журнал")
+                    .set_title(zalivka::localization::text("Save journal"))
                     .set_file_name("zalivka.log")
                     .save_file(),
             };
             Event::Picked(picker, path)
         }) {
             self.picking = false;
-            self.error("Не удалось открыть окно выбора", e);
+            self.error("Could not open the file picker", e);
         }
     }
     fn open_firmware_folder(&self) -> Result<()> {
@@ -348,7 +365,7 @@ impl App {
         if action.writes_device()
             && let Some(reason) = self.blocked_reason()
         {
-            self.error("Операция недоступна", reason);
+            self.error("Operation unavailable", reason);
             return;
         }
         if matches!(
@@ -363,27 +380,15 @@ impl App {
         match result {
             Ok((mut job, path)) => {
                 self.logs.clear();
-                let record = job.record(Record::new(
-                    Level::Info,
-                    "session",
-                    format!(
-                        "Начало: {}; Zalivka {}{}",
-                        action.title(),
-                        zalivka::VERSION,
-                        if self.setup.ecid.is_empty() {
-                            String::new()
-                        } else {
-                            format!("; ECID: {}", self.setup.ecid)
-                        }
-                    ),
-                ));
-                self.journal_line(record);
+                for record in job.pending_logs() {
+                    self.journal_line(record);
+                }
                 self.log_path = Some(path);
                 self.notice = None;
                 self.journal_error(job.log_error.as_deref());
                 self.job = Some(job);
             }
-            Err(e) => self.error("Не удалось начать операцию", format!("{e:#}")),
+            Err(e) => self.error("Could not start the operation", format!("{e:#}")),
         }
     }
 }

@@ -125,8 +125,8 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
     let mut stream = if let Some(proxy) = proxy {
         crate::log!(
             Debug,
-            "proxy",
-            "Соединение с {host}:{port} через прокси {:?} {}:{}",
+            "proxy:connect",
+            "{host}:{port} via {:?} {}:{}",
             proxy.protocol(),
             proxy.host(),
             proxy.port()
@@ -144,7 +144,7 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
         }
         stream
     } else {
-        crate::log!(Debug, "proxy", "Прямое соединение с {host}:{port}");
+        crate::log!(Debug, "proxy:connect", "{host}:{port} direct");
         Stream {
             transport: Transport::Tcp(tcp_connect(host, port, timeout)?),
         }

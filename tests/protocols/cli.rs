@@ -103,83 +103,9 @@ fn offline_plan_uses_the_manifest_component_names_and_stage_flags() {
 }
 
 #[test]
-fn gui_workers_emit_transfer_events_on_stdout_and_cli_keeps_json_clean() {
-    let file = fixture(None, false);
-    let checksum = device::encode_hex(&sha2::Sha256::digest(std::fs::read(file.path()).unwrap()));
-    for worker in [false, true] {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"));
-        command
-            .arg("verify")
-            .arg(file.path())
-            .args(["--checksum", &checksum]);
-        if worker {
-            command.env(zalivka::progress::WORKER_EVENTS_ENV, "1");
-        } else {
-            command.env_remove(zalivka::progress::WORKER_EVENTS_ENV);
-        }
-        let output = command.output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let events = |bytes: &[u8]| {
-            String::from_utf8_lossy(bytes)
-                .lines()
-                .filter_map(zalivka::progress::Event::parse)
-                .collect::<Vec<_>>()
-        };
-        if worker {
-            let events = events(&output.stdout);
-            assert!(output.stderr.is_empty());
-            assert_eq!(
-                events.len(),
-                String::from_utf8_lossy(&output.stdout).lines().count()
-            );
-            let transfers: Vec<_> = events
-                .iter()
-                .filter_map(|event| match event {
-                    zalivka::progress::Event::Transfer(update) => Some(update),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(transfers.first().unwrap().completed, 0);
-            assert!(transfers.last().unwrap().finished);
-            assert!(events.iter().any(|event| matches!(event,
-                zalivka::progress::Event::Log(record) if record.level == zalivka::logging::Level::Debug)));
-        } else {
-            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
-            assert!(events(&output.stdout).is_empty());
-            assert!(events(&output.stderr).is_empty());
-            let diagnostics = String::from_utf8_lossy(&output.stderr);
-            assert!(!diagnostics.contains("DEBUG"));
-            assert!(!diagnostics.contains('\u{00b7}'));
-        }
-    }
-}
-
-#[test]
-fn verbose_diagnostics_keep_stdout_machine_readable() {
+fn cli_defaults_to_trace_and_keeps_stdout_machine_readable() {
     let file = fixture(None, false);
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
-        .env_remove(zalivka::progress::WORKER_EVENTS_ENV)
-        .arg("verify")
-        .arg(file.path())
-        .arg("--verbose")
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
-    let diagnostics = String::from_utf8_lossy(&output.stderr);
-    assert!(diagnostics.contains("DEBUG"));
-    assert!(!diagnostics.contains(zalivka::progress::EVENT_PREFIX));
-}
-
-#[test]
-fn verifying_an_ipsw_reports_file_progress_without_an_archive_checksum() {
-    let file = fixture(None, false);
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
-        .env(zalivka::progress::WORKER_EVENTS_ENV, "1")
         .arg("verify")
         .arg(file.path())
         .output()
@@ -189,42 +115,49 @@ fn verifying_an_ipsw_reports_file_progress_without_an_archive_checksum() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let events: Vec<_> = String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .filter_map(zalivka::progress::Event::parse)
-        .collect();
-    let mut started = std::collections::HashSet::new();
-    let mut completed = std::collections::HashSet::new();
-    let mut bytes = 0;
-    let mut report = None;
-    for event in events {
-        match event {
-            zalivka::progress::Event::Transfer(update) => {
-                assert!(update.stage.starts_with("Проверка "));
-                if update.finished {
-                    assert!(completed.insert(update.id));
-                    assert_eq!(update.total, Some(update.completed));
-                    bytes += update.completed;
-                } else {
-                    started.insert(update.id);
-                }
-            }
-            zalivka::progress::Event::Log(record) if record.source == "report" => {
-                report = Some(serde_json::from_str::<serde_json::Value>(&record.message).unwrap());
-            }
-            _ => {}
-        }
-    }
-    let report = report.unwrap();
-    assert!(!started.is_empty());
-    assert_eq!(started, completed);
-    assert_eq!(started.len() as u64, report["entries"].as_u64().unwrap());
-    assert_eq!(bytes, report["uncompressed_bytes"].as_u64().unwrap());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["entries"].as_u64().unwrap() > 0);
+    let diagnostics = String::from_utf8(output.stderr).unwrap();
+    assert!(diagnostics.contains("TRACE"));
+    assert!(diagnostics.contains("DEBUG"));
+    assert!(diagnostics.contains("ipsw:zip"));
+    assert!(!diagnostics.contains(zalivka::progress::EVENT_PREFIX));
 }
 
 #[test]
-fn cli_restore_requires_erase_and_experimental_flags_before_accessing_usb() {
+fn native_verification_emits_typed_progress_and_complete_diagnostics() {
+    let file = fixture(None, false);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let output = events.clone();
+    let report = zalivka::progress::Context::new(move |event| output.lock().unwrap().push(event))
+        .run(|| zalivka::operations::verify(file.path(), None))
+        .unwrap();
+    let events = events.lock().unwrap();
+    let mut started = std::collections::HashSet::new();
+    let mut completed = std::collections::HashSet::new();
+    let mut bytes = 0;
+    for event in events.iter() {
+        if let zalivka::progress::Event::Transfer(update) = event {
+            assert!(update.stage.starts_with("Verifying "));
+            if update.finished {
+                assert!(completed.insert(update.id));
+                assert_eq!(update.total, Some(update.completed));
+                bytes += update.completed;
+            } else {
+                started.insert(update.id);
+            }
+        }
+    }
+    assert!(!started.is_empty());
+    assert_eq!(started, completed);
+    assert_eq!(started.len(), report.entries);
+    assert_eq!(bytes, report.uncompressed_bytes);
+    assert!(events.iter().any(|event| matches!(event,
+        zalivka::progress::Event::Log(record) if record.level == zalivka::logging::Level::Trace)));
+}
+
+#[test]
+fn cli_restore_requires_erase_before_accessing_usb() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
         .args(["restore", "absent.ipsw", "--ecid", "1234"])
         .output()
@@ -232,5 +165,22 @@ fn cli_restore_requires_erase_and_experimental_flags_before_accessing_usb() {
     assert_eq!(output.status.code(), Some(2));
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("--erase"));
-    assert!(error.contains("--experimental"));
+    assert!(!error.contains("--experimental"));
+}
+
+#[cfg(windows)]
+#[test]
+fn private_uac_entry_rejects_invalid_actions_and_log_pipe_identifiers() {
+    for args in [
+        vec!["--driver-helper", "unknown", "invalid"],
+        vec!["--driver-helper", "prepare", "../file"],
+        vec!["--driver-helper", "reset", "C:/Windows/System32/file"],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("drivers:uac"));
+    }
 }

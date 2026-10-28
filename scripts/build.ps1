@@ -74,6 +74,10 @@ try {
     if (-not $artifact -or -not $version) { throw 'Cargo returned no executable or build identity.' }
     $directory = Join-Path $projectRoot 'artifacts'
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    $localeDirectory = Join-Path $directory 'locales'
+    New-Item -ItemType Directory -Force -Path $localeDirectory | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'locales') -Filter '*.json' -File |
+        Copy-Item -Destination $localeDirectory -Force
     $destination = Join-Path $directory ('zalivka-' + $version + [IO.Path]::GetExtension($artifact))
     $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
     if (Test-Path -LiteralPath $destination) {

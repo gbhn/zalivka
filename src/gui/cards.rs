@@ -9,6 +9,7 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
+use zalivka::localization::text as tr;
 use zalivka::{device::Mode, drivers};
 
 impl App {
@@ -20,7 +21,7 @@ impl App {
         let mut frame = card(ctx).begin(ui);
         let ui = &mut frame.content_ui;
         ui.set_width(ui.available_width());
-        section(ui, "01", "Устройство");
+        section(ui, "01", "Device");
         ui.horizontal_wrapped(|ui| {
             laptop(ui, self.target().is_some());
             ui.allocate_ui_with_layout(
@@ -32,23 +33,23 @@ impl App {
                         .map(|device| format!("Mac (CPID {:04x})", device.chip_id))
                         .unwrap_or_else(|| {
                             if self.devices.is_empty() {
-                                "Mac не подключён"
+                                "No Mac connected"
                             } else {
-                                "Выберите Mac"
+                                "Select a Mac"
                             }
                             .into()
                         });
-                    ui.label(RichText::new(title).size(19.0).strong());
+                    ui.label(RichText::new(tr(title)).size(19.0).strong());
                     if let Some(device) = self.target() {
                         ui.label(
-                            RichText::new(format!("ECID {:016x}", device.ecid))
+                            RichText::new(tr(format!("ECID {:016x}", device.ecid)))
                                 .monospace()
                                 .size(12.0)
                                 .color(ui.visuals().weak_text_color()),
                         );
                     } else {
                         ui.label(
-                            RichText::new("Подключите Mac кабелем USB-C")
+                            RichText::new(tr("Connect your Mac with a USB-C cable"))
                                 .color(ui.visuals().weak_text_color()),
                         );
                     }
@@ -73,7 +74,7 @@ impl App {
         if self.devices.len() > 1 || (!self.devices.is_empty() && self.target().is_none()) {
             ui.add_space(4.0);
             egui::ComboBox::from_id_salt("devices")
-                .selected_text("Выбрать устройство")
+                .selected_text(tr("Select a device"))
                 .width(ui.available_width())
                 .show_ui(ui, |ui| {
                     for d in &self.devices {
@@ -81,7 +82,7 @@ impl App {
                         ui.selectable_value(
                             &mut self.setup.ecid,
                             ecid.clone(),
-                            format!("Mac, {ecid}, {:?}", d.mode),
+                            tr(format!("Mac, {ecid}, {:?}", d.mode)),
                         );
                     }
                 });
@@ -89,9 +90,9 @@ impl App {
         if self.scan_error.is_some() {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    RichText::new("Не удалось проверить USB").color(ui.visuals().error_fg_color),
+                    RichText::new(tr("Could not check USB")).color(ui.visuals().error_fg_color),
                 );
-                if ui.link("Диагностика").clicked() {
+                if ui.link(tr("Diagnostics")).clicked() {
                     self.start(Action::Doctor, ctx);
                 }
             });
@@ -106,10 +107,9 @@ impl App {
         let mut frame = card(ctx).begin(ui);
         let ui = &mut frame.content_ui;
         ui.set_width(ui.available_width());
-        section(ui, "02", "Прошивка");
+        section(ui, "02", "Firmware");
         ui.horizontal_wrapped(|ui| {
-            for (automatic, title) in [(true, "Автоматически"), (false, "Локальный IPSW")]
-            {
+            for (automatic, title) in [(true, "Automatic"), (false, "Local IPSW")] {
                 let selected = self.setup.automatic == automatic;
                 let color = if selected {
                     Color32::WHITE
@@ -123,7 +123,7 @@ impl App {
                 };
                 if ui
                     .add(
-                        egui::Button::new(RichText::new(title).color(color))
+                        egui::Button::new(RichText::new(tr(title)).color(color))
                             .selected(selected)
                             .stroke(stroke)
                             .min_size(Vec2::new(152.0, 38.0)),
@@ -139,31 +139,31 @@ impl App {
             self.refresh_firmware(ctx, false);
             match self.firmware.as_ref().map(|firmware| &firmware.release) {
                 None => {
-                    ui.strong("Прошивка ещё не выбрана");
+                    ui.strong(tr("No firmware selected"));
                     caption(
                         ui,
                         if self.devices.is_empty() {
-                            "Подключите Mac для подбора прошивки"
+                            "Connect a Mac to find compatible firmware"
                         } else {
-                            "Выберите Mac для подбора прошивки"
+                            "Select a Mac to find compatible firmware"
                         },
                     );
                 }
                 Some(None) => {
-                    ui.strong("Подбираем прошивку…");
-                    caption(ui, "Проверяем каталог Apple для выбранного Mac");
+                    ui.strong(tr("Finding firmware…"));
+                    caption(ui, "Checking the Apple catalog for the selected Mac");
                 }
                 Some(Some(Ok(release))) => {
-                    ui.strong(format!(
-                        "Версия {}, сборка {}",
+                    ui.strong(tr(format!(
+                        "Version {}, build {}",
                         release.version, release.build
-                    ));
+                    )));
                     caption(ui, &release.product_type);
                 }
                 Some(Some(Err(error))) => {
-                    ui.strong("Не удалось подобрать прошивку")
-                        .on_hover_text(error);
-                    caption(ui, "Проверьте интернет и повторите поиск");
+                    ui.strong(tr("Could not find compatible firmware"))
+                        .on_hover_text(tr(error));
+                    caption(ui, "Check your internet connection and try again");
                 }
             }
         } else {
@@ -171,14 +171,14 @@ impl App {
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Перетащите IPSW в окно".into());
+                .unwrap_or_else(|| tr("Drop an IPSW file here"));
             ui.add(egui::Label::new(RichText::new(name).strong()).truncate())
                 .on_hover_text(&self.setup.ipsw);
             let detail = path
                 .metadata()
                 .ok()
                 .map(|m| human_bytes(m.len()))
-                .unwrap_or_else(|| "Файл прошивки Apple".into());
+                .unwrap_or_else(|| "Apple firmware file".into());
             caption(ui, detail);
         }
         ui.add_space(5.0);
@@ -188,37 +188,36 @@ impl App {
             |ui| {
                 if self.setup.automatic {
                     if ui
-                        .add_enabled(self.target().is_some(), egui::Button::new("Скачать"))
+                        .add_enabled(self.target().is_some(), egui::Button::new(tr("Download")))
                         .clicked()
                     {
                         self.start(Action::Download, ctx);
                     }
                 } else {
                     if ui
-                        .add_enabled(!self.picking, egui::Button::new("Выбрать файл"))
+                        .add_enabled(!self.picking, egui::Button::new(tr("Choose file")))
                         .clicked()
                     {
                         self.pick(Picker::Firmware, ctx);
                     }
-                    if self.setup.local_file().is_ok() && ui.button("Проверить").clicked()
-                    {
+                    if self.setup.local_file().is_ok() && ui.button(tr("Verify")).clicked() {
                         self.start(Action::Verify, ctx);
                     }
                 }
                 if ui
-                    .button("Открыть папку")
-                    .on_hover_text("Папка скачанных прошивок")
+                    .button(tr("Open folder"))
+                    .on_hover_text(tr("Downloaded firmware folder"))
                     .clicked()
                     && let Err(error) = self.open_firmware_folder()
                 {
-                    self.error("Не удалось открыть папку прошивок", format!("{error:#}"));
+                    self.error("Could not open the firmware folder", format!("{error:#}"));
                 }
                 if self.setup.automatic
                     && self
                         .firmware
                         .as_ref()
                         .is_some_and(|firmware| matches!(firmware.release, Some(Err(_))))
-                    && ui.button("Повторить").clicked()
+                    && ui.button(tr("Retry")).clicked()
                 {
                     self.refresh_firmware(ctx, true);
                 }
@@ -228,7 +227,7 @@ impl App {
     }
     pub(super) fn actions(&mut self, ui: &mut egui::Ui) {
         card(ui.ctx()).show(ui, |ui| {
-            section(ui, "03", "Действие");
+            section(ui, "03", "Action");
             let ready = self.blocked_reason().is_none() && !self.picking;
             let column_count = if ui.available_width() < 640.0 { 1 } else { 2 };
             ui.columns(column_count, |columns| {
@@ -236,14 +235,14 @@ impl App {
                     (
                         Action::Revive,
                         "Revive",
-                        "Обновить прошивку и recoveryOS",
-                        "Запустить Revive",
+                        "Update firmware and recoveryOS",
+                        "Start Revive",
                     ),
                     (
                         Action::Restore,
-                        "Полное восстановление",
-                        "Стереть Mac и установить систему",
-                        "Стереть и восстановить",
+                        "Full restore",
+                        "Erase the Mac and reinstall the system",
+                        "Erase and restore",
                     ),
                 ]
                 .into_iter()
@@ -253,13 +252,16 @@ impl App {
                     if column_count == 1 && index > 0 {
                         ui.add_space(14.0);
                     }
-                    ui.label(RichText::new(title).size(18.0).strong());
+                    ui.label(RichText::new(tr(title)).size(18.0).strong());
                     caption(ui, detail);
                     ui.add_space(7.0);
                     let button = if action == Action::Revive {
-                        egui::Button::new(RichText::new(button).color(Color32::WHITE)).fill(BLUE)
+                        egui::Button::new(RichText::new(tr(button)).color(Color32::WHITE))
+                            .fill(BLUE)
                     } else {
-                        egui::Button::new(RichText::new(button).color(ui.visuals().error_fg_color))
+                        egui::Button::new(
+                            RichText::new(tr(button)).color(ui.visuals().error_fg_color),
+                        )
                     };
                     if ui
                         .add_enabled(
@@ -278,7 +280,7 @@ impl App {
                 }
             });
             if let Some(reason) = self.blocked_reason()
-                && reason != "Подключите Mac в режиме DFU"
+                && reason != "Connect a Mac in DFU mode"
             {
                 ui.add_space(5.0);
                 caption(ui, reason);
@@ -290,35 +292,41 @@ impl App {
             ui.set_width(ui.available_width());
             let Some(job) = self.job.as_ref() else { return };
             ui.horizontal_wrapped(|ui| {
-                pill(ui, "В работе", BLUE);
-                ui.label(RichText::new(job.action.title()).size(21.0).strong());
+                pill(ui, "In progress", BLUE);
+                ui.label(RichText::new(tr(job.action.title())).size(21.0).strong());
             });
             ui.add_space(12.0);
-            ui.label(RichText::new(&job.phase).size(16.0));
+            ui.label(RichText::new(tr(&job.phase)).size(16.0));
             if job.action.writes_device() {
                 progress_bar(ui, job.overall_fraction);
             } else if job.transfers.is_empty() {
                 progress_bar(ui, None);
             }
             ui.add_space(14.0);
-            metric(ui, "Прошло", &elapsed_text(job.started.elapsed().as_secs()));
+            metric(
+                ui,
+                "Elapsed",
+                &elapsed_text(job.started.elapsed().as_secs()),
+            );
             ui.add_space(14.0);
             let idle = job.last_activity.elapsed();
             if !job.can_stop() && !job.action.writes_device() {
-                ui.label("Дождитесь завершения установки и проверки службы Windows.");
+                ui.label(tr(
+                    "Wait for driver installation and the Windows service check to finish.",
+                ));
             } else if job.can_stop()
                 && ui
-                    .add_enabled(!job.cancelled, egui::Button::new("Остановить"))
+                    .add_enabled(!job.cancelled, egui::Button::new(tr("Stop")))
                     .clicked()
                 && let Some(job) = &mut self.job
                 && let Err(e) = job.stop()
             {
-                self.error("Не удалось остановить операцию", e);
+                self.error("Could not stop the operation", e);
             }
             if idle > Duration::from_secs(5) {
                 caption(
                     ui,
-                    format!("Ожидание ответа, {}", elapsed_text(idle.as_secs())),
+                    format!("Waiting for a response, {}", elapsed_text(idle.as_secs())),
                 );
             }
         });
@@ -329,32 +337,34 @@ impl App {
             ui.push_id(id, |ui| {
                 card(ui.ctx()).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new(&transfer.update.stage).size(16.0).strong());
-                    progress_bar(ui, transfer.update.fraction());
-                    caption(
-                        ui,
-                        format!(
-                            "Передано: {}{}",
-                            human_bytes(transfer.update.completed),
-                            transfer
-                                .update
-                                .total
-                                .map(|total| format!(" из {}", human_bytes(total)))
-                                .unwrap_or_default()
-                        ),
+                    ui.label(
+                        RichText::new(tr(&transfer.update.stage))
+                            .size(16.0)
+                            .strong(),
                     );
+                    progress_bar(ui, transfer.update.fraction());
+                    let size = format!(
+                        "{}{}",
+                        human_bytes(transfer.update.completed),
+                        transfer
+                            .update
+                            .total
+                            .map(|total| format!(" of {}", human_bytes(total)))
+                            .unwrap_or_default()
+                    );
+                    caption(ui, format!("Transferred: {size}"));
                     ui.add_space(8.0);
                     ui.columns(2, |columns| {
                         metric(
                             &mut columns[0],
-                            "Скорость",
-                            &format!("{:.1} МиБ/с", transfer.speed(now) / 1048576.0),
+                            "Speed",
+                            &format!("{:.1} MiB/s", transfer.speed(now) / 1048576.0),
                         );
                         let remaining = transfer
                             .remaining(now)
                             .map(elapsed_text)
                             .unwrap_or_else(|| "—".into());
-                        metric(&mut columns[1], "До конца передачи", &remaining);
+                        metric(&mut columns[1], "Time remaining", &remaining);
                     });
                 });
             });
@@ -368,12 +378,12 @@ impl App {
                 let retry = card(ui.ctx())
                     .show(ui, |ui| {
                         ui.label(
-                            RichText::new("Не удалось проверить Windows")
+                            RichText::new(tr("Could not check Windows"))
                                 .strong()
                                 .color(ui.visuals().error_fg_color),
                         );
-                        ui.label(error);
-                        ui.button("Повторить проверку").clicked()
+                        ui.label(tr(error));
+                        ui.button(tr("Check again")).clicked()
                     })
                     .inner;
                 if retry {
@@ -389,46 +399,43 @@ impl App {
         let mut prepare = false;
         let mut open_apps = false;
         card(ui.ctx()).show(ui, |ui| {
-            ui.strong("Подготовка Windows");
+            ui.strong(tr("Windows setup"));
             if host.apple_service_running {
                 ui.label(
-                    RichText::new("Apple Mobile Device Service работает и может мешать подключению к Mac.")
+                    RichText::new(tr("Apple Mobile Device Service is running and may interfere with the Mac connection."))
                         .color(ui.visuals().error_fg_color),
                 );
-                ui.label("Кнопка ниже остановит службу. Если она запускается снова, удалите Apple Mobile Device Support в приложениях Windows.");
+                ui.label(tr("The button below stops the service. If it starts again, uninstall Apple Mobile Device Support in Windows apps."));
             } else if host.apple_service_installed {
                 ui.label(
-                    RichText::new("Apple Mobile Device Service остановлена.")
+                    RichText::new(tr("Apple Mobile Device Service is stopped."))
                         .color(Tone::Success.color(ui.visuals())),
                 );
             }
             if !host.apple_driver_installed {
-                ui.label("USB-драйвер Apple не найден. Установим подписанный драйвер из Zalivka — интернет и iTunes не нужны.");
+                ui.label(tr("The Apple USB driver is missing. Install the signed driver bundled with Zalivka; internet access and iTunes are not required."));
             }
             if host.needs_preparation() {
                 ui.add_space(6.0);
                 let label = if !host.apple_driver_installed {
-                    "Установить недостающие драйверы"
+                    "Install missing drivers"
                 } else if host.apple_service_running {
-                    "Остановить службу Apple"
+                    "Stop Apple service"
                 } else {
-                    "Повторить проверку драйверов"
+                    "Check drivers again"
                 };
-                prepare = ui.button(label).clicked();
-                caption(ui, "Windows запросит права администратора.");
+                prepare = ui.button(tr(label)).clicked();
+                caption(ui, "Windows will request administrator access.");
             }
             if host.apple_service_installed {
-                open_apps = ui.link("Открыть приложения Windows для удаления").clicked();
+                open_apps = ui.link(tr("Open Windows apps to uninstall")).clicked();
             }
         });
         if prepare {
             self.start(Action::PrepareWindows, ctx);
         }
         if open_apps && let Err(error) = drivers::open_installed_apps() {
-            self.error(
-                "Не удалось открыть приложения Windows",
-                format!("{error:#}"),
-            );
+            self.error("Could not open Windows apps", format!("{error:#}"));
         }
         ui.add_space(12.0);
     }

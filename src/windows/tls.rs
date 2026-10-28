@@ -45,11 +45,7 @@ pub(crate) fn connect_tss(
         include_bytes!("../../certs/AppleIncRootCertificate.cer").as_slice(),
     )))
     .map_err(|error| ureq::Error::Other(error.into()))?;
-    crate::log!(
-        Debug,
-        "tls",
-        "TSS: проверка цепочки сертификатов Windows с дополнительным корнем Apple; проверка имени сервера включена"
-    );
+    crate::log!(Debug, "tls:tss", "Certificates: Windows + Apple Root");
     connect_with_config(details, transport, config)
 }
 

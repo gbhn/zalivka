@@ -42,19 +42,19 @@ fn architecture() -> Result<&'static str> {
     let mut native = 0;
     ensure!(
         unsafe { IsWow64Process2(GetCurrentProcess(), &mut process, &mut native) } != 0,
-        "Не удалось определить архитектуру Windows: {}",
+        "Could not determine Windows architecture: {}",
         std::io::Error::last_os_error()
     );
     match native {
         IMAGE_FILE_MACHINE_AMD64 => Ok("amd64"),
         IMAGE_FILE_MACHINE_ARM64 => Ok("arm64"),
-        _ => bail!("Встроенный драйвер поддерживает Windows x64 и ARM64"),
+        _ => bail!("Bundled driver supports Windows x64 and ARM64"),
     }
 }
 
 fn open_service(access: ServiceAccess) -> Result<Option<Service>> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-        .context("Открытие диспетчера служб Windows")?;
+        .context("Opening Windows service manager")?;
     match manager.open_service(SERVICE, access) {
         Ok(service) => Ok(Some(service)),
         Err(windows_service::Error::Winapi(error))
@@ -62,14 +62,14 @@ fn open_service(access: ServiceAccess) -> Result<Option<Service>> {
         {
             Ok(None)
         }
-        Err(error) => Err(error).context("Открытие Apple Mobile Device Service"),
+        Err(error) => Err(error).context("Opening Apple Mobile Device Service"),
     }
 }
 
 fn service_state(service: &Service) -> Result<ServiceState> {
     Ok(service
         .query_status()
-        .context("Проверка Apple Mobile Device Service")?
+        .context("Checking Apple Mobile Device Service")?
         .current_state)
 }
 
@@ -98,13 +98,9 @@ pub(crate) fn status() -> Result<HostStatus> {
 }
 
 fn stop_service() -> Result<()> {
-    crate::log!(Info, "drivers", "Проверка и остановка {SERVICE}");
+    crate::log!(Info, "drivers:svc", "Stopping {SERVICE}");
     let Some(service) = open_service(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)? else {
-        crate::log!(
-            Info,
-            "drivers",
-            "{SERVICE} не установлена; остановка не требуется"
-        );
+        crate::log!(Debug, "drivers:svc", "{SERVICE} not installed");
         return Ok(());
     };
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -112,7 +108,7 @@ fn stop_service() -> Result<()> {
     loop {
         let state = service_state(&service)?;
         if previous != Some(state) {
-            crate::log!(Info, "drivers", "{SERVICE}: {state:?}");
+            crate::log!(Debug, "drivers:svc", "{SERVICE}: {state:?}");
             previous = Some(state);
         }
         if state == ServiceState::Stopped {
@@ -120,17 +116,17 @@ fn stop_service() -> Result<()> {
         }
         ensure!(
             Instant::now() < deadline,
-            "Apple Mobile Device Service не остановилась за 30 секунд. Закройте iTunes / Apple Devices и повторите подготовку Windows."
+            "Apple Mobile Device Service did not stop within 30 seconds. Close iTunes / Apple Devices and retry Windows setup."
         );
         if state != ServiceState::StopPending {
-            crate::log!(Debug, "drivers", "Отправка SERVICE_CONTROL_STOP: {SERVICE}");
+            crate::log!(Trace, "drivers:svc", "SERVICE_CONTROL_STOP: {SERVICE}");
             match service.stop() {
                 Ok(_) => {}
                 Err(windows_service::Error::Winapi(error))
                     if matches!(error.raw_os_error(), Some(code)
                         if code == ERROR_SERVICE_NOT_ACTIVE as i32
                             || code == ERROR_SERVICE_CANNOT_ACCEPT_CTRL as i32) => {}
-                Err(error) => return Err(error).context("Остановка Apple Mobile Device Service"),
+                Err(error) => return Err(error).context("Stopping Apple Mobile Device Service"),
             }
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -141,90 +137,77 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
     let started = Instant::now();
     let admin = unsafe { IsUserAnAdmin() } != 0;
     crate::log!(
-        Info,
-        "drivers",
-        "Начало подготовки Windows: PID={}, версия={}, EXE={}",
+        Trace,
+        "drivers:process",
+        "PID={}; version={}; EXE={}",
         std::process::id(),
         crate::VERSION,
         std::env::current_exe()?.display()
     );
-    crate::log!(
-        Info,
-        "drivers",
-        "Проверка прав: IsUserAnAdmin={admin}; активная группа Администраторы (S-1-5-32-544) обязательна"
-    );
+    crate::log!(Debug, "drivers:auth", "IsUserAnAdmin={admin}");
     if let Err(error) = token::log() {
         crate::log!(
             Warning,
             "drivers",
-            "Не удалось прочитать все сведения токена: {error:#}"
+            "Could not read all token information: {error:#}"
         );
     }
     ensure!(
         admin,
-        "Для подготовки Windows нужны права администратора: IsUserAnAdmin=false. В токене процесса нет активного членства в локальной группе Администраторы (S-1-5-32-544). Подтверждение UAC и высокий уровень целостности сами по себе не гарантируют это членство. Запустите подготовку под учётной записью с правами локального администратора этого компьютера."
+        "Windows setup requires administrator rights: IsUserAnAdmin=false. The process token has no active membership in the local Administrators group (S-1-5-32-544). UAC approval and a high integrity level alone do not guarantee membership. Run setup using a local administrator account on this computer."
     );
-    let arch = architecture().context("Определение архитектуры перед установкой драйвера")?;
+    let arch = architecture().context("Determining architecture before driver installation")?;
     crate::log!(
-        Info,
-        "drivers",
-        "Архитектура Windows: {arch}; каталог Windows: {}",
+        Debug,
+        "drivers:host",
+        "{arch}; Windows={}",
         windows_directory()?.display()
     );
     // Check the service first; don't replace the driver if stopping the conflict fails.
-    stop_service().context("Подготовка Windows: остановка службы Apple")?;
+    stop_service().context("Windows setup: stopping Apple service")?;
     let mut reboot = false;
     if !super::package::installed()? {
         let directory = tempfile::Builder::new()
             .prefix("zalivka-apple-usb-")
             .tempdir()
-            .context("Создание временного каталога драйвера Apple")?;
+            .context("Creating temporary Apple driver directory")?;
         crate::log!(
             Info,
-            "drivers",
-            "Распаковка встроенного пакета Apple ({arch}): {}",
+            "drivers:cab",
+            "Extracting Apple ({arch}): {}",
             directory.path().display()
         );
         let inf = super::package::unpack(directory.path(), arch)
-            .context("Подготовка Windows: распаковка пакета Apple")?;
+            .context("Windows setup: extracting Apple package")?;
         // Windows verifies the original CAT. No forced ranking or signing bypass.
-        reboot = crate::drivers::install(&inf)
-            .context("Подготовка Windows: установка драйвера Apple")?;
+        reboot = crate::drivers::install(&inf).context("Windows setup: installing Apple driver")?;
     } else {
-        crate::log!(
-            Info,
-            "drivers",
-            "Полный пакет Apple уже установлен; повторная установка не требуется"
-        );
+        crate::log!(Info, "drivers", "Apple package already installed");
     }
-    crate::log!(
-        Info,
-        "drivers",
-        "Итоговая проверка драйверов и службы Apple"
-    );
+    crate::log!(Info, "drivers", "Checking installation");
     let host = status()?;
     crate::log!(
-        Info,
-        "drivers",
-        "Windows после установки: {}",
+        Debug,
+        "drivers:status",
+        "After installation: {}",
         serde_json::to_string(&host)?
     );
     ensure!(
         !host.apple_service_running,
-        "Apple Mobile Device Service запустилась снова. Закройте iTunes / Apple Devices или удалите Apple Mobile Device Support в приложениях Windows."
+        "Apple Mobile Device Service restarted. Close iTunes / Apple Devices or uninstall Apple Mobile Device Support in Windows apps."
     );
     ensure!(
         host.apple_driver_installed,
-        "Windows не подтвердила установку драйвера Apple"
+        "Windows did not confirm Apple driver installation"
     );
     ensure!(
         !host.needs_preparation(),
-        "Windows не подтвердила готовность всех драйверов. Откройте диагностику USB."
+        "Windows did not confirm driver readiness. Open USB diagnostics."
     );
     crate::log!(
         Info,
         "drivers",
-        "Подготовка Windows завершена за {:.3} с; требуется перезагрузка: {reboot}",
+        "Completed in {:.3} s; reboot={reboot}",
         started.elapsed().as_secs_f64()
     );
     Ok(reboot)
@@ -232,25 +215,21 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
 
 pub(crate) fn prepare() -> Result<bool> {
     crate::log!(
-        Info,
-        "drivers",
-        "Проверка Windows перед подготовкой; PID={}; IsUserAnAdmin={}",
+        Debug,
+        "drivers:auth",
+        "PID={}; IsUserAnAdmin={}",
         std::process::id(),
         unsafe { IsUserAnAdmin() } != 0
     );
     let host = status()?;
     crate::log!(
-        Info,
-        "drivers",
-        "Windows до установки: {}",
+        Debug,
+        "drivers:status",
+        "Before installation: {}",
         serde_json::to_string(&host)?
     );
     if !host.needs_preparation() {
-        crate::log!(
-            Info,
-            "drivers",
-            "Пакет драйвера уже установлен; повторная установка не требуется."
-        );
+        crate::log!(Info, "drivers", "Driver already installed");
         verify_connected_devices(false)?;
         return Ok(false);
     }
@@ -259,27 +238,23 @@ pub(crate) fn prepare() -> Result<bool> {
         verify_connected_devices(reboot)?;
         return Ok(reboot);
     }
-    crate::log!(
-        Info,
-        "drivers",
-        "Подготовка драйверов: подтвердите запрос прав администратора Windows"
-    );
-    let code = run_elevated("drivers prepare-elevated")?;
+    crate::log!(Info, "drivers:uac", "Approve the administrator prompt");
+    let code = run_elevated("prepare")?;
     ensure!(
         code == 0 || code == 3010,
-        "Подготовка Windows завершилась с кодом {code}. Причина указана в сообщениях установщика выше."
+        "Windows setup exited with code {code}. See the installer messages above."
     );
     // Elevated credentials can belong to another account; recheck this user's view too.
     let host = status()?;
     crate::log!(
-        Info,
-        "drivers",
-        "Windows после завершения UAC: {}",
+        Debug,
+        "drivers:status",
+        "After UAC: {}",
         serde_json::to_string(&host)?
     );
     ensure!(
         !host.needs_preparation(),
-        "Подготовка Windows не подтверждена. Откройте диагностику USB."
+        "Windows setup could not be confirmed. Open USB diagnostics."
     );
     let reboot = code == 3010;
     verify_connected_devices(reboot)?;
@@ -288,59 +263,47 @@ pub(crate) fn prepare() -> Result<bool> {
 
 fn verify_connected_devices(reboot: bool) -> Result<()> {
     if reboot {
-        crate::log!(
-            Info,
-            "drivers",
-            "Пакет установлен. Проверка USB-доступа отложена до перезагрузки Windows."
-        );
+        crate::log!(Info, "drivers", "Check USB after restarting Windows");
         return Ok(());
     }
-    let devices = crate::drivers::diagnostics(true)
-        .context("Проверка USB-доступа после подготовки Windows")?;
+    let devices =
+        crate::drivers::diagnostics(true).context("Checking USB access after Windows setup")?;
     verify_device_access(&devices)
 }
 
 fn verify_device_access(devices: &[crate::drivers::UsbDiagnostic]) -> Result<()> {
     for device in devices {
         crate::log!(
-            Info,
-            "drivers",
-            "USB после подготовки: {}",
+            Debug,
+            "drivers:usb",
+            "After setup: {}",
             serde_json::to_string(device)?
         );
     }
     if devices.is_empty() {
-        crate::log!(
-            Info,
-            "drivers",
-            "Пакет установлен. Mac в DFU / Recovery / Restore не подключён; доступ к устройству ещё не проверен."
-        );
+        crate::log!(Info, "drivers:usb", "No Mac connected; access not checked");
     } else {
         let failures: Vec<_> = devices
             .iter()
             .filter(|device| !device.accessible)
             .map(|device| {
                 format!(
-                    "{} (драйвер: {}): {}",
+                    "{} (driver: {}): {}",
                     device.instance_id,
-                    device.driver.as_deref().unwrap_or("не назначен"),
+                    device.driver.as_deref().unwrap_or("not assigned"),
                     device
                         .error
                         .as_deref()
-                        .unwrap_or("USB-интерфейс недоступен")
+                        .unwrap_or("USB interface unavailable")
                 )
             })
             .collect();
         ensure!(
             failures.is_empty(),
-            "Пакет установлен, но доступ к подключённому устройству не подтверждён. Подключите Mac заново; если ошибка повторяется, выполните сброс USB-драйверов Apple. {}",
+            "Package installed, but access to the connected device could not be confirmed. Reconnect the Mac; if the error persists, reset Apple USB drivers. {}",
             failures.join("; ")
         );
-        crate::log!(
-            Info,
-            "drivers",
-            "Доступ к USB-интерфейсам подключённых устройств подтверждён."
-        );
+        crate::log!(Info, "drivers:usb", "Access confirmed");
     }
     Ok(())
 }
@@ -358,22 +321,22 @@ pub(crate) fn open_installed_apps() -> Result<()> {
     };
     ensure!(
         result as isize > 32,
-        "Не удалось открыть список приложений Windows ({})",
+        "Could not open Windows apps ({})",
         result as isize
     );
     Ok(())
 }
 
 /// Run a specific Zalivka helper through Windows UAC.
-pub(crate) fn run_elevated(arguments: &str) -> Result<u32> {
+pub(crate) fn run_elevated(action: &str) -> Result<u32> {
     let started = Instant::now();
     let pipe = log::LogPipe::new()?;
-    let parameters = format!("--verbose --elevated-log {} {arguments}", pipe.id);
+    let parameters = format!("--driver-helper {action} {}", pipe.id);
     let mut pipe = Some(pipe);
     crate::log!(
-        Info,
-        "drivers",
-        "Запуск через UAC: {}; команда: {arguments}",
+        Debug,
+        "drivers:uac",
+        "Launching {}: {action}",
         std::env::current_exe()?.display()
     );
     let executable = wide(std::env::current_exe()?);
@@ -388,25 +351,22 @@ pub(crate) fn run_elevated(arguments: &str) -> Result<u32> {
     info.nShow = SW_HIDE;
     ensure!(
         unsafe { ShellExecuteExW(&mut info) } != 0,
-        "Подготовка Windows не запущена (возможно, запрос прав отменён): {}",
+        "Windows setup did not start (the administrator prompt may have been cancelled): {}",
         std::io::Error::last_os_error()
     );
     ensure!(
         !info.hProcess.is_null(),
-        "Windows не вернула процесс установки"
+        "Windows did not return an installer process"
     );
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
-    crate::log!(
-        Info,
-        "drivers",
-        "Процесс UAC запущен: PID={}; ожидание журнала установщика",
-        unsafe { GetProcessId(process.as_raw_handle()) }
-    );
+    crate::log!(Debug, "drivers:uac", "PID={}", unsafe {
+        GetProcessId(process.as_raw_handle())
+    });
     loop {
         let state = unsafe { WaitForSingleObject(process.as_raw_handle(), 100) };
         ensure!(
             state == WAIT_OBJECT_0 || state == WAIT_TIMEOUT,
-            "Ожидание подготовки Windows: {}",
+            "Waiting for Windows setup: {}",
             std::io::Error::last_os_error()
         );
         if let Some(reader) = &mut pipe
@@ -418,7 +378,7 @@ pub(crate) fn run_elevated(arguments: &str) -> Result<u32> {
                 ));
             })
         {
-            crate::log!(Warning, "drivers", "Журнал установщика неполный: {error:#}");
+            crate::log!(Warning, "drivers:uac", "Journal incomplete: {error:#}");
             // Closing the reader unblocks the helper if a write is pending.
             pipe = None;
         }
@@ -428,28 +388,61 @@ pub(crate) fn run_elevated(arguments: &str) -> Result<u32> {
     }
     if let Some(reader) = &pipe {
         if !reader.received {
-            crate::log!(
-                Warning,
-                "drivers",
-                "Процесс UAC не передал ни одной записи журнала. Возможен сбой запуска или подключения к каналу журнала."
-            );
+            crate::log!(Warning, "drivers:uac", "Process did not send a journal");
         } else if reader.incomplete() {
-            crate::log!(Warning, "drivers", "Последняя запись журнала UAC оборвана");
+            crate::log!(Warning, "drivers:uac", "Last record truncated");
         }
     }
     let mut code = 0;
     ensure!(
         unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } != 0,
-        "Результат подготовки Windows: {}",
+        "Windows setup result: {}",
         std::io::Error::last_os_error()
     );
     crate::log!(
-        Info,
-        "drivers",
-        "Процесс UAC завершён: код={code} (0x{code:08X}); время={:.3} с",
+        Debug,
+        "drivers:uac",
+        "Code={code} (0x{code:08X}); {:.3} s",
         started.elapsed().as_secs_f64()
     );
     Ok(code)
+}
+
+/// Private UAC entry point, handled before CLI parsing. Only fixed driver
+/// actions and a local pipe UUID are accepted; no command or output path.
+pub(crate) fn run_helper() -> Option<u32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() != Some(std::ffi::OsStr::new("--driver-helper")) {
+        return None;
+    }
+    let result = (|| -> Result<u32> {
+        let action = args.next().context("missing driver helper action")?;
+        ensure!(
+            action == "prepare" || action == "reset",
+            "invalid driver helper action"
+        );
+        let id = args
+            .next()
+            .and_then(|id| id.into_string().ok())
+            .context("missing log pipe identifier")?
+            .parse::<uuid::Uuid>()?;
+        ensure!(args.next().is_none(), "unexpected driver helper arguments");
+        crate::logging::connect_elevated(id)?;
+        if action == "prepare" {
+            Ok(if prepare_elevated()? { 3010 } else { 0 })
+        } else {
+            let mut reboot = false;
+            if let Err(error) = cleanup::reset_elevated(&mut reboot) {
+                crate::log!(Error, "drivers:reset", "{error:#}");
+                return Ok(if reboot { 3017 } else { 1 });
+            }
+            Ok(if reboot { 3010 } else { 0 })
+        }
+    })();
+    Some(result.unwrap_or_else(|error| {
+        crate::log!(Error, "drivers:uac", "{error:#}");
+        1
+    }))
 }
 
 #[cfg(test)]

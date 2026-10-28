@@ -1,5 +1,49 @@
 use super::*;
 
+#[test]
+fn native_cancellation_interrupts_a_stalled_http_body_without_killing_the_process() {
+    use std::sync::mpsc;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready, receiving) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        read_header(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\ndata")
+            .unwrap();
+        ready.send(()).unwrap();
+        let _ = stream.read(&mut [0]);
+    });
+    let context = crate::progress::Context::new(|_| {});
+    let operation = context.clone();
+    let (completed, finishing) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        operation.run(|| {
+            let client = agent();
+            let request = Request::get(format!("http://{address}/download"))
+                .body(Vec::new())
+                .unwrap();
+            let result = send_http_via(&client, &request, None).and_then(|mut response| {
+                response
+                    .body_mut()
+                    .as_reader()
+                    .read_exact(&mut [0; 1000])
+                    .map_err(anyhow::Error::from)
+            });
+            completed.send(result.is_err()).unwrap();
+        });
+    });
+    receiving.recv_timeout(Duration::from_secs(5)).unwrap();
+    context.cancel();
+    assert!(finishing.recv_timeout(Duration::from_secs(2)).unwrap());
+    worker.join().unwrap();
+    server.join().unwrap();
+}
+
 #[cfg(windows)]
 #[test]
 fn http_requests_automatically_answer_negotiate_using_the_current_windows_user() {

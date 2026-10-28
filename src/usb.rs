@@ -142,8 +142,13 @@ impl RecoveryTransport for RecoveryUsb {
         index: u16,
         length: u16,
     ) -> Result<Vec<u8>> {
+        crate::log!(
+            Trace,
+            "usb:control",
+            "IN type={kind:#04x}, request={request:#04x}, value={value:#06x}, index={index:#06x}, length={length}"
+        );
         let (control_type, recipient) = control_kind(kind)?;
-        self.interface.control_in(
+        let bytes = self.interface.control_in(
             ControlIn {
                 control_type,
                 recipient,
@@ -153,7 +158,13 @@ impl RecoveryTransport for RecoveryUsb {
                 length,
             },
             TIMEOUT,
-        )
+        )?;
+        crate::logging::bytes(
+            "usb:control",
+            format_args!("IN request={request:#04x}"),
+            &bytes,
+        );
+        Ok(bytes)
     }
     fn control_out(
         &mut self,
@@ -163,6 +174,17 @@ impl RecoveryTransport for RecoveryUsb {
         index: u16,
         data: &[u8],
     ) -> Result<()> {
+        crate::log!(
+            Trace,
+            "usb:control",
+            "OUT type={kind:#04x}, request={request:#04x}, value={value:#06x}, index={index:#06x}, length={}",
+            data.len()
+        );
+        crate::logging::bytes(
+            "usb:control",
+            format_args!("OUT request={request:#04x}, value={value:#06x}"),
+            data,
+        );
         let (control_type, recipient) = control_kind(kind)?;
         self.interface.control_out(
             ControlOut {
@@ -178,6 +200,7 @@ impl RecoveryTransport for RecoveryUsb {
         Ok(())
     }
     fn bulk_out(&mut self, data: &[u8]) -> Result<()> {
+        crate::logging::bytes("usb:bulk", format_args!("OUT"), data);
         let ep = self
             .bulk
             .as_mut()
@@ -185,6 +208,7 @@ impl RecoveryTransport for RecoveryUsb {
         ep.write(data)
     }
     fn reset(&mut self) -> Result<()> {
+        crate::log!(Trace, "usb", "Resetting device");
         #[cfg(windows)]
         {
             match &self.interface {
@@ -200,6 +224,7 @@ impl RecoveryTransport for RecoveryUsb {
 }
 
 pub fn detect() -> Result<Vec<DeviceInfo>> {
+    crate::log!(Trace, "usb:detect", "Scanning for Apple USB devices");
     let mut out = Vec::new();
     for (usb, mode) in recovery_devices()? {
         let serial = if let Some(s) = usb.serial_number() {
@@ -208,8 +233,11 @@ pub fn detect() -> Result<Vec<DeviceInfo>> {
             let d = usb.open().wait().context("reading DFU serial descriptor")?;
             serial_number(&d)?
         };
-        out.push(DeviceInfo::parse(&serial, mode)?);
+        let info = DeviceInfo::parse(&serial, mode)?;
+        crate::log!(Trace, "usb:detect", "{info:?}");
+        out.push(info);
     }
+    crate::log!(Trace, "usb:detect", "Found={}", out.len());
     Ok(out)
 }
 
@@ -246,8 +274,8 @@ impl MuxUsb {
         let output = interface.bulk_out(selected.output)?;
         crate::log!(
             Debug,
-            "usb",
-            "Restore USB: speed={:?}, transport={}, interface={}, input={:#04x}, output={:#04x}, max_packet={}",
+            "usb:mux",
+            "{:?}; {}; interface={}, IN={:#04x}, OUT={:#04x}, max_packet={}",
             info.speed(),
             interface.transport(),
             selected.number,

@@ -10,6 +10,19 @@ use std::time::Instant;
 use zalivka::progress;
 
 impl App {
+    fn collect_job_logs(&mut self) {
+        if let Some(job) = &mut self.job {
+            let lines = job.pending_logs();
+            let error = job.log_error.clone();
+            if !lines.is_empty() {
+                job.last_activity = Instant::now();
+            }
+            for line in lines {
+                self.journal_line(line);
+            }
+            self.journal_error(error.as_deref());
+        }
+    }
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
         // Leave time for rendering and input even during a burst of log records.
         for index in 0..256 {
@@ -80,21 +93,34 @@ impl App {
                             Picker::Tokens => self.setup.tokens = path.display().to_string(),
                             Picker::Connect => self.setup.connect_data = path.display().to_string(),
                             Picker::Log => {
+                                self.collect_job_logs();
                                 let source = self.log_path.clone();
+                                let journal = self.job.as_ref().map(|job| job.journal.clone());
+                                let logs = self.job.as_ref().map(|job| job.context.clone());
                                 let mut text = self.journal_text(true);
                                 if source.is_none() {
                                     text = format!(
-                                        "Неполный журнал: сохранены последние {} записей из памяти.\n{text}\n",
+                                        "Incomplete journal: saved the last {} records from memory.\n{text}\n",
                                         self.logs.len()
                                     );
                                 }
                                 let spawn = self.background(ctx, "save", move || {
-                                    let result = worker::save_log(path, source.as_deref(), &text)
-                                        .map_err(|e| format!("{e:#}"));
+                                    if let Some(logs) = logs
+                                        && let Err(error) = logs.flush_logs()
+                                    {
+                                        return Event::Saved(Err(error.to_string()));
+                                    }
+                                    let result = worker::save_log(
+                                        path,
+                                        source.as_deref(),
+                                        &text,
+                                        journal.as_deref(),
+                                    )
+                                    .map_err(|e| format!("{e:#}"));
                                     Event::Saved(result)
                                 });
                                 if let Err(e) = spawn {
-                                    self.error("Журнал не сохранён", e);
+                                    self.error("Journal not saved", e);
                                 }
                             }
                         }
@@ -102,21 +128,18 @@ impl App {
                 }
                 Event::Saved(Ok(path)) => {
                     self.notice = Some(Notice {
-                        title: "Журнал сохранён".into(),
+                        title: "Journal saved".into(),
                         detail: path.display().to_string(),
                         tone: Tone::Success,
                         expires_at: Some(Instant::now() + super::NOTICE_LIFETIME),
                     });
                 }
-                Event::Saved(Err(e)) => self.error("Журнал не сохранён", e),
+                Event::Saved(Err(e)) => self.error("Journal not saved", e),
             }
         }
-        let success = match self.job.as_mut().map(Job::finished) {
-            Some(Ok(Some(success))) => success,
-            Some(Err(e)) => {
-                self.error("Не удалось получить статус операции", e);
-                return;
-            }
+        self.collect_job_logs();
+        let success = match self.job.as_ref().and_then(Job::finished) {
+            Some(success) => success,
             _ => return,
         };
         let mut job = self.job.take().unwrap();
@@ -127,7 +150,7 @@ impl App {
             _ => Level::Info,
         };
         let mut message = format!(
-            "{}. Длительность: {}.",
+            "{}. Duration: {}.",
             notice.title,
             elapsed_text(job.started.elapsed().as_secs())
         );

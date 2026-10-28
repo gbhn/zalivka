@@ -106,12 +106,13 @@ pub fn upload(
     data: &[u8],
     finish: bool,
 ) -> Result<()> {
+    let _trace = crate::logging::firmware_transfer();
     ensure!(!data.is_empty(), "cannot send an empty firmware image");
     let mut progress = crate::progress::Progress::new(
         if mode == Mode::Recovery {
-            "Передача USB Recovery"
+            "USB Recovery transfer"
         } else {
-            "Передача USB DFU"
+            "USB DFU transfer"
         },
         Some(data.len() as u64),
         0,
@@ -197,9 +198,9 @@ pub fn boot_kernel(usb: &mut impl RecoveryTransport) -> Result<()> {
         crate::log!(
             Debug,
             "boot",
-            "Ошибка уведомления о передаче ядра: {error:#}; отправка bootx"
+            "Kernel transfer notification failed: {error:#}; sending bootx"
         );
     }
-    crate::log!(Debug, "boot", "Запуск ядра командой bootx");
+    crate::log!(Debug, "boot", "Starting kernel with bootx");
     command(usb, "bootx", true)
 }

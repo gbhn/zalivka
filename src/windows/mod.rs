@@ -45,7 +45,7 @@ pub(crate) fn windows_directory() -> Result<PathBuf> {
     let len = unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
     ensure!(
         len > 0 && len < buffer.len(),
-        "Не удалось определить папку Windows: {}",
+        "Could not locate the Windows directory: {}",
         std::io::Error::last_os_error()
     );
     Ok(OsString::from_wide(&buffer[..len]).into())

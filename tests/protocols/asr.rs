@@ -1,6 +1,65 @@
 use super::*;
 
 #[test]
+fn asr_trace_volume_stays_bounded_as_the_firmware_payload_grows() {
+    let mut record_counts = Vec::new();
+    for size in [1024 * 1024, 8 * 1024 * 1024] {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let output = records.clone();
+        zalivka::progress::Context::new(move |event| {
+            if let zalivka::progress::Event::Log(record) = event {
+                output.lock().unwrap().push(record);
+            }
+        })
+        .run(|| {
+            let incoming: Vec<u8> = [
+                wire::dict([("Command", "Initiate".into())]),
+                wire::dict([("Command", "Payload".into())]),
+            ]
+            .iter()
+            .flat_map(|message| wire::xml(message).unwrap())
+            .collect();
+            let mut handshake = tcp(12345, 1, 0, 1, 0x12, &[]);
+            // The fixture accepts up to 16 MiB without needing additional ACKs.
+            handshake[30..32].copy_from_slice(&u16::MAX.to_be_bytes());
+            let mut commands = tcp(12345, 1, 1, 1, 0x10, &incoming);
+            commands[30..32].copy_from_slice(&u16::MAX.to_be_bytes());
+            let (usb, output) = mock_mux(vec![version_packet(), handshake, commands]);
+            let session = Session::new(usb).unwrap();
+            let mut stream = session.connect(12345).unwrap();
+            let image = vec![0xa5; size];
+            asr::transfer(&mut stream, &mut Cursor::new(&image), size as u64).unwrap();
+            let mut sent = mux_output(&output, 12345);
+            wire::receive_xml(&mut sent).unwrap();
+            let mut payload = Vec::new();
+            sent.read_to_end(&mut payload).unwrap();
+            assert_eq!(payload, image);
+        });
+        let records = records.lock().unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|record| record.source == "transfer:stats"
+                    && record.level == zalivka::logging::Level::Debug)
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| record.message.contains("TX offset="))
+        );
+        assert!(
+            records
+                .iter()
+                .map(|record| record.message.len())
+                .sum::<usize>()
+                < 8192
+        );
+        record_counts.push(records.len());
+    }
+    assert_eq!(record_counts[0], record_counts[1]);
+}
+
+#[test]
 fn asr_oob_and_checksummed_payload_work_with_fragmentation() {
     let image = vec![0xa5; 131079];
     let commands = [

@@ -178,6 +178,17 @@ fn handshake<S: Connection>(
     });
     let mut selected: Option<&str> = None;
     for round in 0..8 {
+        crate::log!(
+            Trace,
+            "proxy:connect",
+            "{}:{} -> {}:{}: round={}; auth={}",
+            proxy.host(),
+            proxy.port(),
+            target.0,
+            target.1,
+            round + 1,
+            selected.unwrap_or(if explicit { "Basic" } else { "none" })
+        );
         stream.timeout(remaining(deadline)?)?;
         write!(
             stream,
@@ -199,6 +210,14 @@ fn handshake<S: Connection>(
             "invalid HTTP proxy response"
         );
         let code = response.code.context("missing proxy status")?;
+        crate::log!(
+            Trace,
+            "proxy:connect",
+            "{}:{}: HTTP {code}; header={} B",
+            proxy.host(),
+            proxy.port(),
+            bytes.len()
+        );
         let offered: Vec<_> = response
             .headers
             .iter()
@@ -219,8 +238,8 @@ fn handshake<S: Connection>(
                 }
                 crate::log!(
                     Info,
-                    "proxy",
-                    "Прокси {}:{}: {scheme} — авторизация текущей учётной записью Windows выполнена",
+                    "proxy:auth",
+                    "{}:{}: {scheme}; authentication complete",
                     proxy.host(),
                     proxy.port()
                 );
@@ -247,10 +266,9 @@ fn handshake<S: Connection>(
         crate::log!(
             Info,
             "proxy",
-            "Прокси {}:{}: HTTP 407; схема={scheme}; шаг={}; используется текущая учётная запись Windows",
+            "Proxy {}:{}: HTTP 407; scheme={scheme}",
             proxy.host(),
-            proxy.port(),
-            round + 1
+            proxy.port()
         );
         let connection_values: Vec<_> = response
             .headers
@@ -299,6 +317,11 @@ fn handshake<S: Connection>(
             "unsupported proxy authentication body framing"
         );
         if close || (lengths.is_empty() && !chunked) {
+            crate::log!(
+                Trace,
+                "proxy:connect",
+                "Reconnecting; close={close}, length={lengths:?}, chunked={chunked}"
+            );
             ensure!(
                 selected.is_none(),
                 "HTTP 407: proxy closed the connection during {scheme}; persistent connections are required"
@@ -310,6 +333,14 @@ fn handshake<S: Connection>(
             discard(stream, lengths[0], deadline)?;
         }
         let token = authenticate(scheme, *challenge)?;
+        crate::log!(
+            Trace,
+            "proxy:auth",
+            "{scheme}: round={}; challenge={} chars, response={} chars",
+            round + 1,
+            challenge.map_or(0, str::len),
+            token.len()
+        );
         ensure!(
             !token.is_empty()
                 && token

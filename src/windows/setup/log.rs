@@ -40,7 +40,7 @@ impl LogPipe {
         };
         ensure!(
             handle != INVALID_HANDLE_VALUE,
-            "Создание канала журнала UAC: {}",
+            "Creating UAC log pipe: {}",
             io::Error::last_os_error()
         );
         let pipe = unsafe { File::from_raw_handle(handle) };
@@ -48,7 +48,7 @@ impl LogPipe {
             let error = io::Error::last_os_error();
             ensure!(
                 error.raw_os_error() == Some(ERROR_PIPE_LISTENING as i32),
-                "Открытие канала журнала UAC: {error}"
+                "Opening UAC log pipe: {error}"
             );
         }
         Ok(Self {
@@ -74,26 +74,23 @@ impl LogPipe {
                 {
                     break;
                 }
-                Err(error) => return Err(error).context("Чтение журнала UAC"),
+                Err(error) => return Err(error).context("Reading UAC journal"),
             };
             self.pending.extend_from_slice(&buffer[..size]);
             while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<_> = self.pending.drain(..=end).collect();
-                ensure!(line.len() <= 65536, "Слишком длинная запись журнала UAC");
+                ensure!(line.len() <= 65536, "UAC log record too long");
                 let line =
-                    std::str::from_utf8(&line).context("Журнал UAC содержит неверный UTF-8")?;
+                    std::str::from_utf8(&line).context("UAC journal contains invalid UTF-8")?;
                 // Only log records are accepted; this channel cannot signal
                 // restore completion or change any other worker state.
                 let Some(Event::Log(record)) = Event::parse(line.trim_end()) else {
-                    anyhow::bail!("Неверная запись журнала UAC");
+                    anyhow::bail!("Invalid UAC log record");
                 };
                 self.received = true;
                 publish(record);
             }
-            ensure!(
-                self.pending.len() <= 65536,
-                "Слишком длинная запись журнала UAC"
-            );
+            ensure!(self.pending.len() <= 65536, "UAC log record too long");
         }
         Ok(())
     }

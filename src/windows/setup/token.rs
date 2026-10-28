@@ -20,7 +20,7 @@ fn information(token: &OwnedHandle, class: TOKEN_INFORMATION_CLASS) -> Result<Ve
     unsafe { GetTokenInformation(token.as_raw_handle(), class, ptr::null_mut(), 0, &mut size) };
     ensure!(
         (1..=65536).contains(&size),
-        "Размер сведений токена: {}",
+        "Token information size: {}",
         io::Error::last_os_error()
     );
     // usize provides the alignment required by the token structures and SIDs.
@@ -52,9 +52,9 @@ pub(super) fn log() -> Result<()> {
     let elevated = information(&token, TokenElevation)?;
     let kind = information(&token, TokenElevationType)?;
     crate::log!(
-        Info,
-        "drivers",
-        "Токен процесса: TokenIsElevated={}; TokenElevationType={} (1=Default, 2=Full, 3=Limited)",
+        Debug,
+        "drivers:auth",
+        "TokenIsElevated={}; TokenElevationType={}",
         elevated[0] as u32,
         kind[0] as u32
     );
@@ -68,33 +68,29 @@ pub(super) fn log() -> Result<()> {
     });
     match attributes {
         Some(attributes) => crate::log!(
-            Info,
-            "drivers",
-            "Группа Администраторы (S-1-5-32-544): присутствует; атрибуты=0x{attributes:08X} (ENABLED=0x4, DENY_ONLY=0x10)"
+            Debug,
+            "drivers:auth",
+            "Administrators: attributes=0x{attributes:08X}"
         ),
-        None => crate::log!(
-            Info,
-            "drivers",
-            "Группа Администраторы (S-1-5-32-544): отсутствует в токене"
-        ),
+        None => crate::log!(Debug, "drivers:auth", "Administrators: absent from token"),
     }
 
     let integrity = information(&token, TokenIntegrityLevel)?;
     let label = unsafe { &*integrity.as_ptr().cast::<TOKEN_MANDATORY_LABEL>() };
     let count = unsafe { *GetSidSubAuthorityCount(label.Label.Sid) };
-    ensure!(count > 0, "Пустой SID уровня целостности");
+    ensure!(count > 0, "Empty integrity level SID");
     let rid = unsafe { *GetSidSubAuthority(label.Label.Sid, u32::from(count - 1)) };
     crate::log!(
-        Info,
-        "drivers",
-        "Уровень целостности: S-1-16-{rid} ({})",
+        Debug,
+        "drivers:auth",
+        "Integrity level: S-1-16-{rid} ({})",
         match rid {
             4096 => "Low",
             8192 => "Medium",
             8448 => "Medium Plus",
             12288 => "High",
             16384 => "System",
-            _ => "другой",
+            _ => "other",
         }
     );
 
@@ -120,10 +116,9 @@ pub(super) fn log() -> Result<()> {
         "LookupAccountSidW: {}",
         io::Error::last_os_error()
     );
-    let name =
-        String::from_utf16(&name[..name_size as usize]).context("Имя учётной записи Windows")?;
-    let domain = String::from_utf16(&domain[..domain_size as usize])
-        .context("Домен учётной записи Windows")?;
-    crate::log!(Info, "drivers", "Учётная запись процесса: {domain}\\{name}");
+    let name = String::from_utf16(&name[..name_size as usize]).context("Windows account name")?;
+    let domain =
+        String::from_utf16(&domain[..domain_size as usize]).context("Windows account domain")?;
+    crate::log!(Info, "drivers:auth", "Process account: {domain}\\{name}");
     Ok(())
 }

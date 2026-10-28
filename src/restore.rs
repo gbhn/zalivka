@@ -99,7 +99,7 @@ pub fn run(
     let usb = RecoveryUsb::open(ecid)?;
     ensure!(usb.info.mode == Mode::Dfu, "enter DFU before restoring");
     usb.check_reset_access()?;
-    crate::log!(Info, "ipsw", "Подготовка прошивки: {}", path.display());
+    crate::log!(Info, "ipsw", "Preparing firmware: {}", path.display());
     let mut ipsw = Ipsw::open(path)?;
     let mut identity = ipsw.select_behavior(&usb.info, identity_index, behavior)?;
     let stages = preflight(&mut ipsw, &mut identity)?;
@@ -117,7 +117,7 @@ pub fn run(
     crate::log!(
         Info,
         "restore",
-        "Получение подписей Apple для {}, ECID {ecid:016x}",
+        "Requesting Apple signatures for {}, ECID {ecid:016x}",
         wire::string(&identity.value, &["Info", "DeviceClass"])?
     );
     let ticket = tss::send(&tss::request(&usb.info, &identity)?)

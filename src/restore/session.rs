@@ -111,15 +111,13 @@ pub(super) fn log_progress(
     })?;
     output(Record::new(
         Level::Debug,
-        "restored",
+        "restored:op",
         if progress == -1 {
-            format!(
-                "Операция {operation}: без промежуточного процента; полный вклад в общий прогресс"
-            )
+            format!("Operation {operation}: no percentage")
         } else if progress < 0 {
-            format!("Операция {operation}: процент выполнения недоступен ({progress})")
+            format!("Operation {operation}: percentage unavailable ({progress})")
         } else {
-            format!("Операция {operation}: {progress}%")
+            format!("Operation {operation}: {progress}%")
         },
     ));
     Ok(crate::progress::Event::OperationProgress {
@@ -186,8 +184,8 @@ pub(super) fn log_checkpoint(
         } else {
             Level::Warning
         },
-        "restored",
-        format!("Checkpoint {phase}: id=0x{id:x}, name={name}, result={result}"),
+        "restored:cp",
+        format!("{name}: {phase}; id=0x{id:x}, result={result}"),
     ));
     for (key, level) in [
         ("CHECKPOINT_WARNING", Level::Warning),
@@ -196,7 +194,7 @@ pub(super) fn log_checkpoint(
         if let Ok(text) = wire::string(message, &[key]) {
             output(Record::new(
                 level,
-                "restored",
+                "restored:cp",
                 format!("{name} (0x{id:x}): {text}"),
             ));
         }
@@ -205,7 +203,7 @@ pub(super) fn log_checkpoint(
         output(Record::new(
             Level::Info,
             "restore",
-            format!("Этап Mac: {}", name.replace('_', " ")),
+            format!("Mac stage: {}", name.replace('_', " ")),
         ));
     }
     Ok(crate::progress::Event::Checkpoint {
@@ -246,7 +244,7 @@ pub(super) fn record_message(log: &mut Option<impl Write>, message: &Value) -> O
         Level::Warning,
         "transcript",
         format!(
-            "Журнал JSONL неполный: {error:#}. Запись последующих сообщений отключена; восстановление продолжается."
+            "JSONL journal incomplete: {error:#}. Further recording disabled; restore continues."
         ),
     ))
 }
@@ -309,25 +307,17 @@ pub(super) fn run(
                             requests.finish()?;
                             attestation.finish()
                         })?;
-                        crate::log!(
-                            Info,
-                            "restore",
-                            "Mac подтвердил успешное восстановление, ECID {ecid:016x}"
-                        );
-                        crate::log!(
-                            Debug,
-                            "restore",
-                            "Ожидание закрытия канала восстановления после подтверждения"
-                        );
+                        crate::log!(Info, "restore", "Success; ECID={ecid:016x}");
+                        crate::log!(Debug, "restore:usb", "Waiting for channel closure");
                         wait_for_restore_close(&mut main, &session, Duration::from_secs(60))?;
-                        crate::log!(
-                            Debug,
-                            "restore",
-                            "Канал восстановления закрыт после подтверждения"
-                        );
+                        crate::log!(Debug, "restore:usb", "Channel closed");
                         if provisioning_error {
-                            let message = "При получении сертификатов Apple произошла ошибка. Подключите сам Mac к Wi-Fi или Ethernet и завершите активацию.";
-                            crate::log!(Warning, "restore", "{message}");
+                            let message = "Could not obtain Apple certificates. Connect the Mac to Wi-Fi or Ethernet and complete activation.";
+                            crate::log!(
+                                Warning,
+                                "restore",
+                                "Apple certificate error; Mac activation required"
+                            );
                             crate::progress::Event::ProvisioningWarning {
                                 message: message.into(),
                             }
@@ -362,9 +352,9 @@ pub(super) fn run(
                     }
                     "RestoredCrash" => bail!("restored crashed: {message:?}"),
                     "PreviousRestoreLogMsg" => crate::log!(
-                        Debug,
-                        "restore",
-                        "Предыдущий журнал восстановления: {}",
+                        Trace,
+                        "restored:log",
+                        "Previous journal: {}",
                         wire::string(&message, &["PreviousRestoreLog"]).unwrap_or("unavailable")
                     ),
                     name => {
@@ -379,8 +369,8 @@ pub(super) fn run(
                 session.cancel();
                 crate::log!(
                     Warning,
-                    "restore",
-                    "USB-соединение потеряно: {error:#}. Ожидание Mac с тем же ECID; восстановление продолжится по новым запросам устройства"
+                    "restore:usb",
+                    "Connection lost: {error:#}; waiting for Mac"
                 );
             }
             Err(error) => return Err(error),

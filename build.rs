@@ -48,6 +48,7 @@ fn main() {
         "Cargo.toml",
         "Cargo.lock",
         "src",
+        "locales",
         "assets",
         "certs",
         "packaging",

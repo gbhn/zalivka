@@ -3,11 +3,10 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use std::path::PathBuf;
 use zalivka::{
-    catalog,
-    device::{Mode, parse_ecid},
+    device::parse_ecid,
     drivers,
     ipsw::{Behavior, Ipsw},
-    net, progress, restore, tss, usb, wire,
+    net, operations, restore, tss, usb, wire,
 };
 
 #[derive(Parser)]
@@ -16,12 +15,6 @@ use zalivka::{
     about = "Native Rust Mac DFU tools (experimental restore engine)"
 )]
 struct Cli {
-    /// Include protocol details and transfer timings in terminal diagnostics.
-    #[arg(short, long, global = true)]
-    verbose: bool,
-    #[cfg(windows)]
-    #[arg(long, hide = true, global = true)]
-    elevated_log: Option<uuid::Uuid>,
     #[command(subcommand)]
     command: Command,
 }
@@ -127,9 +120,6 @@ struct RestoreArgs {
     ecid: u64,
     #[arg(long)]
     identity: Option<usize>,
-    /// Acknowledge the experimental status of the restore engine.
-    #[arg(long, required = true)]
-    experimental: bool,
     /// Record restored's plist messages as JSON lines (new file only).
     #[arg(long)]
     transcript: Option<PathBuf>,
@@ -141,44 +131,17 @@ struct RestoreArgs {
     apple_connect_data: Option<PathBuf>,
 }
 
-impl RestoreArgs {
-    fn run(self, behavior: Behavior) -> Result<()> {
-        ensure!(self.experimental, "--experimental is required");
-        drivers::check_host()?;
-        let assets = net::AssetClient::from_files(
-            self.authorization_tokens.as_deref(),
-            self.apple_connect_data.as_deref(),
-        )?;
-        let ipsw = if let Some(path) = self.ipsw {
-            path
-        } else {
-            let action = match behavior {
-                Behavior::Erase => "restoring",
-                Behavior::Update => "reviving",
-            };
-            let device = usb::RecoveryUsb::open(self.ecid)?.info;
-            ensure!(device.mode == Mode::Dfu, "enter DFU before {action}");
-            let directory = self
-                .firmware_dir
-                .map_or_else(catalog::cache_directory, Ok)?;
-            catalog::obtain(&device, &directory, self.identity, behavior)?
-        };
-        restore::run(
-            &ipsw,
-            self.ecid,
-            self.identity,
-            self.transcript.as_deref(),
-            behavior,
-            assets,
-        )?;
-        zalivka::log!(
-            Info,
-            "restore",
-            "Восстановление завершено. {}",
-            progress::MAC_STARTUP_HINT
-        );
-        progress::Event::RestoreCompleted.emit();
-        Ok(())
+impl From<RestoreArgs> for operations::Restore {
+    fn from(args: RestoreArgs) -> Self {
+        Self {
+            ipsw: args.ipsw,
+            firmware_dir: args.firmware_dir,
+            ecid: args.ecid,
+            identity: args.identity,
+            transcript: args.transcript,
+            authorization_tokens: args.authorization_tokens,
+            apple_connect_data: args.apple_connect_data,
+        }
     }
 }
 
@@ -188,14 +151,8 @@ enum DriverCommand {
     Status,
     /// Install missing Apple USB drivers and stop AMDS (Windows UAC).
     Prepare,
-    #[cfg(windows)]
-    #[command(hide = true)]
-    PrepareElevated,
     /// Reset Apple DFU / Recovery / Restore device records and reinstall the USB driver (Windows UAC).
     Reset,
-    #[cfg(windows)]
-    #[command(hide = true)]
-    ResetElevated,
     /// Export a targeted WinUSB INF source and Linux udev rule; does not install.
     Export {
         directory: PathBuf,
@@ -226,11 +183,7 @@ fn parse_pid(value: &str) -> std::result::Result<u16, String> {
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
-    if zalivka::logging::worker() {
-        zalivka::log!(Debug, "report", "{}", serde_json::to_string(value)?);
-    } else {
-        println!("{}", serde_json::to_string_pretty(value)?);
-    }
+    println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
 
@@ -241,7 +194,7 @@ pub(super) fn run() -> Result<()> {
     }
     #[cfg(all(windows, feature = "gui"))]
     #[allow(unsafe_code)]
-    if !zalivka::logging::worker() {
+    {
         // GUI builds never allocate a console. CLI calls can reuse their parent's
         // terminal; redirected standard handles remain inherited from the caller.
         unsafe {
@@ -251,66 +204,11 @@ pub(super) fn run() -> Result<()> {
         }
     }
     let cli = Cli::parse();
-    zalivka::logging::init(cli.verbose);
-    #[cfg(windows)]
-    if let Some(id) = cli.elevated_log {
-        zalivka::logging::connect_elevated(id)?;
-    }
     match cli.command {
         #[cfg(feature = "gui")]
         Command::Gui => crate::gui::run()?,
         Command::Doctor => {
-            if let Some(host) = drivers::host_status()? {
-                zalivka::log!(
-                    Debug,
-                    "drivers",
-                    "Windows: {}",
-                    serde_json::to_string(&host)?
-                );
-                zalivka::log!(
-                    Info,
-                    "drivers",
-                    "Драйвер Apple: {}; служба Apple запущена: {}",
-                    host.apple_driver_installed,
-                    host.apple_service_running
-                );
-                if let Some(reason) = host.blocking_reason() {
-                    zalivka::log!(Warning, "drivers", "{reason}; zalivka drivers prepare");
-                }
-            }
-            let diagnostics = drivers::doctor()?;
-            if diagnostics.is_empty() {
-                zalivka::log!(
-                    Info,
-                    "usb",
-                    "Устройства Apple в DFU или Recovery не найдены"
-                );
-            }
-            for device in &diagnostics {
-                let message = format!(
-                    "USB {}: {}{}",
-                    device.product_id,
-                    if device.accessible {
-                        "доступен"
-                    } else {
-                        "недоступен"
-                    },
-                    device
-                        .error
-                        .as_ref()
-                        .map(|e| format!(": {e}"))
-                        .unwrap_or_default()
-                );
-                zalivka::logging::emit(
-                    if device.accessible {
-                        zalivka::logging::Level::Info
-                    } else {
-                        zalivka::logging::Level::Warning
-                    },
-                    "usb",
-                    format_args!("{message}"),
-                );
-            }
+            let diagnostics = operations::doctor()?;
             print_json(&diagnostics)?;
             ensure!(
                 diagnostics.iter().all(|d| d.accessible),
@@ -321,45 +219,8 @@ pub(super) fn run() -> Result<()> {
             DriverCommand::Status => {
                 print_json(&drivers::host_status()?)?;
             }
-            DriverCommand::Prepare => {
-                let reboot = drivers::prepare_windows()?;
-                zalivka::log!(
-                    Info,
-                    "drivers",
-                    "Подготовка Windows завершена. Перезагрузка требуется: {reboot}"
-                );
-                if reboot {
-                    progress::Event::RebootRequired.emit();
-                    zalivka::log!(
-                        Warning,
-                        "drivers",
-                        "Перезагрузите Windows перед восстановлением Mac."
-                    );
-                }
-            }
-            #[cfg(windows)]
-            DriverCommand::PrepareElevated => {
-                let reboot = drivers::prepare_windows_elevated()?;
-                std::process::exit(if reboot { 3010 } else { 0 });
-            }
-            DriverCommand::Reset => {
-                let reboot = drivers::reset_windows()?;
-                zalivka::log!(
-                    Info,
-                    "drivers",
-                    "Сброс USB-драйверов завершён. Перезагрузка требуется: {reboot}. Подключите Mac заново и введите его в DFU."
-                );
-            }
-            #[cfg(windows)]
-            DriverCommand::ResetElevated => {
-                let mut reboot = false;
-                if let Err(error) = drivers::reset_windows_elevated(&mut reboot) {
-                    zalivka::log!(Error, "drivers", "Сброс USB-драйверов: {error:#}");
-                    // ERROR_FAIL_REBOOT_REQUIRED preserves a pending reboot even on failure.
-                    std::process::exit(if reboot { 3017 } else { 1 });
-                }
-                std::process::exit(if reboot { 3010 } else { 0 });
-            }
+            DriverCommand::Prepare => operations::prepare_windows()?,
+            DriverCommand::Reset => operations::reset_drivers()?,
             DriverCommand::Export {
                 directory,
                 pid,
@@ -390,29 +251,7 @@ pub(super) fn run() -> Result<()> {
             print_json(&restore::probe_boot_state(&ipsw, ecid, load_ibss)?)?;
         }
         Command::Verify { ipsw, checksum } => {
-            zalivka::log!(Info, "ipsw", "Проверка архива: {}", ipsw.display());
-            if let Some(checksum) = &checksum {
-                net::verify_file(&ipsw, &zalivka::device::decode_hex(checksum)?)?;
-            }
-            let mut ipsw = Ipsw::open(&ipsw)?;
-            let mut report = ipsw.verify_all()?;
-            report.archive_checksum_verified = checksum.is_some();
-            zalivka::log!(
-                Info,
-                "ipsw",
-                "Проверено файлов: {}; контрольных сумм манифеста: {}",
-                report.entries,
-                report.manifest_digests
-            );
-            if !report.aea_content_digests_not_checked.is_empty() {
-                zalivka::log!(
-                    Warning,
-                    "ipsw",
-                    "Контрольные суммы содержимого AEA не проверены: {}",
-                    report.aea_content_digests_not_checked.len()
-                );
-            }
-            print_json(&report)?;
+            print_json(&operations::verify(&ipsw, checksum.as_deref())?)?;
         }
         Command::Detect { json } => {
             let devices = usb::detect()?;
@@ -524,24 +363,13 @@ pub(super) fn run() -> Result<()> {
             println!("Verified firmware saved to {}", output.display());
         }
         Command::Fetch { ecid, firmware_dir } => {
-            let device = usb::RecoveryUsb::open(ecid)?.info;
-            let directory = firmware_dir.map_or_else(catalog::cache_directory, Ok)?;
-            let path = catalog::obtain(&device, &directory, None, Behavior::Erase)?;
-            zalivka::log!(
-                Info,
-                "firmware",
-                "Проверенная прошивка сохранена: {}",
-                path.display()
-            );
+            operations::fetch(ecid, firmware_dir.as_deref())?;
         }
         Command::Restore { args, erase } => {
-            ensure!(
-                erase && args.experimental,
-                "--erase and --experimental are required"
-            );
-            args.run(Behavior::Erase)?;
+            ensure!(erase, "--erase is required");
+            operations::Restore::from(args).run(Behavior::Erase)?;
         }
-        Command::Revive(args) => args.run(Behavior::Update)?,
+        Command::Revive(args) => operations::Restore::from(args).run(Behavior::Update)?,
     }
     Ok(())
 }

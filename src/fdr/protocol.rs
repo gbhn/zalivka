@@ -13,6 +13,8 @@ use std::{
 
 pub(super) fn control_handshake(session: &Session, version: u8) -> Result<(MuxStream, u16)> {
     let mut control = session.connect(1082).context("connecting FDR control")?;
+    control.set_log_source("fdr:control");
+    crate::log!(Debug, "fdr:control", "Negotiating v{version}");
     control.set_read_timeout(Duration::from_secs(20));
     let port = if version == 2 {
         control.write_all(b"BeginCtrl\0")?;
@@ -38,6 +40,7 @@ pub(super) fn control_handshake(session: &Session, version: u8) -> Result<(MuxSt
     };
     ensure!(port != 0, "FDR returned zero connection port");
     control.set_read_timeout(Duration::from_secs(1));
+    crate::log!(Debug, "fdr:control", "v{version}; port={port}");
     Ok((control, port))
 }
 
@@ -117,19 +120,14 @@ pub(super) fn proxy_handshake(
     stream
         .read_exact(&mut methods)
         .context("reading FDR proxy methods")?;
-    crate::log!(
-        Debug,
-        "fdr",
-        "SOCKS/FDR префикс: 05{method_count:02x}{}",
-        hex::encode(&methods)
-    );
+    crate::log!(Trace, "fdr:socks", "Methods={methods:02x?}");
     if !methods.contains(&0) {
         stream.write_all(&[5, 0xff])?;
         bail!("FDR SOCKS client did not offer the no-authentication method");
     }
     let mut zero = [0];
     stream.write_all(&[5, 0])?;
-    crate::log!(Debug, "fdr", "SOCKS ответ: 0500");
+    crate::log!(Trace, "fdr:socks", "Method=00");
 
     let mut address_type = [0; 2];
     stream
@@ -147,7 +145,7 @@ pub(super) fn proxy_handshake(
             .context("reading FDR proxy CONNECT reserved byte")?;
         ensure!(zero == [0], "unsupported FDR proxy CONNECT reserved byte");
         stream.write_all(&[5, 0])?;
-        crate::log!(Debug, "fdr", "SOCKS ответ CONNECT: 0500");
+        crate::log!(Trace, "fdr:socks", "CONNECT");
         stream
             .read_exact(&mut address_type)
             .context("reading FDR proxy address type")?;
@@ -165,23 +163,13 @@ pub(super) fn proxy_handshake(
     let port = u16::from_be_bytes(address[n - 2..].try_into()?);
     validate_proxy_target(host, port)?;
     crate::log!(
-        Debug,
-        "fdr",
-        "SOCKS CONNECT: greeting={}, тело=0003{}{}",
-        greeting,
-        hex::encode(&address_type[1..]),
-        hex::encode(&address)
+        Trace,
+        "fdr:socks",
+        "CONNECT {host}:{port}; greeting={greeting}"
     );
     stream.write_all(&[0, address_type[0], address_type[1]])?;
     stream.write_all(&address)?;
-    crate::log!(
-        Debug,
-        "fdr",
-        "SOCKS тело ответа: 0003{}{}",
-        hex::encode(&address_type[1..]),
-        hex::encode(&address)
-    );
-    crate::log!(Debug, "fdr", "Запрос CONNECT к {host}:{port} принят");
+    crate::log!(Debug, "fdr:socks", "CONNECT {host}:{port} accepted");
     Ok((host.into(), port))
 }
 

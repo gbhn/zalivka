@@ -624,7 +624,7 @@ fn checkpoint_log_preserves_step_and_device_diagnostics() {
         .collect::<Vec<_>>()
         .join("\n");
     for expected in [
-        "Checkpoint completed: id=0x123, name=test_step, result=10",
+        "test_step: completed; id=0x123, result=10",
         "test_step (0x123): test warning",
         "test_step (0x123): test error details",
     ] {

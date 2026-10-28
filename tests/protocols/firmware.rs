@@ -1,6 +1,42 @@
 use super::*;
 
 #[test]
+fn firmware_plist_payloads_and_chunks_are_transferred_without_trace_dumps() {
+    for chunk in [0u64, 8192] {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let output = records.clone();
+        let payload = vec![0xa5; 512 * 1024];
+        let mut sent = Vec::new();
+        zalivka::progress::Context::new(move |event| {
+            if let zalivka::progress::Event::Log(record) = event {
+                output.lock().unwrap().push(record);
+            }
+        })
+        .run(|| {
+            zalivka::firmware::send_response(
+                &mut sent,
+                wire::dict([("FirmwareData", Value::Data(payload.clone()))]),
+                &wire::dict([("DataChunkSize", chunk.into())]),
+            )
+        })
+        .unwrap();
+        assert!(records.lock().unwrap().is_empty());
+        let mut input = Cursor::new(sent);
+        let mut received = Vec::new();
+        while input.position() < input.get_ref().len() as u64 {
+            let message = wire::receive(&mut input).unwrap();
+            let response = wire::get(&message, &["FirmwareResponseData"]).unwrap();
+            if let Some(bytes) = response.as_data() {
+                received.extend_from_slice(bytes);
+            } else if let Ok(value) = wire::get(response, &["FirmwareData"]) {
+                received.extend_from_slice(value.as_data().unwrap());
+            }
+        }
+        assert_eq!(received, payload);
+    }
+}
+
+#[test]
 fn metadata_updater_cannot_contradict_connected_ap_fields() {
     let file = fixture(None, false);
     let mut ipsw = Ipsw::open(file.path()).unwrap();

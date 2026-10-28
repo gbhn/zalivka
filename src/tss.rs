@@ -43,6 +43,7 @@ pub fn validate_ticket<'a>(request: &Value, response: &'a Value) -> Result<&'a [
 }
 
 pub fn send_raw(request: &Value) -> Result<Value> {
+    crate::logging::plist("tss", "Request", request);
     let body = wire::xml(request)?;
     let request = ureq::http::Request::post(TSS_URL)
         .header("Content-Type", "text/xml")
@@ -59,6 +60,7 @@ pub fn send_raw(request: &Value) -> Result<Value> {
         16 * 1024 * 1024,
         "TSS response too large",
     )?;
+    crate::logging::bytes("tss", format_args!("RX"), &data);
     parse_response(&data)
 }
 

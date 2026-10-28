@@ -41,8 +41,9 @@ fn hash_file(file: &mut File, hash: &mut dyn DynDigest) -> Result<u64> {
     let mut buffer = vec![0; 1024 * 1024];
     let mut total = 0u64;
     let mut progress =
-        crate::progress::Progress::new("Проверка IPSW", Some(file.metadata()?.len()), 0);
+        crate::progress::Progress::new("IPSW verification", Some(file.metadata()?.len()), 0);
     loop {
+        crate::progress::check_cancelled()?;
         let n = file.read(&mut buffer)?;
         if n == 0 {
             break;
@@ -67,17 +68,21 @@ pub fn download_verified(url: &str, destination: &Path, expected: &[u8]) -> Resu
 }
 
 fn retry_download(error: &anyhow::Error, attempts: &mut u8, maximum: u8) -> bool {
-    if *attempts >= maximum || !retryable_download(error) {
+    if crate::progress::check_cancelled().is_err()
+        || *attempts >= maximum
+        || !retryable_download(error)
+    {
         return false;
     }
     let delay = 1u64 << *attempts;
     *attempts += 1;
-    crate::log!(
-        Warning,
-        "download",
-        "Загрузка прервана: {error:#}. Повтор через {delay} с; загруженные данные сохранены"
-    );
-    std::thread::sleep(Duration::from_secs(delay));
+    crate::log!(Warning, "download", "{error:#}; retrying in {delay} s");
+    for _ in 0..delay * 10 {
+        if crate::progress::check_cancelled().is_err() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     true
 }
 
@@ -135,13 +140,14 @@ pub(super) fn download_from(
             crate::log!(
                 Info,
                 "download",
-                "Продолжение загрузки с {} МиБ",
+                "Resuming download at {} MiB",
                 download.total / 1048576
             );
         }
         let mut attempts = 0;
         let mut restarts = 0;
         loop {
+            crate::progress::check_cancelled()?;
             let step = match request(download.total) {
                 Ok(response) => download.receive(response, directory)?,
                 Err(error) => DownloadStep::Interrupted(error),
@@ -165,6 +171,7 @@ pub(super) fn download_from(
         }
     }
     download.file.sync_all()?;
+    crate::progress::check_cancelled()?;
     // Hard-link publication fails if another process created the destination in the meantime.
     std::fs::hard_link(&part, destination).context("publishing verified download")?;
     std::fs::remove_file(part)?;
@@ -307,8 +314,11 @@ impl<'a> PartialDownload<'a> {
         let mut output = std::io::BufWriter::with_capacity(4 * 1024 * 1024, &mut self.file);
         let mut buffer = vec![0; 1024 * 1024];
         let mut progress =
-            crate::progress::Progress::new("Загрузка IPSW", expected_length, self.total);
+            crate::progress::Progress::new("IPSW download", expected_length, self.total);
         let read_error = loop {
+            if let Err(error) = crate::progress::check_cancelled() {
+                break Some(error);
+            }
             let n = match reader.read(&mut buffer) {
                 Ok(n) => n,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -339,6 +349,7 @@ impl<'a> PartialDownload<'a> {
         output.flush()?;
         drop(output);
         if let Some(error) = read_error {
+            crate::progress::check_cancelled()?;
             return Ok(DownloadStep::Interrupted(error.into()));
         }
         if expected_length.is_some_and(|length| self.total < length) {

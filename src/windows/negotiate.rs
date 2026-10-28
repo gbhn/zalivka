@@ -60,12 +60,12 @@ impl Negotiate {
                 .unwrap_or(name.len());
             String::from_utf16_lossy(&name[..end])
         } else {
-            "текущая учётная запись Windows".into()
+            "current Windows account".into()
         };
         crate::log!(
             Info,
-            "proxy",
-            "SSPI {scheme}: учётная запись процесса={account}; SPN=HTTP/{proxy_host}; используются учётные данные текущего входа Windows"
+            "proxy:auth",
+            "Process account={account}; SPN=HTTP/{proxy_host}"
         );
         Ok(Self {
             credential,
@@ -126,6 +126,14 @@ impl Negotiate {
                 ptr::null_mut(),
             )
         };
+        crate::log!(
+            Trace,
+            "proxy:auth",
+            "InitializeSecurityContextW: status=0x{:08X}; attributes=0x{attributes:08X}; input={} B, output={} B",
+            status as u32,
+            bytes.len(),
+            output.0.cbBuffer
+        );
         // SSPI may return a partial context even on failure; release it too.
         if context.dwLower != 0 || context.dwUpper != 0 {
             self.context = Some(context);

@@ -108,12 +108,7 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         let bytes = img4::personalize_with_metadata(name, &component, &ticket, &identity.value)?;
         let chip_id = usb.info.chip_id;
         let board_id = usb.info.board_id;
-        crate::log!(
-            Debug,
-            "boot",
-            "Загрузка диагностического iBSS в память: {} байт",
-            bytes.len()
-        );
+        crate::log!(Debug, "boot", "iBSS in RAM: {} B", bytes.len());
         let upload = dfu::upload(&mut usb, Mode::Dfu, &bytes, true);
         drop(usb);
         usb = reconnect_after_ibss(upload, Some(Mode::Recovery), |mode| {
@@ -164,7 +159,7 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         "build-style",
         "boot-args",
     ] {
-        crate::log!(Debug, "boot", "Чтение переменной iBoot: {name}");
+        crate::log!(Debug, "boot:env", "getenv {name}");
         let value = match dfu::getenv(&mut usb, name) {
             Ok(value) => serde_json::json!({"value": value}),
             Err(error) => serde_json::json!({"error": format!("{error:#}")}),
@@ -192,7 +187,7 @@ impl ContextState {
             name,
             ticket.unwrap_or(&self.restore.ticket),
         )?;
-        crate::log!(Debug, "boot", "Отправка {name}: {} байт", bytes.len());
+        crate::log!(Debug, "boot", "Sending {name}: {} B", bytes.len());
         dfu::upload(usb, usb.info.mode, &bytes, true).with_context(|| format!("uploading {name}"))
     }
 
@@ -225,11 +220,7 @@ impl ContextState {
             .context("hardware identity changed after iBSS")?;
         if usb.info.ap_nonce != self.device.ap_nonce || usb.info.sep_nonce != self.device.sep_nonce
         {
-            crate::log!(
-                Info,
-                "boot",
-                "Получение новых подписей Apple после запуска iBSS"
-            );
+            crate::log!(Info, "boot", "Refreshing signatures after iBSS");
             self.device = usb.info.clone();
             self.restore.ticket =
                 tss::send(&tss::request(&self.device, &self.restore.identity)?)
@@ -281,7 +272,7 @@ impl ContextState {
         crate::log!(
             Info,
             "boot",
-            "Подготовка загрузчика: этап {}",
+            "Preparing bootloader: stage {}",
             if stage1 { 1 } else { 2 }
         );
         for step in steps {
@@ -290,7 +281,7 @@ impl ContextState {
                     self.send_component(usb, name, None)?;
                 }
                 IBootStep::Command(command) => {
-                    crate::log!(Debug, "boot", "iBoot: {command}");
+                    crate::log!(Debug, "boot:cmd", "{command}");
                     dfu::command(usb, command, false)?;
                 }
             }
@@ -325,21 +316,13 @@ pub(super) fn reconnect_after_ibss<T>(
     match upload {
         Ok(()) => reconnect(mode),
         Err(reset_error) if reset_error.is::<dfu::ResetFailure>() => {
-            crate::log!(
-                Debug,
-                "boot",
-                "{reset_error:#}; ожидание того же Mac в Recovery"
-            );
+            crate::log!(Debug, "boot", "USB reset: {reset_error:#}");
             // A reset can remove its own USB handle before Windows reports its
             // completion. Only a working Recovery connection proves the transition;
             // absence or the old DFU device must not count as success.
             match reconnect(Some(Mode::Recovery)) {
                 Ok(usb) => {
-                    crate::log!(
-                        Debug,
-                        "boot",
-                        "Подключение Recovery подтверждено после ошибки сброса USB; продолжение"
-                    );
+                    crate::log!(Debug, "boot", "Recovery connected");
                     Ok(usb)
                 }
                 Err(error) => Err(reset_error.context(format!(

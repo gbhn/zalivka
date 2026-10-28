@@ -82,6 +82,7 @@ fn chunk_size(arguments: &Value) -> Result<usize> {
 
 /// Optional chunk framing carries tickets first, followed by data and DataDone.
 pub fn send_response(out: &mut impl Write, mut response: Value, arguments: &Value) -> Result<()> {
+    let _trace = crate::logging::firmware_transfer();
     let size = chunk_size(arguments)?;
     let fields = response
         .as_dictionary_mut()

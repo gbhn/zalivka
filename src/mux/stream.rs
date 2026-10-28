@@ -39,6 +39,8 @@ pub struct MuxStream {
     source: u16,
     destination: u16,
     read_timeout: Duration,
+    log_source: &'static str,
+    received: u64,
     profile: WriteProfile,
 }
 impl MuxStream {
@@ -48,6 +50,8 @@ impl MuxStream {
             source,
             destination,
             read_timeout: Duration::from_secs(300),
+            log_source: "usbmux:io",
+            received: 0,
             profile: WriteProfile::default(),
         }
     }
@@ -60,7 +64,20 @@ impl MuxStream {
             .is_some_and(|c| !c.input.is_empty()))
     }
     pub fn set_read_timeout(&mut self, timeout: Duration) {
+        crate::log!(
+            Trace,
+            "usbmux:io",
+            "{} -> {}: read timeout={timeout:?}",
+            self.source,
+            self.destination
+        );
         self.read_timeout = timeout;
+    }
+    pub(crate) fn set_log_source(&mut self, source: &'static str) {
+        self.log_source = source;
+    }
+    pub(crate) fn local_port(&self) -> u16 {
+        self.source
     }
     pub fn read_timeout(&self) -> Duration {
         self.read_timeout
@@ -84,8 +101,9 @@ impl MuxStream {
             }
             let c = link
                 .channels
-                .get(&self.source)
+                .get_mut(&self.source)
                 .ok_or_else(|| std::io::Error::other("mux channel closed"))?;
+            c.firmware_transfer = crate::logging::firmware_transfer_active();
             if c.closed {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
@@ -94,6 +112,18 @@ impl MuxStream {
             }
             let outstanding = c.seq.wrapping_sub(c.peer_ack);
             let available = c.window.saturating_sub(outstanding) as usize;
+            if available == 0 && pending_polls == 0 {
+                crate::log!(
+                    Trace,
+                    "usbmux:tcp",
+                    "{} -> {}: waiting for window; seq={}, ack={}, window={}",
+                    self.source,
+                    self.destination,
+                    c.seq,
+                    c.peer_ack,
+                    c.window
+                );
+            }
             // The available window may be based on an old ACK while newer ACKs
             // are already queued. Drain ready input before sizing a USB burst,
             // so a stale window does not reduce it to one synchronous packet.
@@ -127,13 +157,30 @@ impl MuxStream {
                     n
                 };
                 let usb_before = link.usb_write_time;
+                crate::logging::bytes(
+                    self.log_source,
+                    format_args!(
+                        "{} -> {} TX offset={}",
+                        self.source, self.destination, self.profile.bytes
+                    ),
+                    &data[..n],
+                );
                 let started = Instant::now();
                 let sent = link.send_data(self.source, &data[..n]);
                 let elapsed = started.elapsed();
                 let usb = link.usb_write_time - usb_before;
                 self.profile.usb_out += usb;
                 self.profile.packet_prepare += elapsed.saturating_sub(usb);
-                sent.map_err(std::io::Error::other)?;
+                if let Err(error) = sent {
+                    crate::log!(
+                        Trace,
+                        "usbmux:io",
+                        "{} -> {}: write failed: {error:#}",
+                        self.source,
+                        self.destination
+                    );
+                    return Err(std::io::Error::other(error));
+                }
                 self.profile.bytes += n as u64;
                 self.profile.packets += n.div_ceil(MAX_PAYLOAD) as u64;
                 self.profile.short_packets += u64::from(n % MAX_PAYLOAD != 0);
@@ -192,8 +239,18 @@ impl Read for MuxStream {
                 .channels
                 .get_mut(&self.source)
                 .ok_or_else(|| std::io::Error::other("mux channel closed"))?;
+            c.firmware_transfer = crate::logging::firmware_transfer_active();
             if !c.input.is_empty() {
                 let n = c.input.read(out)?;
+                crate::logging::bytes(
+                    self.log_source,
+                    format_args!(
+                        "{} -> {} RX offset={}",
+                        self.destination, self.source, self.received
+                    ),
+                    &out[..n],
+                );
+                self.received += n as u64;
                 c.consumed += n;
                 if c.consumed >= 16384 {
                     c.consumed = 0;
@@ -204,6 +261,13 @@ impl Read for MuxStream {
                 return Ok(n);
             }
             if c.closed {
+                crate::log!(
+                    Trace,
+                    "usbmux:io",
+                    "{} -> {}: EOF",
+                    self.destination,
+                    self.source
+                );
                 return Ok(0);
             }
             if Instant::now() >= deadline {
@@ -243,6 +307,13 @@ impl Write for MuxStream {
 }
 impl Drop for MuxStream {
     fn drop(&mut self) {
+        crate::log!(
+            Trace,
+            "usbmux:io",
+            "{} -> {}: closing",
+            self.source,
+            self.destination
+        );
         if let Ok(mut link) = self.session.lock()
             && link.channels.contains_key(&self.source)
         {
@@ -252,9 +323,9 @@ impl Drop for MuxStream {
         if self.profile.bytes >= 1024 * 1024 || self.profile.errors != 0 {
             let p = &self.profile;
             crate::log!(
-                Debug,
-                "usbmux",
-                "Профиль {} -> {}: bytes={}, calls={}, errors={}, elapsed={:.3}s, lock={:.3}s, usb={:.3}s, prepare={:.3}s, poll={:.3}s, window_wait={:.3}s, stalls={}, empty_polls={}, event_waits={}, wakeups={}, packets={}, short_packets={}",
+                Trace,
+                "usbmux:stats",
+                "Profile {} -> {}: bytes={}, calls={}, errors={}, elapsed={:.3}s, lock={:.3}s, usb={:.3}s, prepare={:.3}s, poll={:.3}s, window_wait={:.3}s, stalls={}, empty_polls={}, event_waits={}, wakeups={}, packets={}, short_packets={}",
                 self.source,
                 self.destination,
                 p.bytes,

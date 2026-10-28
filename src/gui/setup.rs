@@ -1,7 +1,8 @@
-//! Actions and validated CLI arguments for GUI workers.
+//! Desktop actions call the same native operations as the terminal.
 use anyhow::{Result, ensure};
-use std::{ffi::OsString, path::Path};
+use std::path::Path;
 use zalivka::device::parse_ecid;
+use zalivka::{ipsw::Behavior, operations};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Action {
@@ -18,15 +19,15 @@ impl Action {
     pub(super) fn title(self) -> &'static str {
         match self {
             Self::Revive => "Revive",
-            Self::Restore => "Восстановление",
-            Self::Download => "Загрузка прошивки",
-            Self::Verify => "Проверка IPSW",
-            Self::Doctor => "Диагностика USB",
-            Self::PrepareWindows => "Подготовка Windows",
-            Self::ResetDrivers => "Сброс USB-драйверов Apple",
+            Self::Restore => "Restore",
+            Self::Download => "Firmware download",
+            Self::Verify => "IPSW verification",
+            Self::Doctor => "USB diagnostics",
+            Self::PrepareWindows => "Windows setup",
+            Self::ResetDrivers => "Reset Apple USB drivers",
         }
     }
-    pub(super) fn command(self) -> &'static str {
+    pub(super) fn log_name(self) -> &'static str {
         match self {
             Self::Revive => "revive",
             Self::Restore => "restore",
@@ -38,13 +39,13 @@ impl Action {
     }
     pub(super) fn completed_title(self) -> &'static str {
         match self {
-            Self::Revive => "Revive завершён",
-            Self::Restore => "Восстановление завершено",
-            Self::Download => "Прошивка загружена",
-            Self::Verify => "IPSW проверен",
-            Self::Doctor => "Диагностика завершена",
-            Self::PrepareWindows => "Подготовка Windows завершена",
-            Self::ResetDrivers => "Сброс USB-драйверов завершён",
+            Self::Revive => "Revive complete",
+            Self::Restore => "Restore complete",
+            Self::Download => "Firmware downloaded",
+            Self::Verify => "IPSW verified",
+            Self::Doctor => "Diagnostics complete",
+            Self::PrepareWindows => "Windows setup complete",
+            Self::ResetDrivers => "USB driver reset complete",
         }
     }
     pub(super) fn writes_device(self) -> bool {
@@ -52,6 +53,7 @@ impl Action {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Setup {
     pub(super) ecid: String,
     pub(super) automatic: bool,
@@ -80,57 +82,74 @@ impl Setup {
         ensure!(
             path.extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("ipsw")),
-            "Выберите файл .ipsw"
+            "Select an .ipsw file"
         );
-        ensure!(path.is_file(), "Файл IPSW не найден");
+        ensure!(path.is_file(), "IPSW file not found");
         Ok(path)
     }
-    pub(super) fn arguments(
-        &self,
-        action: Action,
-        transcript: Option<&Path>,
-    ) -> Result<Vec<OsString>> {
-        let mut args = vec![action.command().into()];
-        if action == Action::PrepareWindows {
-            args.push("prepare".into());
-            return Ok(args);
+    pub(super) fn validate(&self, action: Action) -> Result<()> {
+        if action == Action::Verify || (action.writes_device() && !self.automatic) {
+            self.local_file()?;
         }
-        if action == Action::ResetDrivers {
-            args.push("reset".into());
-            return Ok(args);
+        if action.writes_device() || action == Action::Download {
+            parse_ecid(self.ecid.trim()).map_err(anyhow::Error::msg)?;
         }
-        if action == Action::Doctor {
-            return Ok(args);
-        }
-        if action == Action::Verify {
-            args.push(self.local_file()?.as_os_str().into());
-            return Ok(args);
-        }
-        parse_ecid(self.ecid.trim()).map_err(anyhow::Error::msg)?;
-        if action.writes_device() && !self.automatic {
-            args.push(self.local_file()?.as_os_str().into());
-        }
-        args.extend(["--ecid".into(), self.ecid.trim().into()]);
-        if (self.automatic || action == Action::Download) && !self.cache.trim().is_empty() {
-            args.extend(["--firmware-dir".into(), self.cache.trim().into()]);
-        }
-        if action.writes_device() {
-            args.push("--experimental".into());
-            if action == Action::Restore {
-                args.push("--erase".into());
+        Ok(())
+    }
+
+    pub(super) fn restore_options(&self, transcript: Option<&Path>) -> Result<operations::Restore> {
+        let path = |text: &str| (!text.trim().is_empty()).then(|| text.trim().into());
+        Ok(operations::Restore {
+            ipsw: if self.automatic {
+                None
+            } else {
+                Some(self.local_file()?.into())
+            },
+            firmware_dir: if self.automatic {
+                path(&self.cache)
+            } else {
+                None
+            },
+            ecid: parse_ecid(self.ecid.trim()).map_err(anyhow::Error::msg)?,
+            identity: None,
+            transcript: transcript.map(Path::to_path_buf),
+            authorization_tokens: path(&self.tokens),
+            apple_connect_data: path(&self.connect_data),
+        })
+    }
+
+    pub(super) fn run(&self, action: Action, transcript: &Path) -> Result<()> {
+        self.validate(action)?;
+        match action {
+            Action::Restore | Action::Revive => {
+                self.restore_options(Some(transcript))?
+                    .run(if action == Action::Restore {
+                        Behavior::Erase
+                    } else {
+                        Behavior::Update
+                    })?
             }
-            if let Some(path) = transcript {
-                args.extend(["--transcript".into(), path.as_os_str().into()]);
+            Action::Download => {
+                let ecid = parse_ecid(self.ecid.trim()).map_err(anyhow::Error::msg)?;
+                let directory =
+                    (!self.cache.trim().is_empty()).then(|| Path::new(self.cache.trim()));
+                operations::fetch(ecid, directory)?;
             }
-            for (flag, path) in [
-                ("--authorization-tokens", &self.tokens),
-                ("--apple-connect-data", &self.connect_data),
-            ] {
-                if !path.trim().is_empty() {
-                    args.extend([flag.into(), path.trim().into()]);
-                }
+            Action::Verify => {
+                let report = operations::verify(self.local_file()?, None)?;
+                zalivka::log!(Trace, "report", "{}", serde_json::to_string(&report)?);
             }
+            Action::Doctor => {
+                let report = operations::doctor()?;
+                zalivka::log!(Trace, "report", "{}", serde_json::to_string(&report)?);
+                ensure!(
+                    report.iter().all(|device| device.accessible),
+                    "USB diagnostics found inaccessible devices"
+                );
+            }
+            Action::PrepareWindows => operations::prepare_windows()?,
+            Action::ResetDrivers => operations::reset_drivers()?,
         }
-        Ok(args)
+        Ok(())
     }
 }
