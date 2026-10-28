@@ -653,6 +653,11 @@ fn run_case(
         .unwrap_or(0);
     assert!(!noise || main_round_trips > 0);
     let segments = device.join().unwrap();
+    assert_eq!(
+        segments,
+        if greeting { vec![2, 21] } else { vec![2, 19] },
+        "CONNECT reply must be sent in one mux payload after method selection"
+    );
     pac_server.join().unwrap();
     let (from_device, from_server) = proxy.join().unwrap();
     result.unwrap();

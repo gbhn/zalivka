@@ -111,10 +111,11 @@ pub(super) fn ping(stream: &mut (impl Read + Write)) -> Result<()> {
 /// Read all NMETHODS from the SOCKS5 greeting and select no authentication.
 /// Legacy direct CONNECT shares the 05 01 00 prefix with a one-method greeting;
 /// acknowledge it before reading on so a greeting's client can send CONNECT.
-pub(super) fn proxy_handshake(
+pub(super) fn proxy_handshake<S>(
     stream: &mut (impl Read + Write),
     method_count: u8,
-) -> Result<(String, u16)> {
+    connect: impl FnOnce(&str, u16) -> Result<S>,
+) -> Result<(String, u16, S)> {
     ensure!(method_count != 0, "empty FDR SOCKS method list");
     let mut methods = vec![0; usize::from(method_count)];
     stream
@@ -144,7 +145,6 @@ pub(super) fn proxy_handshake(
             .read_exact(&mut zero)
             .context("reading FDR proxy CONNECT reserved byte")?;
         ensure!(zero == [0], "unsupported FDR proxy CONNECT reserved byte");
-        stream.write_all(&[5, 0])?;
         crate::log!(Trace, "fdr:socks", "CONNECT");
         stream
             .read_exact(&mut address_type)
@@ -167,10 +167,29 @@ pub(super) fn proxy_handshake(
         "fdr:socks",
         "CONNECT {host}:{port}; greeting={greeting}"
     );
-    stream.write_all(&[0, address_type[0], address_type[1]])?;
-    stream.write_all(&address)?;
+    let socket = match connect(host, port) {
+        Ok(socket) => socket,
+        Err(error) => {
+            if greeting {
+                // A normal SOCKS5 client must receive failure, never an early
+                // success followed by EOF. The legacy prefix already includes
+                // REP=00, so a failed legacy connection can only be closed.
+                let _ = stream.write_all(&[5, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
+            }
+            return Err(error).context("connecting FDR Apple endpoint");
+        }
+    };
+    // Keep the complete CONNECT response in one mux write. restoreOS closes
+    // affected channels immediately after the old split response, before TLS.
+    // The legacy direct CONNECT already received the 05 00 prefix above.
+    let mut reply = if greeting { vec![5, 0] } else { vec![] };
+    reply.extend_from_slice(&[0, address_type[0], address_type[1]]);
+    reply.extend_from_slice(&address);
+    stream
+        .write_all(&reply)
+        .context("sending FDR SOCKS CONNECT response")?;
     crate::log!(Debug, "fdr:socks", "CONNECT {host}:{port} accepted");
-    Ok((host.into(), port))
+    Ok((host.into(), port, socket))
 }
 
 pub fn validate_proxy_target(host: &str, port: u16) -> Result<()> {

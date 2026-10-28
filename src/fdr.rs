@@ -210,16 +210,19 @@ pub(crate) fn handle_connection<S: Read + Write>(
             }
             _ if cmd[0] == 5 && cmd[1] != 0 => {
                 stream.set_read_timeout(Duration::from_secs(20));
-                let (host, port) = proxy_handshake(&mut stream, cmd[1])?;
-                crate::log!(Debug, "fdr:proxy", "Connecting to {host}:{port}");
-                let connecting = Instant::now();
-                let mut socket = connect(&host, port).context("connecting FDR Apple endpoint")?;
-                crate::log!(
-                    Debug,
-                    "fdr:proxy",
-                    "{host}:{port}: connected in {:.3} s",
-                    connecting.elapsed().as_secs_f64()
-                );
+                let (host, port, mut socket) =
+                    proxy_handshake(&mut stream, cmd[1], |host, port| {
+                        crate::log!(Debug, "fdr:proxy", "Connecting to {host}:{port}");
+                        let connecting = Instant::now();
+                        let socket = connect(host, port)?;
+                        crate::log!(
+                            Debug,
+                            "fdr:proxy",
+                            "{host}:{port}: connected in {:.3} s",
+                            connecting.elapsed().as_secs_f64()
+                        );
+                        Ok(socket)
+                    })?;
                 stream.set_read_timeout(Duration::from_millis(100));
                 let mut buffer = vec![0; 32768];
                 let relaying = Instant::now();

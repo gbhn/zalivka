@@ -1,7 +1,9 @@
 use super::*;
 use std::{
+    cell::Cell,
     collections::VecDeque,
     io::{self, Cursor},
+    rc::Rc,
 };
 
 #[test]
@@ -112,6 +114,89 @@ impl Write for ProxyPeer {
 }
 
 #[test]
+fn proxy_connect_reply_is_complete_and_follows_the_destination_request() {
+    struct Peer {
+        input: Cursor<Vec<u8>>,
+        writes: Vec<Vec<u8>>,
+        connected: Rc<Cell<bool>>,
+    }
+    impl Read for Peer {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            if self.input.position() != 0 {
+                assert_eq!(
+                    self.writes,
+                    [vec![5, 0]],
+                    "CONNECT success must not be sent before the destination is read"
+                );
+            }
+            self.input.read(&mut bytes[..1])
+        }
+    }
+    impl Write for Peer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if !self.writes.is_empty() {
+                assert!(
+                    self.connected.get(),
+                    "CONNECT success preceded the upstream connection"
+                );
+            }
+            self.writes.push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let host = b"tbsc.apple.com";
+    let mut request = vec![0, 5, 1, 0, 3, host.len() as u8];
+    request.extend_from_slice(host);
+    request.extend_from_slice(&443u16.to_be_bytes());
+    let connected = Rc::new(Cell::new(false));
+    let mut peer = Peer {
+        input: Cursor::new(request.clone()),
+        writes: vec![],
+        connected: connected.clone(),
+    };
+    proxy_handshake(&mut peer, 1, |host, port| {
+        assert_eq!((host, port), ("tbsc.apple.com", 443));
+        connected.set(true);
+        Ok(())
+    })
+    .unwrap();
+    let mut reply = vec![5, 0];
+    reply.extend_from_slice(&request[3..]);
+    assert_eq!(peer.writes, [vec![5, 0], reply]);
+}
+
+#[test]
+fn proxy_connect_failure_is_reported_without_a_success_response() {
+    for greeting in [false, true] {
+        let host = b"tbsc.apple.com";
+        let mut request = if greeting { vec![0, 5, 1] } else { vec![] };
+        request.extend_from_slice(&[0, 3, host.len() as u8]);
+        request.extend_from_slice(host);
+        request.extend_from_slice(&443u16.to_be_bytes());
+        let mut peer = ProxyPeer {
+            input: Cursor::new(request.clone()),
+            output: vec![],
+            greeting,
+        };
+        let error = proxy_handshake(&mut peer, 1, |host, port| -> Result<()> {
+            assert_eq!((host, port), ("tbsc.apple.com", 443));
+            bail!("proxy CONNECT refused")
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("proxy CONNECT refused"));
+        assert_eq!(peer.input.position() as usize, request.len());
+        let mut expected = vec![5, 0];
+        if greeting {
+            expected.extend_from_slice(&[5, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
+        }
+        assert_eq!(peer.output, expected);
+    }
+}
+
+#[test]
 fn proxy_handshake_accepts_greeting_and_direct_connect_with_fragmented_bytes() {
     for greeting in [false, true] {
         let host = b"tbsc.apple.com";
@@ -128,8 +213,8 @@ fn proxy_handshake_accepts_greeting_and_direct_connect_with_fragmented_bytes() {
             greeting,
         };
         assert_eq!(
-            proxy_handshake(&mut peer, 1).unwrap(),
-            ("tbsc.apple.com".into(), 443)
+            proxy_handshake(&mut peer, 1, |_, _| Ok(())).unwrap(),
+            ("tbsc.apple.com".into(), 443, ())
         );
         let mut expected = if greeting {
             vec![5, 0, 5, 0]
@@ -170,7 +255,7 @@ fn proxy_handshake_rejects_invalid_and_truncated_requests_before_echoing_an_addr
             output: vec![],
             greeting: false,
         };
-        assert!(proxy_handshake(&mut peer, 1).is_err());
+        assert!(proxy_handshake(&mut peer, 1, |_, _| -> Result<()> { unreachable!() }).is_err());
         assert!(peer.output.is_empty() || peer.output == [5, 0] || peer.output == [5, 0xff]);
     }
 }
@@ -195,8 +280,8 @@ fn proxy_greeting_selects_no_auth_from_the_entire_method_list() {
             greeting: false,
         };
         assert_eq!(
-            proxy_handshake(&mut peer, methods.len() as u8).unwrap(),
-            ("tbsc.apple.com".into(), 443)
+            proxy_handshake(&mut peer, methods.len() as u8, |_, _| Ok(())).unwrap(),
+            ("tbsc.apple.com".into(), 443, ())
         );
         let mut expected = vec![5, 0, 5, 0];
         expected.extend_from_slice(&connect[2..]);
@@ -217,10 +302,12 @@ fn proxy_greeting_rejects_missing_no_auth_without_accepting_connect() {
             greeting: false,
         };
         assert!(
-            proxy_handshake(&mut peer, methods.len() as u8)
-                .unwrap_err()
-                .to_string()
-                .contains("no-authentication")
+            proxy_handshake(&mut peer, methods.len() as u8, |_, _| -> Result<()> {
+                unreachable!()
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("no-authentication")
         );
         assert_eq!(peer.output, [5, 0xff]);
     }
