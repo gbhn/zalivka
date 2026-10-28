@@ -36,12 +36,9 @@ fn asr_trace_volume_stays_bounded_as_the_firmware_payload_grows() {
             assert_eq!(payload, image);
         });
         let records = records.lock().unwrap();
-        assert!(
-            records
-                .iter()
-                .any(|record| record.source == "transfer:stats"
-                    && record.level == zalivka::logging::Level::Debug)
-        );
+        assert!(records.iter().any(|record| record.source == "transfer"
+            && record.message.contains("complete")
+            && record.message.contains("MiB/s")));
         assert!(
             !records
                 .iter()

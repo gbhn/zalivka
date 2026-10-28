@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 pub use canary::canary_response;
 pub use containers::payload_ranges;
 pub(crate) use containers::{MAX_PLIST_BUNDLE, plist_prefix, verify_plist_bundle};
+pub(crate) use containers::{container_prefix, payload_ranges_from};
 use plist::Value;
 use std::io::Write;
 

@@ -104,8 +104,12 @@ pub fn run(
     let mut identity = ipsw.select_behavior(&usb.info, identity_index, behavior)?;
     let stages = preflight(&mut ipsw, &mut identity)?;
     let mut recovery = ipsw.recovery_identity(&usb.info, &identity)?;
+    ipsw.prepare_filesystem(&identity)?;
     if let Some(id) = &mut recovery {
         ipsw.preflight_recovery(id)?;
+        if id.path("OS")? != identity.path("OS")? {
+            ipsw.prepare_filesystem(id)?;
+        }
         // Validate fields known now before iBSS; signing still uses fresh nonces
         // after boot, when the device may have replaced them.
         if identity.is_macos()? {

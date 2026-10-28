@@ -25,7 +25,7 @@ pub mod usb;
 mod windows;
 pub mod wire;
 
-/// Package version, source revision and fingerprint of this exact build.
+/// Package version, source revision and unique timestamp of this build.
 pub const VERSION: &str = env!("ZALIVKA_VERSION");
 
 #[cfg(test)]

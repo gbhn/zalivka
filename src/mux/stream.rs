@@ -13,17 +13,13 @@ struct WriteProfile {
     calls: u64,
     errors: u64,
     elapsed: Duration,
-    lock_wait: Duration,
+
     usb_out: Duration,
-    packet_prepare: Duration,
-    input_poll: Duration,
-    window_wait: Duration,
+
     window_stalls: u64,
-    empty_window_polls: u64,
+
     event_waits: u64,
     event_wakeups: u64,
-    packets: u64,
-    short_packets: u64,
 }
 
 impl WriteProfile {
@@ -86,16 +82,19 @@ impl MuxStream {
     // A write() remains one packet so its error cannot discard a partial
     // success. write_all() may send a bounded batch under one lock: its API
     // already reports an error after a partially written buffer.
-    fn write_packets(&mut self, data: &[u8], limit: usize) -> std::io::Result<usize> {
+    fn write_packets(
+        &mut self,
+        data: &[u8],
+        limit: usize,
+        stop_on_input: bool,
+    ) -> std::io::Result<Option<usize>> {
         if data.is_empty() {
-            return Ok(0);
+            return Ok(Some(0));
         }
         let deadline = Instant::now() + Duration::from_secs(300);
         let mut pending_polls = 0;
         loop {
-            let started = Instant::now();
             let mut link = self.session.lock()?;
-            self.profile.lock_wait += started.elapsed();
             if link.cancelled.load(Ordering::Acquire) {
                 return Err(std::io::Error::other("USB mux session cancelled"));
             }
@@ -112,6 +111,9 @@ impl MuxStream {
             }
             let outstanding = c.seq.wrapping_sub(c.peer_ack);
             let available = c.window.saturating_sub(outstanding) as usize;
+            if stop_on_input && available == 0 && !c.input.is_empty() {
+                return Ok(None);
+            }
             if available == 0 && pending_polls == 0 {
                 crate::log!(
                     Trace,
@@ -135,14 +137,10 @@ impl MuxStream {
                 && pending_polls < 64
             {
                 pending_polls += 1;
-                let started = Instant::now();
                 let pumped = link.pump();
-                self.profile.input_poll += started.elapsed();
                 if pumped.map_err(std::io::Error::other)? {
                     drop(link);
-                    let started = Instant::now();
                     std::thread::yield_now();
-                    self.profile.window_wait += started.elapsed();
                     continue;
                 }
             }
@@ -165,12 +163,9 @@ impl MuxStream {
                     ),
                     &data[..n],
                 );
-                let started = Instant::now();
                 let sent = link.send_data(self.source, &data[..n]);
-                let elapsed = started.elapsed();
                 let usb = link.usb_write_time - usb_before;
                 self.profile.usb_out += usb;
-                self.profile.packet_prepare += elapsed.saturating_sub(usb);
                 if let Err(error) = sent {
                     crate::log!(
                         Trace,
@@ -182,9 +177,7 @@ impl MuxStream {
                     return Err(std::io::Error::other(error));
                 }
                 self.profile.bytes += n as u64;
-                self.profile.packets += n.div_ceil(MAX_PAYLOAD) as u64;
-                self.profile.short_packets += u64::from(n % MAX_PAYLOAD != 0);
-                return Ok(n);
+                return Ok(Some(n));
             }
             if Instant::now() >= deadline {
                 return Err(std::io::Error::new(
@@ -193,18 +186,14 @@ impl MuxStream {
                 ));
             }
             self.profile.window_stalls += 1;
-            let started = Instant::now();
             let pumped = link.pump();
-            self.profile.input_poll += started.elapsed();
             let progressed = pumped.map_err(std::io::Error::other)?;
-            self.profile.empty_window_polls += u64::from(!progressed);
             let ready = if progressed {
                 None
             } else {
                 link.usb.input_ready()
             };
             drop(link);
-            let started = Instant::now();
             let waited = if let Some(ready) = ready {
                 self.profile.event_waits += 1;
                 let waited = ready.wait(Duration::from_millis(1));
@@ -219,9 +208,18 @@ impl MuxStream {
                 yield_link(progressed);
                 Ok(())
             };
-            self.profile.window_wait += started.elapsed();
+
             waited?;
         }
+    }
+
+    /// Yield a blocked file write to its incoming key request. Some(n) counts
+    /// bytes committed once; None means input is ready and no bytes were sent.
+    pub(crate) fn write_until_input(&mut self, data: &[u8]) -> std::io::Result<Option<usize>> {
+        let started = Instant::now();
+        let result = self.write_packets(data, WRITE_BATCH, true);
+        self.profile.record(started, result.is_err());
+        result
     }
 }
 impl Read for MuxStream {
@@ -285,7 +283,9 @@ impl Read for MuxStream {
 impl Write for MuxStream {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         let started = Instant::now();
-        let sent = self.write_packets(data, MAX_PAYLOAD);
+        let sent = self
+            .write_packets(data, MAX_PAYLOAD, false)
+            .map(|sent| sent.unwrap_or_default());
         self.profile.record(started, sent.is_err());
         sent
     }
@@ -293,7 +293,9 @@ impl Write for MuxStream {
         let started = Instant::now();
         let result = (|| {
             while !data.is_empty() {
-                let sent = self.write_packets(data, WRITE_BATCH)?;
+                let sent = self
+                    .write_packets(data, WRITE_BATCH, false)?
+                    .unwrap_or_default();
                 data = &data[sent..];
             }
             Ok(())
@@ -325,24 +327,17 @@ impl Drop for MuxStream {
             crate::log!(
                 Trace,
                 "usbmux:stats",
-                "Profile {} -> {}: bytes={}, calls={}, errors={}, elapsed={:.3}s, lock={:.3}s, usb={:.3}s, prepare={:.3}s, poll={:.3}s, window_wait={:.3}s, stalls={}, empty_polls={}, event_waits={}, wakeups={}, packets={}, short_packets={}",
+                "Profile {} -> {}: bytes={}, calls={}, errors={}, elapsed={:.3}s, usb={:.3}s, stalls={}, event_waits={}, wakeups={}",
                 self.source,
                 self.destination,
                 p.bytes,
                 p.calls,
                 p.errors,
                 p.elapsed.as_secs_f64(),
-                p.lock_wait.as_secs_f64(),
                 p.usb_out.as_secs_f64(),
-                p.packet_prepare.as_secs_f64(),
-                p.input_poll.as_secs_f64(),
-                p.window_wait.as_secs_f64(),
                 p.window_stalls,
-                p.empty_window_polls,
                 p.event_waits,
-                p.event_wakeups,
-                p.packets,
-                p.short_packets
+                p.event_wakeups
             );
         }
     }

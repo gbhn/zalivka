@@ -7,7 +7,7 @@ pub use digest::verify_digest;
 pub use identity::{Behavior, Identity, IdentitySummary};
 use plist::Value;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{BufReader, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
@@ -61,6 +61,7 @@ pub struct Ipsw {
     path: PathBuf,
     archive: ZipArchive<BufReader<File>>,
     pub manifest: Arc<Value>,
+    prepared_images: HashMap<String, Arc<tempfile::NamedTempFile>>,
 }
 
 impl Ipsw {
@@ -73,6 +74,7 @@ impl Ipsw {
             "IPSW BuildManifest changed while restoring"
         );
         reopened.manifest = self.manifest.clone();
+        reopened.prepared_images = self.prepared_images.clone();
         Ok(reopened)
     }
 
@@ -107,11 +109,11 @@ impl Ipsw {
             .by_name("BuildManifest.plist")
             .context("IPSW has no BuildManifest.plist")?;
         ensure!(entry.size() <= 32 * 1024 * 1024, "BuildManifest too large");
-        let manifest = Value::from_reader(std::io::Cursor::new(crate::storage::read_limited(
+        let manifest = wire::decode_plist(&crate::storage::read_limited(
             entry,
             32 * 1024 * 1024,
             "BuildManifest too large",
-        )?))?;
+        )?)?;
         ensure!(
             wire::get(&manifest, &["BuildIdentities"])?
                 .as_array()
@@ -132,6 +134,7 @@ impl Ipsw {
             path: path.into(),
             archive,
             manifest: Arc::new(manifest),
+            prepared_images: HashMap::new(),
         })
     }
 
@@ -233,6 +236,9 @@ impl Ipsw {
     /// Stream even multi-gigabyte images without keeping them in memory.
     pub fn stream(&mut self, path: &str, out: &mut impl Write) -> Result<u64> {
         validate_path(path)?;
+        if self.prepared_images.contains_key(path) {
+            return Ok(std::io::copy(&mut self.prepared_image(path)?, out)?);
+        }
         let mut entry = self.archive.by_name(path)?;
         crate::log!(
             Trace,
@@ -260,6 +266,76 @@ impl Ipsw {
             .unwrap_or(if e.is_dir() { 0o040755 } else { 0o100644 }))
     }
 
+    /// Prepare seekable images and validate CRC before uploading any boot firmware.
+    pub fn prepare_filesystem(&mut self, id: &Identity) -> Result<()> {
+        self.prepare_filesystem_in(id, &std::env::temp_dir())
+    }
+
+    fn prepare_filesystem_in(&mut self, id: &Identity, directory: &Path) -> Result<()> {
+        let path = id.path("OS")?;
+        if self.prepared_images.contains_key(path) {
+            return Ok(());
+        }
+        if self.archive.by_name(path)?.compression() == zip::CompressionMethod::Stored {
+            return self.verify_filesystem(id);
+        }
+        let size = self.size(path)?;
+        crate::storage::require(directory, size)?;
+        let mut image = tempfile::NamedTempFile::new_in(directory)
+            .context("preparing filesystem temporary storage before restore")?;
+        let mut entry = self.archive.by_name(path)?;
+        let mut progress =
+            crate::progress::Progress::new(format!("Verifying {path}"), Some(size), 0);
+        let mut buffer = vec![0; 1024 * 1024];
+        let mut copied = 0;
+        loop {
+            crate::progress::check_cancelled()?;
+            let n = entry
+                .read(&mut buffer)
+                .with_context(|| format!("checking filesystem {path}"))?;
+            if n == 0 {
+                break;
+            }
+            image.write_all(&buffer[..n])?;
+            copied += n as u64;
+            progress.advance(n as u64);
+        }
+        ensure!(copied == size, "truncated filesystem {path}");
+        image.flush()?;
+        progress.finish();
+        self.prepared_images.insert(path.into(), Arc::new(image));
+        Ok(())
+    }
+
+    pub(crate) fn prepared_image(&self, path: &str) -> Result<File> {
+        self.prepared_images
+            .get(path)
+            .context("compressed filesystem was not prepared before starting restore")?
+            .reopen()
+            .context("opening prepared filesystem")
+    }
+
+    /// Exhaust a stored filesystem ZIP entry before starting a destructive restore.
+    pub fn verify_filesystem(&mut self, id: &Identity) -> Result<()> {
+        let path = id.path("OS")?;
+        let mut entry = self.archive.by_name(path)?;
+        let mut progress =
+            crate::progress::Progress::new(format!("Verifying {path}"), Some(entry.size()), 0);
+        let mut buffer = vec![0; 1024 * 1024];
+        loop {
+            crate::progress::check_cancelled()?;
+            let n = entry
+                .read(&mut buffer)
+                .with_context(|| format!("checking filesystem {path}"))?;
+            if n == 0 {
+                break;
+            }
+            progress.advance(n as u64);
+        }
+        progress.finish();
+        Ok(())
+    }
+
     pub fn files(&self) -> Result<Vec<String>> {
         self.archive
             .file_names()
@@ -276,6 +352,7 @@ impl Ipsw {
         }
         let start = entry.data_start().context("ZIP entry has no data offset")?;
         let size = entry.size();
+        let expected_crc = entry.crc32();
         ensure!(
             entry.compressed_size() == size,
             "stored ZIP entry size mismatch: {path}"
@@ -294,6 +371,8 @@ impl Ipsw {
             start,
             size,
             position: 0,
+            expected_crc,
+            crc: Some(crc32fast::Hasher::new()),
         }))
     }
 
@@ -479,6 +558,8 @@ pub struct ImageReader {
     start: u64,
     pub size: u64,
     position: u64,
+    expected_crc: u32,
+    crc: Option<crc32fast::Hasher>,
 }
 impl Read for ImageReader {
     fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
@@ -493,6 +574,15 @@ impl Read for ImageReader {
             ));
         }
         self.position += n as u64;
+        if let Some(crc) = &mut self.crc {
+            crc.update(&b[..n]);
+            if self.position == self.size && crc.clone().finalize() != self.expected_crc {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stored IPSW image CRC mismatch",
+                ));
+            }
+        }
         Ok(n)
     }
 }
@@ -507,6 +597,11 @@ impl Seek for ImageReader {
             return Err(std::io::Error::other("image seek out of bounds"));
         }
         self.file.seek(SeekFrom::Start(self.start + n as u64))?;
+        if n == 0 {
+            self.crc = Some(crc32fast::Hasher::new());
+        } else if n as u64 != self.position {
+            self.crc = None;
+        }
         self.position = n as u64;
         Ok(self.position)
     }

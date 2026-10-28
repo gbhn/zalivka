@@ -85,7 +85,7 @@ impl Journal {
             pending: VecDeque::new(),
         }
     }
-    fn write(&mut self, mut record: Record) -> Record {
+    pub(super) fn write(&mut self, mut record: Record) -> Record {
         record.normalize();
         if self.error.is_none()
             && let Err(error) = record.write_to(&mut self.log)
@@ -100,11 +100,11 @@ impl Journal {
         }
         record
     }
-    fn push(&mut self, record: Record) {
+    pub(super) fn push(&mut self, record: Record) {
         self.pending.push_back(record);
         super::trim_logs(&mut self.pending);
     }
-    fn flush(&mut self) -> Option<String> {
+    pub(super) fn flush(&mut self) -> Option<String> {
         if self.error.is_none()
             && let Err(error) = self.log.flush()
         {
@@ -176,34 +176,30 @@ impl Job {
         record
     }
 
-    pub(super) fn pending_logs(&mut self) -> Vec<Record> {
+    pub(super) fn pending_logs(&mut self) -> Option<Vec<Record>> {
         // Rendering never waits for disk I/O in the journal thread.
         let mut journal = match self.journal.try_lock() {
             Ok(journal) => journal,
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return Vec::new(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
         };
         self.log_error = journal.error.clone();
-        journal.pending.drain(..).collect()
+        Some(journal.pending.drain(..).collect())
     }
 
-    pub(super) fn output(&mut self, output: Output) -> Option<Record> {
+    pub(super) fn output(&mut self, output: Output) {
         match output {
             Output::State(event) => self.worker_event(event),
             Output::Finished(success) => {
                 self.success = Some(success);
-                None
             }
         }
     }
 
-    fn worker_event(&mut self, event: progress::Event) -> Option<Record> {
+    fn worker_event(&mut self, event: progress::Event) {
         self.last_activity = Instant::now();
-        if let progress::Event::Log(record) = event {
-            return Some(self.record(record));
-        }
         match event {
-            progress::Event::Log(_) => unreachable!(),
+            progress::Event::Log(_) => {}
             progress::Event::Transfer(update) => {
                 if update.finished {
                     self.transfers.remove(&update.id);
@@ -264,7 +260,7 @@ impl Job {
                 let percent = match progress {
                     -1 => 100,
                     0..=100 => progress as u64,
-                    _ => return None,
+                    _ => return,
                 };
                 self.overall_operations
                     .entry(operation)
@@ -273,7 +269,6 @@ impl Job {
                 self.update_overall();
             }
         }
-        None
     }
 
     fn update_overall(&mut self) {
@@ -306,64 +301,14 @@ impl Job {
     }
 
     pub(super) fn completion_notice(&self, success: bool, reboot_required: bool) -> Notice {
-        let (title, mut detail, mut tone) = if self.cancelled {
-            ("Operation stopped".into(), String::new(), Tone::Neutral)
-        } else if !success {
-            (
-                format!("{}: error", self.action.title()),
-                "See the journal for details.".into(),
-                Tone::Error,
-            )
-        } else if matches!(self.action, Action::PrepareWindows | Action::ResetDrivers)
-            && reboot_required
-        {
-            (
-                "Restart Windows".into(),
-                "Driver installed. Restart Windows before restoring the Mac.".into(),
-                Tone::Neutral,
-            )
-        } else if self.action.writes_device()
-            && let Some(warning) = &self.provisioning_warning
-        {
-            (
-                format!("{}: check activation", self.action.completed_title()),
-                warning.clone(),
-                Tone::Neutral,
-            )
-        } else {
-            (
-                self.action.completed_title().into(),
-                if self.action.writes_device() {
-                    progress::MAC_STARTUP_HINT.into()
-                } else if self.action == Action::ResetDrivers {
-                    "Reconnect the Mac and enter DFU mode.".into()
-                } else {
-                    String::new()
-                },
-                Tone::Success,
-            )
-        };
-        if let Some(error) = &self.log_error {
-            if !detail.is_empty() {
-                detail.push(' ');
-            }
-            detail.push_str(&format!(
-                "Disk journal incomplete: {error}. Recent history is available in this window."
-            ));
-            if tone == Tone::Success {
-                tone = Tone::Neutral;
-            }
-        }
-        Notice {
-            title,
-            detail,
-            tone,
-            expires_at: if self.log_error.is_none() && (tone == Tone::Success || self.cancelled) {
-                Some(Instant::now() + super::NOTICE_LIFETIME)
-            } else {
-                None
-            },
-        }
+        completion_notice(
+            self.action,
+            success,
+            self.cancelled,
+            reboot_required,
+            self.provisioning_warning.as_deref(),
+            self.log_error.as_deref(),
+        )
     }
 
     pub(super) fn spawn(
@@ -372,6 +317,7 @@ impl Job {
         setup: &Setup,
         tx: &Sender<Event>,
         ctx: &egui::Context,
+        reboot_required: bool,
     ) -> Result<(Self, PathBuf)> {
         let directory = zalivka::storage::log_directory()?;
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -400,6 +346,8 @@ impl Job {
             .unwrap_or_else(|e| e.into_inner())
             .push(record);
         let journal = job.journal.clone();
+        let completion = Arc::new(Mutex::new((None::<String>, reboot_required)));
+        let completion_events = completion.clone();
         let log_started = zalivka::logging::elapsed_ms();
         let events = tx.clone();
         let repaint = ctx.clone();
@@ -416,6 +364,21 @@ impl Job {
                 }
             }
             event => {
+                match &event {
+                    progress::Event::ProvisioningWarning { message } => {
+                        completion_events
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .0 = Some(message.clone());
+                    }
+                    progress::Event::RebootRequired => {
+                        completion_events
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .1 = true;
+                    }
+                    _ => {}
+                }
                 let _ = events.send(Event::Worker(id, Output::State(event)));
                 repaint.request_repaint_after(UI_REFRESH_INTERVAL);
             }
@@ -437,6 +400,8 @@ impl Job {
             .context("starting journal thread")?;
         job.context = context.clone();
         let setup = setup.clone();
+        let started = job.started;
+        let final_journal = job.journal.clone();
         let tx = tx.clone();
         let ctx = ctx.clone();
         std::thread::Builder::new()
@@ -464,6 +429,29 @@ impl Job {
                 // All child services have stopped: drain their final dumps before
                 // reporting completion or allowing the journal to be replaced.
                 let logs = context.flush_logs();
+                let error = final_journal
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .error
+                    .clone();
+                let completion = completion.lock().unwrap_or_else(|e| e.into_inner());
+                let notice = completion_notice(
+                    action,
+                    result.is_ok(),
+                    context.cancelled(),
+                    completion.1,
+                    completion.0.as_deref(),
+                    error.as_deref(),
+                );
+                drop(completion);
+                context.run(|| {
+                    zalivka::logging::publish(completion_record(
+                        &notice,
+                        context.cancelled(),
+                        started,
+                    ))
+                });
+                let logs = logs.and(context.flush_logs());
                 let _ = tx.send(Event::Worker(
                     id,
                     Output::Finished(result.is_ok() && logs.is_ok()),
@@ -480,12 +468,92 @@ impl Drop for Job {
         if self.can_stop() && self.success.is_none() {
             self.context.cancel();
         }
-        let _ = self
-            .journal
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .flush();
     }
+}
+
+fn completion_notice(
+    action: Action,
+    success: bool,
+    cancelled: bool,
+    reboot_required: bool,
+    warning: Option<&str>,
+    log_error: Option<&str>,
+) -> Notice {
+    let (title, detail, mut tone) = if cancelled {
+        ("Operation stopped".into(), String::new(), Tone::Neutral)
+    } else if !success {
+        (
+            format!("{}: error", action.title()),
+            "See the journal for details.".into(),
+            Tone::Error,
+        )
+    } else if matches!(action, Action::PrepareWindows | Action::ResetDrivers) && reboot_required {
+        (
+            "Restart Windows".into(),
+            "Driver installed. Restart Windows before restoring the Mac.".into(),
+            Tone::Neutral,
+        )
+    } else if action.writes_device()
+        && let Some(warning) = warning
+    {
+        (
+            format!("{}: check activation", action.completed_title()),
+            warning.into(),
+            Tone::Neutral,
+        )
+    } else {
+        (
+            action.completed_title().into(),
+            if action.writes_device() {
+                progress::MAC_STARTUP_HINT.into()
+            } else if action == Action::ResetDrivers {
+                "Reconnect the Mac and enter DFU mode.".into()
+            } else {
+                String::new()
+            },
+            Tone::Success,
+        )
+    };
+    if log_error.is_some() && tone == Tone::Success {
+        tone = Tone::Neutral;
+    }
+    Notice {
+        title,
+        detail,
+        journal_error: log_error.map(str::to_owned),
+        tone,
+        expires_at: if log_error.is_none() && (tone == Tone::Success || cancelled) {
+            Some(Instant::now() + super::NOTICE_LIFETIME)
+        } else {
+            None
+        },
+    }
+}
+
+pub(super) fn completion_record(notice: &Notice, cancelled: bool, started: Instant) -> Record {
+    let mut message = format!(
+        "{}. Duration: {}.",
+        notice.title,
+        super::widgets::elapsed_text(started.elapsed().as_secs())
+    );
+    if !notice.detail.is_empty() {
+        message.push(' ');
+        message.push_str(&notice.detail);
+    }
+    if let Some(error) = &notice.journal_error {
+        message.push_str(&format!(
+            " Disk journal incomplete: {error}. Recent history is available in this window."
+        ));
+    }
+    Record::new(
+        match notice.tone {
+            Tone::Error => Level::Error,
+            Tone::Neutral if !cancelled => Level::Warning,
+            _ => Level::Info,
+        },
+        "session",
+        message,
+    )
 }
 
 pub(super) fn save_log(
@@ -553,7 +621,7 @@ mod tests {
         let pending = result.recv_timeout(Duration::from_secs(5));
         drop(locked);
         reader.join().unwrap();
-        assert!(pending.expect("GUI waited for the disk journal").is_empty());
+        assert!(pending.expect("GUI waited for the disk journal").is_none());
     }
 
     #[test]

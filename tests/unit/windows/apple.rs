@@ -80,6 +80,33 @@ fn connected_pipe(label: &str) -> (Arc<AppleUsb>, OwnedHandle) {
     (device, client)
 }
 
+unsafe extern "system" fn removed_device(
+    _handle: HANDLE,
+    _code: u32,
+    _input: *const c_void,
+    _input_size: u32,
+    _output: *mut c_void,
+    _output_size: u32,
+    _returned: *mut u32,
+    _overlapped: *mut OVERLAPPED,
+) -> i32 {
+    unsafe { SetLastError(windows_sys::Win32::Foundation::ERROR_DEVICE_NOT_CONNECTED) };
+    0
+}
+
+#[test]
+fn immediate_input_submission_failure_preserves_device_removal_for_reconnect() {
+    let (device, _client) = connected_pipe("removed-device");
+    let error = PendingRead::begin_using(device, 1, 4096, removed_device)
+        .err()
+        .unwrap();
+    assert!(crate::mux::is_device_removal(&error));
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().raw_os_error(),
+        Some(1167)
+    );
+}
+
 #[test]
 fn input_submission_outlives_service_workers_without_cancelling_or_losing_data() {
     use windows_sys::Win32::Storage::FileSystem::WriteFile;

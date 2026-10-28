@@ -232,40 +232,58 @@ fn throttled_background_paints_do_not_delay_input_or_drop_worker_updates() {
 }
 
 fn worker_line(event: progress::Event) -> String {
-    let mut line = Vec::new();
-    event.write_to(&mut line).unwrap();
-    String::from_utf8(line).unwrap().trim_end().to_owned()
+    format!("{event:?}")
 }
 
 fn send_worker(app: &mut App, event: progress::Event) {
-    app.tx.send(Event::Worker(7, Output::State(event))).unwrap();
+    if let progress::Event::Log(record) = event {
+        let job = app.job.as_ref().unwrap();
+        let mut journal = job.journal.lock().unwrap();
+        let record = journal.write(record);
+        journal.push(record);
+        if let Some(error) = journal.flush() {
+            journal.push(Record::new(
+                Level::Warning,
+                "journal",
+                format!("Disk journal incomplete: {error}"),
+            ));
+        }
+    } else {
+        app.tx.send(Event::Worker(7, Output::State(event))).unwrap();
+    }
     app.poll(&egui::Context::default());
 }
 
+fn record_completion(app: &mut App, success: bool) {
+    let job = app.job.as_ref().unwrap();
+    let notice = job.completion_notice(success, app.windows_reboot_required);
+    let record = worker::completion_record(&notice, job.cancelled, job.started);
+    send_worker(app, progress::Event::Log(record));
+}
+
 #[test]
-fn a_log_burst_leaves_time_for_rendering_without_losing_records() {
+fn a_state_burst_leaves_time_for_rendering_without_losing_events() {
     let mut app = english_app();
     app.job = Some(job(Action::Doctor));
     for index in 0..600 {
         app.tx
             .send(Event::Worker(
                 7,
-                Output::State(progress::Event::Log(Record::new(
-                    Level::Warning,
-                    "test",
-                    format!("line {index}"),
-                ))),
+                Output::State(progress::Event::Checkpoint {
+                    name: format!("stage_{index}"),
+                    complete: false,
+                }),
             ))
             .unwrap();
     }
     let ctx = egui::Context::default();
     app.poll(&ctx);
-    assert_eq!(app.logs.len(), 256);
+    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: stage 255");
     app.poll(&ctx);
     app.poll(&ctx);
-    assert_eq!(app.logs.len(), 600);
-    assert_eq!(app.logs.back().unwrap().message, "line 599");
+    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: stage 599");
 }
+
 fn device(ecid: u64, mode: Mode) -> DeviceInfo {
     DeviceInfo {
         ecid,
@@ -322,6 +340,56 @@ fn native_restore_options_preserve_authorization_and_transcript() {
         Setup::default().validate(action).unwrap();
     }
     assert!(Setup::default().validate(Action::Download).is_err());
+}
+
+#[test]
+fn selected_release_is_carried_into_automatic_restore_but_not_local_restore() {
+    let file = tempfile::Builder::new().suffix(".ipsw").tempfile().unwrap();
+    let release = selected_release();
+    let mut setup = Setup {
+        ecid: "2a".into(),
+        release: Some(release.clone()),
+        ipsw: file.path().display().to_string(),
+        ..Setup::default()
+    };
+    assert_eq!(setup.restore_options(None).unwrap().release, Some(release));
+    setup.automatic = false;
+    assert!(setup.restore_options(None).unwrap().release.is_none());
+}
+
+#[test]
+fn completion_waits_for_pending_logs_without_blocking_the_gui() {
+    let mut app = english_app();
+    let operation = job(Action::Doctor);
+    let journal = operation.journal.clone();
+    app.job = Some(operation);
+    {
+        let mut journal = journal.lock().unwrap();
+        let record = journal.write(Record::new(Level::Error, "test", "last operation error"));
+        journal.push(record);
+    }
+    app.tx
+        .send(Event::Worker(7, Output::Finished(false)))
+        .unwrap();
+    let (ready, locked) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _locked = journal.lock().unwrap();
+        ready.send(()).unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(2));
+    });
+    locked.recv().unwrap();
+    app.poll(&egui::Context::default());
+    let still_running = app.job.is_some();
+    let _ = release.send(());
+    holder.join().unwrap();
+    assert!(
+        still_running,
+        "completion must wait until the journal has been drained"
+    );
+    app.poll(&egui::Context::default());
+    assert!(app.job.is_none());
+    assert!(app.journal_text(true).contains("last operation error"));
 }
 
 #[test]
@@ -508,7 +576,7 @@ fn structured_journal_filters_details_and_saves_each_record_once() {
     assert_eq!(saved.lines().count(), 5);
     assert!(saved.contains("TRACE"));
     assert!(saved.contains("protocol details"));
-    assert!(!saved.contains(progress::EVENT_PREFIX));
+    assert!(!saved.contains("ZALIVKA_EVENT "));
 }
 
 #[test]
@@ -528,13 +596,14 @@ fn failed_journal_writes_keep_worker_state_and_report_partial_logging() {
     assert!(app.journal_open);
     assert!(app.notice.as_ref().unwrap().title.contains("incomplete"));
     assert!(app.logs[0].message.contains("original record"));
-    assert_eq!(app.logs[0].level, Level::Warning);
+    assert!(app.logs.iter().any(|record| record.level == Level::Warning
+        && record.message.contains("Disk journal incomplete")));
     assert!(!app.job.as_ref().unwrap().can_stop());
     send_worker(
         &mut app,
         progress::Event::Log(Record::new(Level::Info, "test", "next record")),
     );
-    assert_eq!(app.logs[1].message, "next record");
+    assert_eq!(app.logs.back().unwrap().message, "next record");
     send_worker(&mut app, progress::Event::RestoreCompleted);
     assert!(!app.job.as_ref().unwrap().can_stop());
     for _ in 0..2 {
@@ -546,7 +615,7 @@ fn failed_journal_writes_keep_worker_state_and_report_partial_logging() {
     let notice = app.notice.as_ref().unwrap();
     assert_eq!(notice.title, Action::Restore.completed_title());
     assert_eq!(notice.tone, Tone::Neutral);
-    assert!(notice.detail.contains("Disk journal incomplete"));
+    assert!(notice.journal_error.is_some());
     assert!(notice.expires_at.is_none());
     assert!(std::fs::read(log.path()).unwrap().is_empty());
 }
@@ -560,6 +629,7 @@ fn a_failure_writing_the_final_record_cannot_report_a_complete_journal() {
     let mut app = english_app();
     app.log_path = Some(log.path().into());
     app.job = Some(operation);
+    record_completion(&mut app, true);
     for _ in 0..2 {
         app.tx
             .send(Event::Worker(7, Output::Finished(true)))
@@ -572,7 +642,7 @@ fn a_failure_writing_the_final_record_cannot_report_a_complete_journal() {
     let notice = app.notice.as_ref().unwrap();
     assert_eq!(notice.title, Action::Verify.completed_title());
     assert_eq!(notice.tone, Tone::Neutral);
-    assert!(notice.detail.contains("Disk journal incomplete"));
+    assert!(notice.journal_error.is_some());
     assert!(notice.expires_at.is_none());
 }
 
@@ -682,7 +752,7 @@ fn gui_verifies_an_ipsw_directly_and_keeps_trace_hidden_by_default() {
     let saved = std::fs::read_to_string(&path).unwrap();
     assert!(saved.contains("TRACE"));
     assert!(saved.contains("IPSW verified"));
-    assert!(!saved.contains(progress::EVENT_PREFIX));
+    assert!(!saved.contains("ZALIVKA_EVENT "));
     std::fs::remove_file(path).unwrap();
 }
 
@@ -783,6 +853,7 @@ fn provisioning_warning_survives_completion_and_journal_eviction() {
             "Operation stopped"
         );
         job.cancelled = false;
+        record_completion(&mut app, true);
         app.tx
             .send(Event::Worker(7, Output::Finished(true)))
             .unwrap();
@@ -812,6 +883,7 @@ fn completion_records_label_duration_without_adding_it_to_notifications() {
         operation.started = Instant::now() - Duration::from_secs(1);
         let mut app = english_app();
         app.job = Some(operation);
+        record_completion(&mut app, true);
         for _ in 0..2 {
             app.tx
                 .send(Event::Worker(7, Output::Finished(true)))
@@ -935,17 +1007,10 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
     assert_eq!(app.job.as_ref().unwrap().overall_fraction, None);
     send_worker(&mut app, progress::Event::RestoreCompleted);
     let line = worker_line(progress::Event::Transfer(update));
-    app.tx
-        .send(Event::Worker(
-            7,
-            Output::State(progress::Event::Log(Record::new(
-                Level::Info,
-                "test",
-                line.clone(),
-            ))),
-        ))
-        .unwrap();
-    app.poll(&egui::Context::default());
+    send_worker(
+        &mut app,
+        progress::Event::Log(Record::new(Level::Info, "test", line.clone())),
+    );
     assert!(app.job.as_ref().unwrap().transfers.is_empty());
     assert!(!app.job.as_ref().unwrap().can_stop());
     assert_eq!(app.job.as_ref().unwrap().phase, "Restore complete");
@@ -1275,7 +1340,7 @@ fn overall_progress_uses_completed_weight_units_and_apples_integer_rounding() {
 
 #[test]
 fn overall_progress_replays_real_mac_messages_without_inventing_missing_operations() {
-    let traces: std::collections::BTreeMap<String, Vec<progress::Event>> =
+    let traces: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
         serde_json::from_str(include_str!("../fixtures/restored-progress-26A434.json")).unwrap();
     for (name, action, expected) in [
         ("erase", Action::Restore, 0.99),
@@ -1286,7 +1351,18 @@ fn overall_progress_replays_real_mac_messages_without_inventing_missing_operatio
         let mut app = english_app();
         app.job = Some(job(action));
         for event in &traces[name] {
-            send_worker(&mut app, event.clone());
+            let decoded = match event["event"].as_str().unwrap() {
+                "operation_weights" => progress::Event::OperationWeights {
+                    weights: serde_json::from_value(event["weights"].clone()).unwrap(),
+                    progresses: vec![],
+                },
+                "operation_progress" => progress::Event::OperationProgress {
+                    operation: event["operation"].as_u64().unwrap(),
+                    progress: event["progress"].as_i64().unwrap(),
+                },
+                name => panic!("unexpected fixture event {name}"),
+            };
+            send_worker(&mut app, decoded);
         }
         let job = app.job.as_ref().unwrap();
         assert_eq!(job.overall_fraction, Some(expected), "{name}");
@@ -1634,6 +1710,7 @@ fn notifications_keep_content_in_place_and_their_actions_work_in_small_windows()
                 app.notice = Some(Notice {
                     title: "Notice".into(),
                     detail: "Message details. ".repeat(50),
+                    journal_error: None,
                     tone,
                     expires_at: None,
                 });

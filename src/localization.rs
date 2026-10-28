@@ -24,7 +24,6 @@ struct Pack {
 
 struct Language {
     pack: Pack,
-    templates: Vec<Template>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,15 +32,6 @@ enum Part {
     Field(String),
 }
 
-struct Template {
-    source: Vec<Part>,
-    translated: Vec<Part>,
-    specificity: usize,
-}
-
-// Text is formatted by Rust before it reaches the UI. Matching the English
-// template keeps shared operation names, progress and notices in English until
-// rendering, so changing UI language never changes their diagnostic records.
 fn parts(text: &str) -> Result<Vec<Part>> {
     let mut result = Vec::new();
     let mut rest = text;
@@ -101,100 +91,26 @@ impl Language {
                 && !pack.name.chars().any(char::is_control),
             "invalid language name"
         );
-        let mut templates = Vec::new();
+        // Older packs may contain retired diagnostic keys; keep their UI translations.
+        pack.messages
+            .retain(|source, _| english.messages.contains_key(source));
         for (source, translated) in &pack.messages {
-            ensure!(
-                english.messages.contains_key(source),
-                "unknown translation key: {source}"
-            );
             let source_parts = parts(source)?;
             let translated_parts = parts(translated)?;
             ensure!(
                 fields(&source_parts) == fields(&translated_parts),
                 "translation placeholders differ: {source}"
             );
-            let specificity = source_parts
-                .iter()
-                .filter_map(|part| match part {
-                    Part::Text(text) => Some(text.len()),
-                    _ => None,
-                })
-                .sum();
-            if !fields(&source_parts).is_empty()
-                && specificity != 0
-                && !source_parts
-                    .windows(2)
-                    .any(|pair| matches!(pair, [Part::Field(_), Part::Field(_)]))
-            {
-                templates.push(Template {
-                    source: source_parts,
-                    translated: translated_parts,
-                    specificity,
-                });
-            }
         }
-        templates.sort_by_key(|template| std::cmp::Reverse(template.specificity));
-        Ok(Self { pack, templates })
+        Ok(Self { pack })
     }
 
-    fn text(&self, message: &str, depth: usize) -> String {
-        if let Some(translated) = self.pack.messages.get(message) {
-            return translated.clone();
-        }
-        if self.pack.locale == "en" || depth >= 4 {
-            return message.into();
-        }
-        for template in &self.templates {
-            if let Some(arguments) = template.capture(message) {
-                let mut translated = String::new();
-                for part in &template.translated {
-                    match part {
-                        Part::Text(text) => translated.push_str(text),
-                        Part::Field(name) => {
-                            let value = arguments[name.as_str()];
-                            // File names and endpoint/account identifiers are data.
-                            if matches!(
-                                name.as_str(),
-                                "name" | "path" | "host" | "port" | "account" | "domain"
-                            ) {
-                                translated.push_str(value);
-                            } else {
-                                translated.push_str(&self.text(value, depth + 1));
-                            }
-                        }
-                    }
-                }
-                return translated;
-            }
-        }
-        message.into()
-    }
-}
-
-impl Template {
-    fn capture<'a>(&self, message: &'a str) -> Option<BTreeMap<&str, &'a str>> {
-        let mut rest = message;
-        let mut arguments = BTreeMap::new();
-        for (index, part) in self.source.iter().enumerate() {
-            match part {
-                Part::Text(text) => rest = rest.strip_prefix(text)?,
-                Part::Field(name) => {
-                    let end = match self.source.get(index + 1) {
-                        Some(Part::Text(text)) => rest.find(text)?,
-                        None => rest.len(),
-                        _ => return None,
-                    };
-                    let value = &rest[..end];
-                    if let Some(previous) = arguments.insert(name.as_str(), value)
-                        && previous != value
-                    {
-                        return None;
-                    }
-                    rest = &rest[end..];
-                }
-            }
-        }
-        rest.is_empty().then_some(arguments)
+    fn text(&self, message: &str) -> String {
+        self.pack
+            .messages
+            .get(message)
+            .cloned()
+            .unwrap_or_else(|| message.into())
     }
 }
 
@@ -342,8 +258,39 @@ pub fn text(message: impl AsRef<str>) -> String {
         active
             .borrow()
             .as_ref()
-            .map_or_else(|| message.into(), |language| language.text(message, 0))
+            .map_or_else(|| message.into(), |language| language.text(message))
     })
+}
+
+/// Translate a known template before inserting already formatted, opaque values.
+pub fn format(message: &str, values: &[&str]) -> String {
+    let source = parts(message).expect("valid source translation template");
+    let names: Vec<_> = source
+        .iter()
+        .filter_map(|part| match part {
+            Part::Field(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let translated = text(message);
+    let parts = parts(&translated).expect("validated translation template");
+    let mut result = String::new();
+    for part in parts {
+        match part {
+            Part::Text(text) => result.push_str(&text),
+            Part::Field(name) => {
+                let Some(value) = names
+                    .iter()
+                    .position(|candidate| *candidate == name)
+                    .and_then(|index| values.get(index))
+                else {
+                    return message.into();
+                };
+                result.push_str(value);
+            }
+        }
+    }
+    result
 }
 
 fn normalize(locale: &str) -> String {
@@ -363,17 +310,7 @@ fn preference_file() -> std::io::Result<PathBuf> {
 }
 
 fn write_preference(path: &Path, preference: &str) -> Result<()> {
-    use std::io::Write;
-    let directory = path
-        .parent()
-        .context("language preference has no parent directory")?;
-    std::fs::create_dir_all(directory)?;
-    let mut saved = tempfile::NamedTempFile::new_in(directory)?;
-    saved.write_all(preference.as_bytes())?;
-    saved
-        .persist(path)
-        .context("could not save language preference")?;
-    Ok(())
+    crate::storage::write_atomic(path, preference.as_bytes())
 }
 
 #[cfg(windows)]

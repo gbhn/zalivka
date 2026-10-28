@@ -1,5 +1,5 @@
 //! One-way UTF-8 log forwarding from a UAC helper to its original caller.
-use crate::{logging::Record, progress::Event};
+use crate::logging::Record;
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::File,
@@ -82,11 +82,9 @@ impl LogPipe {
                 ensure!(line.len() <= 65536, "UAC log record too long");
                 let line =
                     std::str::from_utf8(&line).context("UAC journal contains invalid UTF-8")?;
-                // Only log records are accepted; this channel cannot signal
-                // restore completion or change any other worker state.
-                let Some(Event::Log(record)) = Event::parse(line.trim_end()) else {
-                    anyhow::bail!("Invalid UAC log record");
-                };
+                // Only records are accepted; helper output cannot change worker state.
+                let record =
+                    Record::parse_json(line.trim_end()).context("Invalid UAC log record")?;
                 self.received = true;
                 publish(record);
             }

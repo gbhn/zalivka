@@ -1,6 +1,6 @@
 //! Shared GUI widgets and display formatting.
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
-use zalivka::localization::text as tr;
+use zalivka::localization::{format as trf, text as tr};
 
 pub(super) fn caption(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
     let text: String = text.into();
@@ -78,7 +78,7 @@ pub(super) fn progress_bar(ui: &mut egui::Ui, fraction: Option<f32>) {
     ui.add(bar);
     if let Some(value) = fraction {
         ui.label(
-            RichText::new(tr(format!("{:.0}%", value * 100.0)))
+            RichText::new(trf("{:.0}%", &[&format!("{:.0}", value * 100.0)]))
                 .small()
                 .strong(),
         );
@@ -111,7 +111,29 @@ pub(super) fn laptop(ui: &mut egui::Ui, connected: bool) {
         Stroke::new(2.0_f32, color),
     );
 }
-pub(super) use zalivka::progress::human_bytes;
+pub(super) fn human_bytes(bytes: u64) -> String {
+    let value = zalivka::progress::human_bytes(bytes);
+    let (number, unit) = value.split_once(' ').unwrap();
+    let template = match unit {
+        "GiB" => "{:.2} GiB",
+        "MiB" => "{:.1} MiB",
+        "KiB" => "{:.1} KiB",
+        _ => "{bytes} B",
+    };
+    trf(template, &[number])
+}
+
+pub(super) fn transfer_stage(stage: &str) -> String {
+    for (prefix, template) in [
+        ("Verifying ", "Verifying {name}"),
+        ("Transferring ", "Transferring {name}"),
+    ] {
+        if let Some(name) = stage.strip_prefix(prefix) {
+            return trf(template, &[name]);
+        }
+    }
+    tr(stage)
+}
 pub(super) fn elapsed_text(seconds: u64) -> String {
     format!(
         "{:02}:{:02}:{:02}",

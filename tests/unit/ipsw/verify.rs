@@ -168,3 +168,52 @@ fn truncated_entries_and_read_failures_keep_the_entry_name_and_io_cause() {
         io::ErrorKind::PermissionDenied
     );
 }
+
+#[test]
+fn streamed_verification_matches_full_verification_for_nested_late_ftab() {
+    let payload = vec![0x35; 1024];
+    let mut header = [0; 48];
+    header[36..40].copy_from_slice(b"ftab");
+    let inner = Ftab {
+        header,
+        entries: vec![(*b"rkos", payload.clone(), 0)],
+    }
+    .encode();
+    let bytes = Ftab {
+        header,
+        entries: vec![
+            (*b"PAD0", vec![7; 3 * 1024 * 1024], 0),
+            (*b"FIRM", inner.clone(), 0),
+        ],
+    }
+    .encode();
+    let offset = 84 + 3 * 1024 * 1024;
+    let mut uarp = vec![0; offset + inner.len()];
+    uarp[..4].copy_from_slice(&3u32.to_be_bytes());
+    uarp[4..8].copy_from_slice(&44u32.to_be_bytes());
+    uarp[36..40].copy_from_slice(&44u32.to_be_bytes());
+    uarp[40..44].copy_from_slice(&40u32.to_be_bytes());
+    uarp[44..48].copy_from_slice(&40u32.to_be_bytes());
+    uarp[76..80].copy_from_slice(&(offset as u32).to_be_bytes());
+    uarp[80..84].copy_from_slice(&(inner.len() as u32).to_be_bytes());
+    uarp[offset..].copy_from_slice(&inner);
+    for bytes in [bytes, uarp] {
+        let expected = Sha256::digest(&payload).to_vec();
+        let full = DigestInput::variants(&bytes, bytes.len() as u64, None).unwrap();
+        verify_component_digest(full, |input| input.matches(&bytes, &expected)).unwrap();
+        let requirements = EntryDigests {
+            components: HashSet::from([ComponentDigest {
+                tag: None,
+                expected,
+            }]),
+        };
+        requirements
+            .verify(
+                &mut bytes.as_slice(),
+                "valid-nested.ftab",
+                bytes.len() as u64,
+                &mut vec![0; 2 * 1024 * 1024],
+            )
+            .unwrap();
+    }
+}

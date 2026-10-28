@@ -3,10 +3,7 @@ use crate::wire;
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use sha1::{Digest, Sha1};
-use std::{
-    io::{BufReader, Read, Seek, SeekFrom, Write},
-    time::Instant,
-};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 
 const CHUNK: usize = 131072;
 const BATCH_CHUNKS: usize = 4;
@@ -79,7 +76,6 @@ pub fn transfer(
     let mut buf = vec![0; BATCH_CHUNKS * stride];
     let mut total = 0;
     let mut progress = crate::progress::Progress::new("ASR filesystem transfer", Some(length), 0);
-    let mut profile = crate::progress::TransferProfile::new("ASR");
     while total < length {
         let mut payload = 0;
         let mut sent = 0;
@@ -88,35 +84,27 @@ pub fn transfer(
             if n == 0 {
                 break;
             }
-            let started = Instant::now();
-            let read = image.read_exact(&mut block[..n]);
-            profile.read = Some(profile.read.unwrap_or_default() + started.elapsed());
-            read.context("reading filesystem image")?;
+
+            image
+                .read_exact(&mut block[..n])
+                .context("reading filesystem image")?;
             if checksum {
-                let started = Instant::now();
                 let digest = Sha1::digest(&block[..n]);
                 block[n..n + 20].copy_from_slice(&digest);
-                profile.prepare += started.elapsed();
                 sent += n + 20;
             } else {
                 sent += n;
             }
             payload += n as u64;
         }
-        let started = Instant::now();
-        let written = stream.get_mut().write_all(&buf[..sent]);
-        profile.write += started.elapsed();
-        written?;
+
+        stream.get_mut().write_all(&buf[..sent])?;
         total += payload;
-        profile.bytes = total;
         progress.advance(payload);
     }
-    let started = Instant::now();
-    let flushed = stream.get_mut().flush();
-    profile.write += started.elapsed();
-    flushed?;
+
+    stream.get_mut().flush()?;
     progress.finish();
-    profile.finished = true;
     Ok(())
 }
 

@@ -16,17 +16,7 @@ pub(super) fn serve_asr(ipsw: &mut Ipsw, id: &Identity, stream: &mut MuxStream) 
     if let Some(mut image) = ipsw.stored_image(path)? {
         asr::transfer(stream, &mut image, length)
     } else {
-        crate::log!(
-            Info,
-            "filesystem",
-            "Extracting filesystem to a temporary file ({length} bytes)"
-        );
-        crate::storage::require(&std::env::temp_dir(), length)?;
-        let mut image = tempfile::tempfile()?;
-        ensure!(
-            ipsw.stream(path, &mut image)? == length,
-            "truncated filesystem"
-        );
+        let mut image = ipsw.prepared_image(path)?;
         asr::transfer(stream, &mut image, length)
     }
 }

@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn stored_filesystem_crc_is_checked_before_restore_and_after_validation_seeks() {
+    let file = fixture(None, false);
+    let mut bytes = std::fs::read(file.path()).unwrap();
+    let data_start = {
+        let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        zip.by_name("Firmware/OS").unwrap().data_start().unwrap() as usize
+    };
+    bytes[data_start + 20] ^= 1;
+    std::fs::write(file.path(), bytes).unwrap();
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    assert!(ipsw.verify_filesystem(&identity()).is_err());
+    let mut image = ipsw.stored_image("Firmware/OS").unwrap().unwrap();
+    image.seek(SeekFrom::Start(10)).unwrap();
+    image.read_exact(&mut [0; 4]).unwrap();
+    image.seek(SeekFrom::Start(0)).unwrap();
+    assert_eq!(
+        image.read_to_end(&mut Vec::new()).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}
+
+#[test]
+fn deeply_nested_manifest_is_an_error_instead_of_a_process_abort() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
+    zip.start_file(
+        "BuildManifest.plist",
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+    )
+    .unwrap();
+    write!(
+        zip,
+        "<plist>{}<string>x</string>{}</plist>",
+        "<array>".repeat(4096),
+        "</array>".repeat(4096)
+    )
+    .unwrap();
+    zip.finish().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
+        .arg("inspect")
+        .arg(file.path())
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("nested too deeply"));
+}
+
+#[test]
 fn ipsw_stream_preserves_stored_and_deflated_entries_across_block_boundaries() {
     let image: Vec<_> = (0..3 * 256 * 1024 + 123).map(|i| (i % 251) as u8).collect();
     let files = [

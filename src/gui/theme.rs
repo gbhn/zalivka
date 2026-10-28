@@ -159,25 +159,12 @@ pub(super) fn save_preference(preference: egui::ThemePreference) -> Result<()> {
 }
 
 fn write_preference(path: &Path, preference: egui::ThemePreference) -> Result<()> {
-    use std::io::Write;
-    let directory = path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(directory)?;
-    let mut saved = tempfile::NamedTempFile::new_in(directory)?;
-    saved
-        .write_all(
-            match preference {
-                egui::ThemePreference::Dark => "dark",
-                egui::ThemePreference::Light => "light",
-                egui::ThemePreference::System => "system",
-            }
-            .as_bytes(),
-        )
-        .context("Could not save the theme")?;
-    saved.persist(path).context("Could not save the theme")?;
-    Ok(())
+    let value = match preference {
+        egui::ThemePreference::Dark => "dark",
+        egui::ThemePreference::Light => "light",
+        egui::ThemePreference::System => "system",
+    };
+    zalivka::storage::write_atomic(path, value.as_bytes()).context("Could not save the theme")
 }
 
 #[cfg(test)]

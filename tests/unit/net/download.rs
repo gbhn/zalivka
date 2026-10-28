@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn verified_partial_is_published_without_replacing_another_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("restore.ipsw");
+    let partial = directory.path().join("restore.ipsw.part");
+    std::fs::write(&partial, b"firmware").unwrap();
+    download_from(&destination, &Sha256::digest(b"firmware"), 0, |_| {
+        panic!("verified partial needs no network")
+    })
+    .unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), b"firmware");
+    assert!(!partial.exists());
+    std::fs::remove_file(&destination).unwrap();
+    let result = download_from(&destination, &Sha256::digest(b"firmware"), 0, |_| {
+        std::fs::write(&destination, b"other file")?;
+        Ok(Response::builder()
+            .status(200)
+            .header("Content-Length", "8")
+            .body(ureq::Body::builder().data(b"firmware".to_vec()))?)
+    });
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&destination).unwrap(), b"other file");
+    assert_eq!(std::fs::read(&partial).unwrap(), b"firmware");
+}
+
+#[test]
 fn interrupted_body_read_retries_without_an_http_retry_or_losing_bytes() {
     struct InterruptedOnce {
         interrupted: bool,

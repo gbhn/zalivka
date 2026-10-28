@@ -8,7 +8,6 @@ use anyhow::{Context, Result, ensure};
 use plist::Value;
 use std::{
     collections::BTreeMap,
-    io::Cursor,
     path::{Path, PathBuf},
 };
 
@@ -137,18 +136,44 @@ pub fn resolve(catalog: &Value, device: &DeviceInfo) -> Result<Release> {
 }
 
 pub fn latest(device: &DeviceInfo) -> Result<Release> {
-    let mut catalogs = Vec::new();
-    for url in [MACOS_CATALOG, BRIDGEOS_CATALOG] {
+    latest_with(device, |url| {
         let mut response = net::get(url).context("downloading Apple IPSW catalog")?;
         let bytes = crate::storage::read_limited(
             response.body_mut().as_reader(),
             MAX_CATALOG,
             "Apple IPSW catalog exceeds size limit",
         )?;
-        catalogs
-            .push(Value::from_reader(Cursor::new(bytes)).context("decoding Apple IPSW catalog")?);
+        wire::decode_plist(&bytes).context("decoding Apple IPSW catalog")
+    })
+}
+
+fn latest_with(
+    device: &DeviceInfo,
+    mut load: impl FnMut(&str) -> Result<Value>,
+) -> Result<Release> {
+    let mut catalogs = Vec::new();
+    let mut errors = Vec::new();
+    for url in [MACOS_CATALOG, BRIDGEOS_CATALOG] {
+        let loaded = load(url).and_then(|catalog| {
+            if product_type(&catalog, device)?.is_some() {
+                resolve(&catalog, device)?;
+            }
+            Ok(catalog)
+        });
+        match loaded {
+            Ok(catalog) => catalogs.push(catalog),
+            Err(error) => {
+                crate::log!(Warning, "firmware", "Catalog {url}: {error:#}");
+                errors.push(format!("{url}: {error:#}"));
+            }
+        }
     }
-    resolve_catalogs(&catalogs, device)
+    let result = resolve_catalogs(&catalogs, device);
+    if errors.is_empty() {
+        result
+    } else {
+        result.with_context(|| format!("unavailable Apple catalogs: {}", errors.join("; ")))
+    }
 }
 
 pub fn cache_directory() -> Result<PathBuf> {
@@ -160,6 +185,7 @@ pub fn obtain(
     directory: &Path,
     identity: Option<usize>,
     behavior: Behavior,
+    release: Option<&Release>,
 ) -> Result<PathBuf> {
     crate::log!(
         Info,
@@ -168,7 +194,7 @@ pub fn obtain(
         device.chip_id,
         device.board_id
     );
-    let release = latest(device)?;
+    let release = release.cloned().map_or_else(|| latest(device), Ok)?;
     crate::log!(
         Info,
         "firmware",
@@ -229,3 +255,7 @@ pub fn ensure_cached(
     );
     Ok(path)
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/catalog.rs"]
+mod tests;

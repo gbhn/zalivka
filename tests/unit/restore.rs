@@ -38,6 +38,184 @@ use std::{
 };
 
 #[test]
+fn late_aea_key_requests_resume_a_blocked_image_without_replaying_file_bytes() {
+    struct LateKeyUsb {
+        input: VecDeque<Vec<u8>>,
+        output: Arc<Mutex<Vec<Vec<u8>>>>,
+        request: Option<Vec<u8>>,
+        remote_seq: u32,
+        host_ack: u32,
+        bytes: usize,
+        key_replied: bool,
+    }
+    impl PacketTransport for LateKeyUsb {
+        fn write_packet(&mut self, bytes: &[u8]) -> Result<()> {
+            self.output.lock().unwrap().push(bytes.to_vec());
+            if u32::from_be_bytes(bytes[..4].try_into()?) != 6 {
+                return Ok(());
+            }
+            let packet = mux::decode_packet(bytes, 2)?;
+            let header = packet.payload;
+            let local = u16::from_be_bytes(header[..2].try_into()?);
+            let port = u16::from_be_bytes(header[2..4].try_into()?);
+            let seq = u32::from_be_bytes(header[4..8].try_into()?);
+            if header[13] == 2 {
+                let mut reply = tcp_on(port, local, 0, 0x12, &[]);
+                reply[30..32].copy_from_slice(&256u16.to_be_bytes());
+                self.input.push_back(reply);
+            } else if header.len() > 20 && port == 1234 {
+                self.bytes += header.len() - 20;
+                self.host_ack = seq.wrapping_add((header.len() - 20) as u32);
+                if self.bytes > 10000
+                    && let Some(request) = self.request.take()
+                {
+                    let mut reply = tcp_on(port, local, 1, 0x10, &request);
+                    self.remote_seq += request.len() as u32;
+                    reply[24..28].copy_from_slice(&self.host_ack.to_be_bytes());
+                    reply[30..32].copy_from_slice(&0u16.to_be_bytes());
+                    self.input.push_back(reply);
+                } else if self.key_replied {
+                    let mut reply = tcp_on(port, local, self.remote_seq, 0x10, &[]);
+                    reply[24..28].copy_from_slice(&self.host_ack.to_be_bytes());
+                    self.input.push_back(reply);
+                }
+            } else if header.len() > 20 && port == 23456 {
+                let response = wire::receive(&mut &header[20..])?;
+                ensure!(
+                    wire::string(&response, &["KeySource"])? == "LocalUnwrapped",
+                    "wrong key source"
+                );
+                self.key_replied = true;
+                let mut reply = tcp_on(1234, 1, self.remote_seq, 0x10, &[]);
+                reply[24..28].copy_from_slice(&self.host_ack.to_be_bytes());
+                self.input.push_back(reply);
+            }
+            Ok(())
+        }
+        fn read_packet(&mut self) -> Result<Vec<u8>> {
+            Ok(self.input.pop_front().unwrap_or_default())
+        }
+    }
+    let mut request = Vec::new();
+    wire::send(
+        &mut request,
+        &wire::dict([
+            ("MsgType", "AsyncDataRequestMsg".into()),
+            ("DataType", "StreamedImageDecryptionKey".into()),
+            ("DataPort", 23456u64.into()),
+            (
+                "Arguments",
+                wire::dict([
+                    ("ArchiveIdentifier", "image".into()),
+                    ("RequestMethod", "POST".into()),
+                ]),
+            ),
+        ]),
+    )
+    .unwrap();
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let session = Session::new(LateKeyUsb {
+        input: vec![version_packet()].into(),
+        output: output.clone(),
+        request: Some(request),
+        remote_seq: 1,
+        host_ack: 1,
+        bytes: 0,
+        key_replied: false,
+    })
+    .unwrap();
+    let worker_session = session.clone();
+    let (done, completed) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let result = (|| -> Result<()> {
+            let mut stream = worker_session.connect(1234)?;
+            let assets = net::AssetClient::default();
+            let mut writer =
+                FileDataWriter::new(&mut stream, &worker_session, &assets, "test", None);
+            writer.write_all(b"AE")?;
+            let (prefix, key) = public_fcs_fixture();
+            let crate::aea::Prefix::Public(fcs) = crate::aea::PublicFcs::from_prefix(&prefix)?
+            else {
+                panic!()
+            };
+            writer.prefix = ImagePrefix::Public {
+                fcs,
+                key: Some(key),
+            };
+            writer.write_all(&vec![7; 512 * 1024])?;
+            writer.finish()
+        })();
+        let _ = done.send(result);
+    });
+    let result = completed.recv_timeout(Duration::from_secs(5));
+    session.cancel();
+    worker.join().unwrap();
+    result
+        .expect("late key request stalled the image writer")
+        .unwrap();
+    verify_file_data(&output, &[b"AE".as_slice(), &vec![7; 512 * 1024]].concat());
+    let key = wire::receive(&mut bytes_on(&output, 23456).as_slice()).unwrap();
+    let (_, expected_key) = public_fcs_fixture();
+    assert_eq!(
+        wire::get(&key, &["KeyData"]).unwrap().as_data().unwrap(),
+        expected_key
+    );
+}
+
+#[test]
+fn inline_key_replies_follow_the_complete_pending_file_frame() {
+    let mut frame = Vec::new();
+    wire::send(
+        &mut frame,
+        &wire::dict([
+            ("DataType", "StreamedImageDecryptionKey".into()),
+            ("MsgType", "DataRequestMsg".into()),
+        ]),
+    )
+    .unwrap();
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let session = Session::new(Usb {
+        input: vec![version_packet(), tcp(0, 0x12, &[]), tcp(1, 0x10, &frame)].into(),
+        output: output.clone(),
+    })
+    .unwrap();
+    let mut stream = session.connect(1234).unwrap();
+    let mut data = Vec::new();
+    wire::send_binary(
+        &mut data,
+        &wire::dict([("FileData", Value::Data(vec![7; 123]))]),
+    )
+    .unwrap();
+    stream.write_all(&data[..17]).unwrap();
+    key_exchange(
+        &mut stream,
+        &session,
+        &mut 0,
+        |stream| {
+            stream.write_all(&data[17..])?;
+            Ok(())
+        },
+        |_| Ok(wire::dict([("KeyData", Value::Data(vec![1, 2, 3]))])),
+    )
+    .unwrap();
+    let mut replies = Cursor::new(bytes_on(&output, 1234));
+    assert_eq!(
+        wire::get(&wire::receive(&mut replies).unwrap(), &["FileData"])
+            .unwrap()
+            .as_data()
+            .unwrap(),
+        vec![7; 123]
+    );
+    assert_eq!(
+        wire::get(&wire::receive(&mut replies).unwrap(), &["KeyData"])
+            .unwrap()
+            .as_data()
+            .unwrap(),
+        [1, 2, 3]
+    );
+}
+
+#[test]
 fn transcript_write_or_flush_failure_does_not_block_final_status_acknowledgement() {
     struct BrokenLog {
         on_flush: bool,
@@ -1054,13 +1232,13 @@ fn file_data_coalesces_batch_tails_without_changing_frames_or_progress_total() {
     assert!(!writer.pending.is_empty());
     assert!(writer.pending.len() < FILE_DATA_BATCH);
     assert_eq!(
-        writer.profile.bytes + writer.pending_payload,
+        writer.progress.completed() + writer.pending_payload,
         image.len() as u64
     );
     assert!(writer.pending_payload <= writer.pending.len() as u64);
     writer.flush().unwrap();
     assert!(writer.pending.is_empty());
-    assert_eq!(writer.profile.bytes, image.len() as u64);
+    assert_eq!(writer.progress.completed(), image.len() as u64);
     writer.finish().unwrap();
     verify_file_data(&output, &image);
 
@@ -1141,7 +1319,7 @@ fn aea_key_request_flushes_retained_plist_tail_before_reading_request() {
             .contains("unexpected AEA data type StatusMsg")
     );
     assert!(writer.pending.is_empty());
-    assert_eq!(writer.profile.bytes, image.len() as u64 + 4);
+    assert_eq!(writer.progress.completed(), image.len() as u64 + 4);
     let mut expected = Vec::new();
     for block in image.chunks(8192).chain([b"tail".as_slice()]) {
         wire::send_binary(
@@ -1581,7 +1759,7 @@ fn aea_async_asset_replies_use_the_requested_ports_and_image_transfer_continues(
     )
     .unwrap();
     writer.prefix = ImagePrefix::Aea;
-    writer.profile.bytes = prefix.len() as u64;
+    writer.progress.advance(prefix.len() as u64);
     let responses = [
         wire::dict([
             ("ResponseStatus", 200u64.into()),
@@ -1597,6 +1775,7 @@ fn aea_async_asset_replies_use_the_requested_ports_and_image_transfer_continues(
         writer.stream,
         &session,
         &mut writer.key_requests,
+        |_| Ok(()),
         |request| {
             assert_eq!(
                 wire::string(request, &["DataType"])?,
@@ -1669,9 +1848,13 @@ fn aea_rejects_unrelated_or_invalid_async_requests_before_replying() {
         })
         .unwrap();
         let mut stream = session.connect(1234).unwrap();
-        let error = key_exchange(&mut stream, &session, &mut 0, |_| {
-            panic!("invalid request must not call the asset client")
-        })
+        let error = key_exchange(
+            &mut stream,
+            &session,
+            &mut 0,
+            |_| Ok(()),
+            |_| panic!("invalid request must not call the asset client"),
+        )
         .unwrap_err();
         let error = format!("{error:#}");
         assert!(
@@ -1716,11 +1899,17 @@ fn aea_handles_multiple_key_requests_and_rejects_unrelated_messages() {
         let session = Session::new(usb).unwrap();
         let mut stream = session.connect(1234).unwrap();
         let mut count = 0u64;
-        let result = key_exchange(&mut stream, &session, &mut 0, |request| {
-            assert_eq!(wire::number(wire::get(request, &["index"])?)?, count);
-            count += 1;
-            Ok(wire::dict([("ResponseStatus", 200u64.into())]))
-        });
+        let result = key_exchange(
+            &mut stream,
+            &session,
+            &mut 0,
+            |_| Ok(()),
+            |request| {
+                assert_eq!(wire::number(wire::get(request, &["index"])?)?, count);
+                count += 1;
+                Ok(wire::dict([("ResponseStatus", 200u64.into())]))
+            },
+        );
         if kind == "StatusMsg" {
             assert!(result.is_err());
             assert_eq!(count, 0);

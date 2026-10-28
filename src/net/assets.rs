@@ -31,8 +31,8 @@ impl AssetClient {
         let mut values = std::collections::HashMap::new();
         if let Some(path) = tokens {
             let data = read_auth_file(path)?;
-            let plist = Value::from_reader(std::io::Cursor::new(data))
-                .context("authorization tokens file is not a plist")?;
+            let plist =
+                wire::decode_plist(&data).context("authorization tokens file is not a plist")?;
             for (host, token) in wire::dictionary(&plist)? {
                 let host = host.to_ascii_lowercase();
                 validate_apple_url(&format!("https://{host}/"))?;

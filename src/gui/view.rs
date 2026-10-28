@@ -3,7 +3,7 @@ use super::widgets::{caption, pill, tint};
 use super::{App, Level, Notice, Picker, SCAN_INTERVAL, Tone, UI_REFRESH_INTERVAL};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::time::Instant;
-use zalivka::localization::text as tr;
+use zalivka::localization::{format as trf, text as tr};
 
 impl App {
     pub(super) fn header(&mut self, ui: &mut egui::Ui) {
@@ -190,14 +190,21 @@ impl App {
                             ui.add(
                                 egui::Label::new(RichText::new(tr(&notice.title)).strong()).wrap(),
                             );
-                            if !notice.detail.is_empty() {
+                            if !notice.detail.is_empty() || notice.journal_error.is_some() {
                                 egui::ScrollArea::vertical()
                                     .id_salt("notification_detail")
                                     .max_height((bounds.height() - 110.0).clamp(24.0, 140.0))
                                     .show(ui, |ui| {
                                         ui.add(
                                             egui::Label::new(
-                                                RichText::new(tr(&notice.detail))
+                                                RichText::new({
+                                                    let mut detail = tr(&notice.detail);
+                                                    if let Some(error) = &notice.journal_error {
+                                                        if !detail.is_empty() { detail.push(' '); }
+                                                        detail.push_str(&trf("Disk journal incomplete: {error}. Recent history is available in this window.", &[error]));
+                                                    }
+                                                    detail
+                                                })
                                                     .size(13.0)
                                                     .color(ui.visuals().weak_text_color()),
                                             )
@@ -254,7 +261,7 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add(
                             egui::Label::new(
-                                RichText::new(tr(format!("Zalivka {}", zalivka::VERSION)))
+                                RichText::new(trf("Zalivka {}", &[zalivka::VERSION]))
                                     .small()
                                     .color(ui.visuals().weak_text_color()),
                             )
@@ -344,6 +351,7 @@ impl eframe::App for App {
                 self.notice = Some(Notice {
                     title: "Operation still in progress".into(),
                     detail: "Wait for the operation to finish before closing this window.".into(),
+                    journal_error: None,
                     tone: Tone::Neutral,
                     expires_at: Some(Instant::now() + super::NOTICE_LIFETIME),
                 });

@@ -29,7 +29,7 @@ pub(crate) fn public_roots() -> ureq::tls::RootCerts {
 pub(crate) fn tss_agent() -> ureq::Agent {
     let root =
         ureq::tls::Certificate::from_der(include_bytes!("../certs/AppleIncRootCertificate.cer"));
-    let tss = agent_with_body_timeout(
+    let config = agent_config(
         Some(Duration::from_secs(120)),
         ureq::tls::RootCerts::new_with_certs(&[root]),
     );
@@ -42,7 +42,7 @@ pub(crate) fn tss_agent() -> ureq::Agent {
     #[cfg(not(windows))]
     let connector = crate::proxy::HttpConnector::new(proxy_config);
     let agent = ureq::Agent::with_parts(
-        tss.config().clone(),
+        config,
         connector,
         ureq::unversioned::resolver::DefaultResolver::default(),
     );
@@ -62,15 +62,7 @@ fn agent_with_body_timeout(
     body_timeout: Option<Duration>,
     roots: ureq::tls::RootCerts,
 ) -> ureq::Agent {
-    let config = ureq::Agent::config_builder()
-        .proxy(None)
-        .tls_config(tls_config(roots))
-        .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_recv_response(Some(Duration::from_secs(120)))
-        .timeout_recv_body(body_timeout)
-        .max_redirects(0)
-        .user_agent(concat!("zalivka/", env!("CARGO_PKG_VERSION")))
-        .build();
+    let config = agent_config(body_timeout, roots);
     let agent = ureq::Agent::with_parts(
         config.clone(),
         crate::proxy::HttpConnector::new(config),
@@ -79,6 +71,23 @@ fn agent_with_body_timeout(
     let cancellation = agent.clone();
     crate::progress::on_cancel(move || cancellation.shutdown());
     agent
+}
+
+fn agent_config(
+    body_timeout: Option<Duration>,
+    roots: ureq::tls::RootCerts,
+) -> ureq::config::Config {
+    ureq::Agent::config_builder()
+        .proxy(None)
+        .tls_config(tls_config(roots))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(120)))
+        .timeout_recv_body(body_timeout)
+        .timeout_per_read(Some(Duration::from_secs(120)))
+        .timeout_per_write(Some(Duration::from_secs(120)))
+        .max_redirects(0)
+        .user_agent(concat!("zalivka/", env!("CARGO_PKG_VERSION")))
+        .build()
 }
 
 /// Limit firmware/asset downloads to Apple's public HTTPS distribution hosts.

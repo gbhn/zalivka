@@ -2,6 +2,17 @@ use super::*;
 
 #[test]
 fn usb_removal_is_distinct_from_protocol_timeout_and_cancel_errors() {
+    #[cfg(windows)]
+    for code in [1167, 433, 55] {
+        assert!(mux::is_device_removal(
+            &anyhow::Error::from(std::io::Error::from_raw_os_error(code))
+                .context("Apple USB completion")
+        ));
+    }
+    #[cfg(windows)]
+    assert!(!mux::is_device_removal(
+        &std::io::Error::from_raw_os_error(995).into()
+    ));
     assert!(mux::is_device_removal(
         &anyhow::Error::new(nusb::transfer::TransferError::Disconnected).context("USB read")
     ));

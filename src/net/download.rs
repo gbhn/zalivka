@@ -88,26 +88,33 @@ fn retry_download(error: &anyhow::Error, attempts: &mut u8, maximum: u8) -> bool
 
 pub(super) fn retryable_download(error: &anyhow::Error) -> bool {
     error.chain().any(|e| {
-        e.downcast_ref::<ureq::Error>().is_some_and(|e| {
-            matches!(
-                e,
-                ureq::Error::Io(_)
-                    | ureq::Error::Timeout(_)
-                    | ureq::Error::ConnectionFailed
-                    | ureq::Error::HostNotFound
-                    | ureq::Error::Protocol(_)
-                    | ureq::Error::StatusCode(408 | 429 | 500 | 502 | 503 | 504)
-            )
-        }) || e.downcast_ref::<std::io::Error>().is_some_and(|e| {
-            matches!(
-                e.kind(),
-                std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::UnexpectedEof
-                    | std::io::ErrorKind::TimedOut
-            )
-        })
+        e.downcast_ref::<ureq::Error>()
+            .or_else(|| {
+                e.downcast_ref::<std::io::Error>()?
+                    .get_ref()?
+                    .downcast_ref::<ureq::Error>()
+            })
+            .is_some_and(|e| {
+                matches!(
+                    e,
+                    ureq::Error::Io(_)
+                        | ureq::Error::Timeout(_)
+                        | ureq::Error::ConnectionFailed
+                        | ureq::Error::HostNotFound
+                        | ureq::Error::Protocol(_)
+                        | ureq::Error::StatusCode(408 | 429 | 500 | 502 | 503 | 504)
+                )
+            })
+            || e.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::TimedOut
+                )
+            })
     })
 }
 
@@ -172,9 +179,14 @@ pub(super) fn download_from(
     }
     download.file.sync_all()?;
     crate::progress::check_cancelled()?;
-    // Hard-link publication fails if another process created the destination in the meantime.
-    std::fs::hard_link(&part, destination).context("publishing verified download")?;
-    std::fs::remove_file(part)?;
+    // Use a no-replace rename where supported (including Windows exFAT).
+    // Keep the partial available for retry if publication fails.
+    let mut partial = tempfile::TempPath::try_from_path(part)?;
+    partial.disable_cleanup(true);
+    partial
+        .persist_noclobber(destination)
+        .map_err(|error| error.error)
+        .context("publishing verified download")?;
     Ok(())
 }
 

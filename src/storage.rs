@@ -29,13 +29,14 @@ pub fn require(path: &Path, bytes: u64) -> Result<()> {
     Ok(())
 }
 
+fn absolute_env(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
 /// Root shared by firmware cache, diagnostic logs and USB driver backups.
 pub fn app_directory() -> Result<PathBuf> {
-    fn absolute_env(name: &str) -> Option<PathBuf> {
-        std::env::var_os(name)
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-    }
     let root = if cfg!(windows) {
         absolute_env("LOCALAPPDATA")
             .or_else(|| absolute_env("USERPROFILE").map(|path| path.join("AppData").join("Local")))
@@ -58,11 +59,6 @@ pub fn log_directory() -> Result<PathBuf> {
 }
 
 pub fn config_directory() -> Result<PathBuf> {
-    let absolute_env = |name| {
-        std::env::var_os(name)
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-    };
     let root = if cfg!(windows) {
         absolute_env("LOCALAPPDATA")
             .or_else(|| absolute_env("USERPROFILE").map(|path| path.join("AppData/Local")))
@@ -73,6 +69,20 @@ pub fn config_directory() -> Result<PathBuf> {
     Ok(root
         .context("could not locate the settings folder")?
         .join("zalivka"))
+}
+
+/// Replace a small settings file only after the complete new value is written.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let directory = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(directory)?;
+    let mut saved = tempfile::NamedTempFile::new_in(directory)?;
+    saved.write_all(bytes)?;
+    saved.persist(path).context("saving settings")?;
+    Ok(())
 }
 
 #[cfg(test)]

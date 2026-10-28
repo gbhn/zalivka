@@ -6,6 +6,28 @@ use std::io::{BufRead, Read, Write};
 
 pub const MAX_PLIST: usize = 64 * 1024 * 1024;
 
+/// Check collection depth before constructing a recursively owned Value.
+/// The plist event reader handles XML, binary and ASCII without a Value tree.
+pub(crate) fn decode_plist(bytes: &[u8]) -> Result<Value> {
+    use plist::stream::{Event as PlistEvent, Reader as PlistReader};
+    let mut depth = 0usize;
+    for event in PlistReader::new(std::io::Cursor::new(bytes)) {
+        match event? {
+            PlistEvent::StartArray(_) | PlistEvent::StartDictionary(_) => {
+                depth += 1;
+                ensure!(depth <= 128, "plist nested too deeply");
+            }
+            PlistEvent::EndCollection => {
+                depth = depth
+                    .checked_sub(1)
+                    .context("unbalanced plist collections")?;
+            }
+            _ => {}
+        }
+    }
+    Value::from_reader(std::io::Cursor::new(bytes)).context("decoding plist")
+}
+
 pub fn dict(items: impl IntoIterator<Item = (impl Into<String>, Value)>) -> Value {
     Value::Dictionary(items.into_iter().map(|(k, v)| (k.into(), v)).collect())
 }
@@ -236,7 +258,7 @@ pub(crate) fn receive_body(r: &mut impl Read, len: u32) -> Result<Value> {
     );
     let mut buf = vec![0; len];
     r.read_exact(&mut buf).context("reading plist body")?;
-    let value = Value::from_reader(std::io::Cursor::new(buf)).context("decoding plist")?;
+    let value = decode_plist(&buf)?;
     crate::log!(Trace, "plist", "RX frame={len} B");
     crate::logging::plist("plist", "RX", &value);
     Ok(value)

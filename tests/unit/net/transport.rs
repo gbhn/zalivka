@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn firmware_body_has_an_inactivity_timeout_and_retains_no_total_deadline() {
+    let client = agent_with_body_timeout(None, public_roots());
+    assert_eq!(
+        client.config().timeout_per_read(),
+        Some(Duration::from_secs(120))
+    );
+    assert_eq!(client.config().timeouts().recv_body, None);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        read_header(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx")
+            .unwrap();
+        let _ = stream.read(&mut [0]);
+    });
+    let request = Request::get(format!("http://{address}/firmware"))
+        .body(())
+        .unwrap();
+    let request = client
+        .configure_request(request)
+        .timeout_per_read(Some(Duration::from_millis(50)))
+        .build();
+    let mut response = client.run(request).unwrap();
+    let error = response
+        .body_mut()
+        .as_reader()
+        .read_to_end(&mut Vec::new())
+        .unwrap_err();
+    assert!(retryable_download(&error.into()));
+    drop(response);
+    client.shutdown();
+    server.join().unwrap();
+}
+
+#[test]
 fn native_cancellation_interrupts_a_stalled_http_body_without_killing_the_process() {
     use std::sync::mpsc;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

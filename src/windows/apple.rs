@@ -190,10 +190,9 @@ impl PendingRead {
         };
         if ok == 0 {
             let error = io::Error::last_os_error();
-            ensure!(
-                error.raw_os_error() == Some(ERROR_IO_PENDING as i32),
-                "Apple USB IN IOCTL {code:#x}: {error}"
-            );
+            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+                return Err(error).with_context(|| format!("Apple USB IN IOCTL {code:#x}"));
+            }
             read.pending = true;
         }
         Ok(read)

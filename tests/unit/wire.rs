@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn all_plist_formats_reject_excessive_depth_before_building_values() {
+    let xml = format!(
+        "<plist>{}<string>x</string>{}</plist>",
+        "<array>".repeat(4096),
+        "</array>".repeat(4096)
+    );
+    assert!(
+        decode_plist(xml.as_bytes())
+            .unwrap_err()
+            .to_string()
+            .contains("nested too deeply")
+    );
+    let mut framed = (xml.len() as u32).to_be_bytes().to_vec();
+    framed.extend_from_slice(xml.as_bytes());
+    assert!(receive(&mut framed.as_slice()).is_err());
+    let mut value = Value::String("x".into());
+    for _ in 0..130 {
+        value = Value::Array(vec![value]);
+    }
+    let mut binary = Vec::new();
+    value.to_writer_binary(&mut binary).unwrap();
+    assert!(
+        decode_plist(&binary)
+            .unwrap_err()
+            .to_string()
+            .contains("nested too deeply")
+    );
+    assert_eq!(
+        decode_plist(b"<plist><array><string>x</string></array></plist>").unwrap(),
+        Value::Array(vec![Value::String("x".into())])
+    );
+}
+
+#[test]
 fn xml_depth_is_bounded_before_decoding_nested_values() {
     let xml = format!(
         "<plist>{}{}{}",

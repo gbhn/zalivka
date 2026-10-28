@@ -35,7 +35,7 @@ fn pipe_keeps_utf8_levels_and_order_even_after_helper_exit() {
     .map(|level| Record::new(level, "drivers", "Ошибка: нужны права администратора"))
     .collect();
     for record in &expected {
-        Event::Log(record.clone()).write_to(&mut writer).unwrap();
+        record.write_json(&mut writer).unwrap();
     }
     drop(writer);
     let mut actual = Vec::new();
@@ -51,7 +51,7 @@ fn fragmented_records_are_forwarded_only_after_the_complete_utf8_line() {
     let mut writer = writer(&pipe);
     let expected = Record::new(Level::Error, "drivers", "Драйвер не установлен");
     let mut bytes = Vec::new();
-    Event::Log(expected.clone()).write_to(&mut bytes).unwrap();
+    expected.write_json(&mut bytes).unwrap();
     let split = bytes.iter().position(|b| *b >= 0x80).unwrap() + 1;
     writer.write_all(&bytes[..split]).unwrap();
     pipe.drain(|_| panic!("partial UTF-8 must not be published"))

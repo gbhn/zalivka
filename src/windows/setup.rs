@@ -200,10 +200,6 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
         host.apple_driver_installed,
         "Windows did not confirm Apple driver installation"
     );
-    ensure!(
-        !host.needs_preparation(),
-        "Windows did not confirm driver readiness. Open USB diagnostics."
-    );
     crate::log!(
         Info,
         "drivers",

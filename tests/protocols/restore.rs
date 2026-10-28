@@ -1555,6 +1555,10 @@ fn async_asr_keeps_control_and_component_channels_responsive_with_independent_zi
     ] {
         let file = fixture_compression(None, false, &[], compression);
         let mut state = restore_state(file.path());
+        state
+            .ipsw
+            .prepare_filesystem(&state.restore.identity)
+            .unwrap();
         let (input, incoming) = mpsc::channel();
         let (output, outgoing) = mpsc::channel();
         input.send(version_packet()).unwrap();

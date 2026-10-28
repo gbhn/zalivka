@@ -1,6 +1,6 @@
 [package]
 name = "zalivka"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.99"
 description = "Experimental native Rust DFU restore client for Apple Silicon and T2 Macs"
@@ -20,7 +20,7 @@ fs4 = { version = "1.1", default-features = false }
 hex = "0.4"
 oxiri = "0.3"
 nusb = "0.2.9"
-plist = "1.10"
+plist = { version = "~1.10.3", features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] }
 quick-xml = "0.42"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -53,7 +53,6 @@ windows-service = "0.8"
 windows-sys = { version = "0.61", features = ["Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_Devices_Usb", "Win32_Foundation", "Win32_Globalization", "Win32_Networking_WinHttp", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_Security_Credentials", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
-sha2 = "0.11"
 winresource = { version = "0.1", optional = true, default-features = false }
 
 [profile.release]

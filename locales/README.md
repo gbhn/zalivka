@@ -34,11 +34,14 @@ A partial pack works too; missing messages fall back to English:
 English text is the lookup key, including templates such as `Version {}, build {}`.
 Keep all `{placeholders}` in the translation. Unnamed placeholders keep their
 original order; use explicit indices such as `{1}` and `{0}` to reorder them.
-Named placeholders, for example `{name}`, keep their names. Values have already
-been formatted by Rust, so translations do not execute code or formatting rules.
-File names and endpoint/account identifiers remain unchanged.
+Named placeholders, for example `{name}`, keep their names. UI code selects a template before inserting values formatted by Rust.
+Translations do not execute code or formatting rules; values are inserted as
+opaque data and are never translated recursively.
+File names and endpoint/account identifiers remain unchanged. Diagnostic log
+formats are excluded from the UI catalogs.
 
-The loader validates language names, keys and placeholders. An invalid pack is
+The loader validates language names and placeholders. Unknown or retired keys
+are ignored so older language packs keep working after UI catalog cleanup. An invalid pack is
 skipped with an English warning in the diagnostic log; built-in languages remain
 available. Packs are limited to 1 MiB. User settings packs take precedence over
 packs beside the executable. Exact language tags are tried first, then the base

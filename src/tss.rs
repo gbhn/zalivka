@@ -76,8 +76,7 @@ pub fn parse_response(data: &[u8]) -> Result<Value> {
         "Apple refused personalization: {header}"
     );
     let (_, plist) = response.context("TSS response has no REQUEST_STRING")?;
-    let value =
-        Value::from_reader(std::io::Cursor::new(plist.as_bytes())).context("invalid TSS plist")?;
+    let value = wire::decode_plist(plist.as_bytes()).context("invalid TSS plist")?;
     Ok(value)
 }
 

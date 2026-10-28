@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
-    io::{self, Read},
+    io::{self, Read, Seek, SeekFrom, Write},
 };
 
 #[derive(Debug, Serialize)]
@@ -129,8 +129,15 @@ impl EntryDigests {
             bundle.is_none() || length <= firmware::MAX_PLIST_BUNDLE,
             "plist payload bundle exceeds memory limit: {name}"
         );
-        // Validate containers even when no manifest digest references this entry.
-        let inputs = DigestInput::variants(&buffer[..n], length, None)?;
+        // ZIP readers cannot seek into deflated entries. Retain only firmware
+        // containers on disk so nested indexes can be read at any file offset.
+        let mut container = if firmware::container_prefix(&buffer[..n]) {
+            crate::storage::require(&std::env::temp_dir(), length)?;
+            Some(tempfile::tempfile()?)
+        } else {
+            None
+        };
+        let mut inputs = vec![DigestInput::File];
         // AEA manifest digests describe decrypted content, not the ZIP bytes.
         let checks = self
             .components
@@ -154,6 +161,9 @@ impl EntryDigests {
             ..Default::default()
         };
         while n != 0 {
+            if let Some(file) = &mut container {
+                file.write_all(&buffer[..n])?;
+            }
             if let Some(bytes) = &mut bundle {
                 ensure!(
                     bytes.len() as u64 + n as u64 <= firmware::MAX_PLIST_BUNDLE,
@@ -169,6 +179,28 @@ impl EntryDigests {
             n = read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
         }
         ensure!(verified.bytes == length, "truncated ZIP entry {name}");
+        if let Some(file) = &mut container {
+            for range in firmware::payload_ranges_from(file, length)? {
+                let input = DigestInput::Payload(range.start, range.end);
+                inputs.push(input);
+                for (component, _) in &checks {
+                    if let Entry::Vacant(slot) = hashes.entry((component.expected.len(), input)) {
+                        let mut hash = hasher(component.expected.len())
+                            .context("unsupported manifest digest size")?;
+                        file.seek(SeekFrom::Start(range.start))?;
+                        let mut remaining = range.end - range.start;
+                        while remaining > 0 {
+                            let size = remaining.min(buffer.len() as u64) as usize;
+                            let n = read_chunk(file, &mut buffer[..size])?;
+                            ensure!(n != 0, "truncated firmware payload in {name}");
+                            hash.update(&buffer[..n]);
+                            remaining -= n as u64;
+                        }
+                        slot.insert(hash);
+                    }
+                }
+            }
+        }
         let actual: HashMap<_, _> = hashes
             .into_iter()
             .map(|(key, hash)| (key, hash.finalize()))

@@ -81,32 +81,40 @@ pub(super) fn key_exchange(
     stream: &mut MuxStream,
     session: &Session,
     key_requests: &mut usize,
+    mut finish_inline: impl FnMut(&mut MuxStream) -> Result<()>,
     mut reply: impl FnMut(&Value) -> Result<Value>,
 ) -> Result<()> {
-    while let Some(request) = wire::try_receive(stream)? {
-        *key_requests += 1;
-        ensure!(*key_requests <= 64, "too many AEA key requests");
-        let name = wire::data_type(&request)?;
-        let data_type =
-            DataType::parse(name).with_context(|| format!("unexpected AEA data type {name}"))?;
-        ensure!(
-            data_type == DataType::Asset,
-            "unexpected AEA data type {name}"
-        );
-        let asynchronous =
-            wire::string(&request, &["MsgType"]).is_ok_and(|kind| kind == "AsyncDataRequestMsg");
-        let port = data_type.data_port(&request, asynchronous)?;
-        crate::log!(Debug, "aea:keys", "{name}; port={port}");
-        let response = reply(&request)?;
-        if port != 0 {
-            let mut service = session.connect_retry(port, Duration::from_secs(60))?;
-            wire::send_binary(&mut service, &response)?;
-        } else {
-            wire::send_binary(stream, &response)?;
+    let timeout = stream.read_timeout();
+    stream.set_read_timeout(Duration::from_secs(3));
+    let result = (|| {
+        while let Some(request) = wire::try_receive(stream)? {
+            *key_requests += 1;
+            ensure!(*key_requests <= 64, "too many AEA key requests");
+            let name = wire::data_type(&request)?;
+            let data_type = DataType::parse(name)
+                .with_context(|| format!("unexpected AEA data type {name}"))?;
+            ensure!(
+                data_type == DataType::Asset,
+                "unexpected AEA data type {name}"
+            );
+            let asynchronous = wire::string(&request, &["MsgType"])
+                .is_ok_and(|kind| kind == "AsyncDataRequestMsg");
+            let port = data_type.data_port(&request, asynchronous)?;
+            crate::log!(Debug, "aea:keys", "{name}; port={port}");
+            let response = reply(&request)?;
+            if port != 0 {
+                let mut service = session.connect_retry(port, Duration::from_secs(60))?;
+                wire::send_binary(&mut service, &response)?;
+            } else {
+                finish_inline(stream)?;
+                wire::send_binary(stream, &response)?;
+            }
+            if !stream.has_pending_input()? {
+                break;
+            }
         }
-        if !stream.has_pending_input()? {
-            break;
-        }
-    }
-    Ok(())
+        Ok(())
+    })();
+    stream.set_read_timeout(timeout);
+    result
 }

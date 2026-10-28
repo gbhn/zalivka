@@ -74,10 +74,6 @@ try {
             Select-Object InstanceId, KeyName, Type, Data)
     }
     Save-Json $properties 'device-properties-before.json'
-    $backupDir = Join-Path $env:LOCALAPPDATA 'zalivka\usb-network-drivers'
-    if (Test-Path -LiteralPath $backupDir) {
-        Copy-Item -LiteralPath $backupDir -Destination (Join-Path $taskRoot 'zalivka-ncm-backup') -Recurse
-    }
     foreach ($package in $packages) {
         $destination = Join-Path $taskRoot ('driver-backup\' + $package.PublishedName)
         New-Item -ItemType Directory -Path $destination -Force | Out-Null
@@ -98,22 +94,6 @@ try {
     foreach ($device in @(Apple-Devices)) {
         Run-Pnp @('/remove-device', $device.InstanceId, '/subtree') ('remove-interface-' + $index)
         $index++
-    }
-    # Keep the old rollback files with this cleanup report, so the next preparation records a fresh baseline.
-    $backupDir = Join-Path $env:LOCALAPPDATA 'zalivka\usb-network-drivers'
-    if (Test-Path -LiteralPath $backupDir) {
-        foreach ($file in @(Get-ChildItem -LiteralPath $backupDir -Filter '*.json')) {
-            $saved = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
-            if ($saved.instance -match '^USB\\VID_05AC(?:&|\\)') {
-                $archived = Join-Path (Join-Path $taskRoot 'zalivka-ncm-backup') $file.Name
-                if (-not (Test-Path -LiteralPath $archived)) {
-                    New-Item -ItemType Directory -Path (Split-Path -Parent $archived) -Force | Out-Null
-                    Copy-Item -LiteralPath $file.FullName -Destination $archived
-                }
-                if ((Get-FileHash -LiteralPath $file.FullName).Hash -ne (Get-FileHash -LiteralPath $archived).Hash) { throw 'NCM backup changed; retained original' }
-                Remove-Item -LiteralPath $file.FullName
-            }
-        }
     }
     $remainingPackages = @(Apple-Packages)
     $remainingDevices = @(Apple-Devices)

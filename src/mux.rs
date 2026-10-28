@@ -291,6 +291,22 @@ impl Session {
 
 pub fn is_device_removal(error: &anyhow::Error) -> bool {
     error.chain().any(|e| {
+        #[cfg(windows)]
+        if e.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            use windows_sys::Win32::Foundation::{
+                ERROR_DEV_NOT_EXIST, ERROR_DEVICE_NOT_CONNECTED, ERROR_NO_SUCH_DEVICE,
+            };
+            error.raw_os_error().is_some_and(|code| {
+                [
+                    ERROR_DEVICE_NOT_CONNECTED,
+                    ERROR_DEV_NOT_EXIST,
+                    ERROR_NO_SUCH_DEVICE,
+                ]
+                .contains(&(code as u32))
+            })
+        }) {
+            return true;
+        }
         e.downcast_ref::<nusb::transfer::TransferError>()
             == Some(&nusb::transfer::TransferError::Disconnected)
             || e.downcast_ref::<nusb::Error>()

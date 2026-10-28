@@ -1,18 +1,17 @@
 //! Apply background events and finish jobs only after their logs are drained.
 use super::theme::Tone;
-use super::widgets::elapsed_text;
 use super::worker::{Job, Output};
-use super::{
-    App, Event, Level, Notice, Picker, Record, SCAN_INTERVAL, UI_REFRESH_INTERVAL, worker,
-};
+use super::{App, Event, Notice, Picker, SCAN_INTERVAL, UI_REFRESH_INTERVAL, worker};
 use eframe::egui;
 use std::time::Instant;
 use zalivka::progress;
 
 impl App {
-    fn collect_job_logs(&mut self) {
+    fn collect_job_logs(&mut self) -> bool {
         if let Some(job) = &mut self.job {
-            let lines = job.pending_logs();
+            let Some(lines) = job.pending_logs() else {
+                return false;
+            };
             let error = job.log_error.clone();
             if !lines.is_empty() {
                 job.last_activity = Instant::now();
@@ -22,6 +21,7 @@ impl App {
             }
             self.journal_error(error.as_deref());
         }
+        true
     }
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
         // Leave time for rendering and input even during a burst of log records.
@@ -74,12 +74,7 @@ impl App {
                     if matches!(&output, Output::State(progress::Event::RebootRequired)) {
                         self.windows_reboot_required = true;
                     }
-                    let line = job.output(output);
-                    let log_error = job.log_error.clone();
-                    if let Some(line) = line {
-                        self.journal_line(line);
-                    }
-                    self.journal_error(log_error.as_deref());
+                    job.output(output);
                 }
                 Event::Picked(picker, path) => {
                     self.picking = false;
@@ -130,6 +125,7 @@ impl App {
                     self.notice = Some(Notice {
                         title: "Journal saved".into(),
                         detail: path.display().to_string(),
+                        journal_error: None,
                         tone: Tone::Success,
                         expires_at: Some(Instant::now() + super::NOTICE_LIFETIME),
                     });
@@ -137,31 +133,14 @@ impl App {
                 Event::Saved(Err(e)) => self.error("Journal not saved", e),
             }
         }
-        self.collect_job_logs();
+        if !self.collect_job_logs() {
+            return;
+        }
         let success = match self.job.as_ref().and_then(Job::finished) {
             Some(success) => success,
             _ => return,
         };
-        let mut job = self.job.take().unwrap();
-        let notice = job.completion_notice(success, self.windows_reboot_required);
-        let level = match notice.tone {
-            Tone::Error => Level::Error,
-            Tone::Neutral if !job.cancelled => Level::Warning,
-            _ => Level::Info,
-        };
-        let mut message = format!(
-            "{}. Duration: {}.",
-            notice.title,
-            elapsed_text(job.started.elapsed().as_secs())
-        );
-        if !notice.detail.is_empty() {
-            message.push(' ');
-            message.push_str(&notice.detail);
-        }
-        self.journal_line(job.record(Record::new(level, "session", message)));
-        // The final record can be the first failed write. Build the displayed
-        // result after that attempt so journal completeness is reported honestly.
-        self.journal_error(job.log_error.as_deref());
+        let job = self.job.take().unwrap();
         let notice = job.completion_notice(success, self.windows_reboot_required);
         if notice.tone == Tone::Error {
             self.journal_open = true;

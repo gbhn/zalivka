@@ -7,8 +7,8 @@ use std::{
     marker::PhantomData,
     rc::Rc,
     sync::{
-        OnceLock,
-        atomic::{AtomicU8, Ordering},
+        Arc, OnceLock,
+        atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -62,6 +62,7 @@ impl Level {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Record {
     pub elapsed_ms: u64,
     pub level: Level,
@@ -79,6 +80,19 @@ impl Record {
         };
         record.normalize();
         record
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn parse_json(line: &str) -> io::Result<Self> {
+        let mut record: Self = serde_json::from_str(line).map_err(io::Error::other)?;
+        record.normalize();
+        Ok(record)
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn write_json(&self, mut output: impl Write) -> io::Result<()> {
+        serde_json::to_writer(&mut output, self).map_err(io::Error::other)?;
+        output.write_all(b"\n")
     }
 
     pub fn normalize(&mut self) {
@@ -157,86 +171,155 @@ enum Pending {
 }
 
 /// Producers copy raw bytes once; only this consumer expands them into hex rows.
-/// The queue never waits for disk/terminal I/O and does not discard diagnostics.
+/// Diagnostics use a bounded byte budget; overload is reported explicitly.
 #[derive(Clone)]
-pub(crate) struct Queue(mpsc::Sender<Pending>);
+pub(crate) struct Queue {
+    sender: mpsc::Sender<(Pending, usize)>,
+    budget: Arc<Budget>,
+}
+
+const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Default)]
+struct Budget {
+    bytes: AtomicUsize,
+    omitted: AtomicU64,
+}
+
+fn plist_cost(value: &plist::Value, depth: usize) -> usize {
+    if depth >= 128 {
+        return MAX_QUEUED_BYTES + 1;
+    }
+    let mut cost = 128usize;
+    match value {
+        plist::Value::Data(data) => cost = cost.saturating_add(data.len()),
+        plist::Value::String(text) => cost = cost.saturating_add(text.len()),
+        plist::Value::Array(values) => {
+            for value in values {
+                cost = cost.saturating_add(plist_cost(value, depth + 1));
+                if cost > MAX_QUEUED_BYTES {
+                    break;
+                }
+            }
+        }
+        plist::Value::Dictionary(values) => {
+            for (key, value) in values {
+                cost = cost
+                    .saturating_add(key.len())
+                    .saturating_add(plist_cost(value, depth + 1));
+                if cost > MAX_QUEUED_BYTES {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+    cost
+}
 
 impl Queue {
     // None requests a buffered sink flush, including while the producer is idle.
     pub(crate) fn new(mut output: impl FnMut(Option<Record>) + Send + 'static) -> io::Result<Self> {
         let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("zalivka-journal".into())
-            .spawn(move || {
-                let mut dirty = false;
-                let mut flushed = Instant::now();
-                loop {
-                    match rx.recv_timeout(Duration::from_millis(200)) {
-                        Ok(Pending::Record(record)) => {
-                            output(Some(record));
-                            dirty = true;
+        let budget = Arc::new(Budget::default());
+        let consumer_budget = budget.clone();
+        std::thread::Builder::new().name("zalivka-journal".into()).spawn(move || {
+            let mut dirty = false;
+            let mut flushed = Instant::now();
+            loop {
+                let incoming = rx.recv_timeout(Duration::from_millis(200));
+                let omitted = consumer_budget.omitted.swap(0, Ordering::AcqRel);
+                if omitted != 0 {
+                    output(Some(Record::new(Level::Warning, "journal", format_args!(
+                        "Diagnostic queue overloaded: omitted {omitted} DEBUG/TRACE records or dumps"
+                    ))));
+                    dirty = true;
+                }
+                let pending = match incoming {
+                    Ok(pending) => Some(pending),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => { output(None); return; }
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                };
+                if let Some((pending, cost)) = pending {
+                    dirty = true;
+                    match pending {
+                        Pending::Record(record) => output(Some(record)),
+                        Pending::Bytes { elapsed_ms, source, context, data } => {
+                            byte_records(elapsed_ms, &source, &context, &data, |record| output(Some(record)));
                         }
-                        Ok(Pending::Bytes {
-                            elapsed_ms,
-                            source,
-                            context,
-                            data,
-                        }) => {
-                            byte_records(elapsed_ms, &source, &context, &data, |record| {
-                                output(Some(record));
-                            });
-                            dirty = true;
-                        }
-                        Ok(Pending::Plist {
-                            elapsed_ms,
-                            source,
-                            context,
-                            value,
-                        }) => {
-                            let mut record = Record::new(
-                                Level::Trace,
-                                source,
-                                format_args!("{context}: {value:?}"),
-                            );
+                        Pending::Plist { elapsed_ms, source, context, value } => {
+                            let mut record = Record::new(Level::Trace, source, format_args!("{context}: {value:?}"));
                             record.elapsed_ms = elapsed_ms;
                             output(Some(record));
-                            dirty = true;
                         }
-                        Ok(Pending::Flush(done)) => {
+                        Pending::Flush(done) => {
                             output(None);
                             dirty = false;
                             flushed = Instant::now();
                             let _ = done.send(());
                         }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            output(None);
-                            return;
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
-                    if dirty && flushed.elapsed() >= Duration::from_millis(200) {
-                        output(None);
-                        dirty = false;
-                        flushed = Instant::now();
-                    }
+                    consumer_budget.bytes.fetch_sub(cost, Ordering::AcqRel);
                 }
-            })?;
-        Ok(Self(tx))
+                if dirty && flushed.elapsed() >= Duration::from_millis(200) {
+                    output(None);
+                    dirty = false;
+                    flushed = Instant::now();
+                }
+            }
+        })?;
+        Ok(Self { sender: tx, budget })
+    }
+
+    fn reserve(&self, cost: usize) -> bool {
+        self.budget
+            .bytes
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |bytes| {
+                bytes
+                    .checked_add(cost)
+                    .filter(|next| *next <= MAX_QUEUED_BYTES)
+            })
+            .is_ok()
+    }
+
+    fn enqueue(&self, pending: Pending, cost: usize) -> Result<(), Pending> {
+        self.sender.send((pending, cost)).map_err(|error| {
+            self.budget.bytes.fetch_sub(cost, Ordering::AcqRel);
+            error.0.0
+        })
     }
 
     pub(crate) fn record(&self, record: Record) -> Result<(), Record> {
-        self.0.send(Pending::Record(record)).map_err(|error| {
-            let Pending::Record(record) = error.0 else {
-                unreachable!()
-            };
-            record
-        })
+        let cost = 128 + record.source.len() + record.message.len();
+        if !self.reserve(cost) {
+            if record.level <= Level::Debug {
+                self.budget.omitted.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+            // Preserve important messages with synchronous delivery under overload.
+            return Err(record);
+        }
+        self.enqueue(Pending::Record(record), cost)
+            .map_err(|pending| {
+                let Pending::Record(record) = pending else {
+                    unreachable!()
+                };
+                record
+            })
+    }
+
+    fn diagnostic(&self, cost: usize, pending: impl FnOnce() -> Pending) -> bool {
+        if !self.reserve(cost) {
+            self.budget.omitted.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        self.enqueue(pending(), cost).is_ok()
     }
 
     pub(crate) fn flush(&self) -> io::Result<()> {
         let (tx, rx) = mpsc::channel();
-        self.0
-            .send(Pending::Flush(tx))
+        self.sender
+            .send((Pending::Flush(tx), 0))
             .map_err(|_| io::Error::other("journal thread stopped"))?;
         rx.recv()
             .map_err(|_| io::Error::other("journal thread stopped"))
@@ -322,15 +405,14 @@ pub fn bytes(source: &str, context: fmt::Arguments<'_>, bytes: &[u8]) {
     let elapsed_ms = elapsed_ms();
     let context = context.to_string();
     if let Some(queue) = queue()
-        && queue
-            .0
-            .send(Pending::Bytes {
+        && queue.diagnostic(128 + source.len() + context.len() + bytes.len(), || {
+            Pending::Bytes {
                 elapsed_ms,
                 source: source.to_owned(),
                 context: context.clone(),
                 data: bytes.to_vec(),
-            })
-            .is_ok()
+            }
+        })
     {
         return;
     }
@@ -365,15 +447,12 @@ pub(crate) fn plist(source: &'static str, context: &'static str, value: &plist::
         return;
     }
     if let Some(queue) = queue()
-        && queue
-            .0
-            .send(Pending::Plist {
-                elapsed_ms: elapsed_ms(),
-                source,
-                context,
-                value: value.clone(),
-            })
-            .is_ok()
+        && queue.diagnostic(plist_cost(value, 0), || Pending::Plist {
+            elapsed_ms: elapsed_ms(),
+            source,
+            context,
+            value: value.clone(),
+        })
     {
         return;
     }
@@ -402,10 +481,7 @@ fn write_default(record: Record, mut stderr: impl Write) {
     #[cfg(windows)]
     if let Some(pipe) = ELEVATED.get() {
         let mut pipe = pipe.lock().unwrap_or_else(|error| error.into_inner());
-        if crate::progress::Event::Log(record.clone())
-            .write_to(&mut *pipe)
-            .is_ok()
-        {
+        if record.write_json(&mut *pipe).is_ok() {
             return;
         }
     }

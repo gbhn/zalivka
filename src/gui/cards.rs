@@ -9,7 +9,7 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
-use zalivka::localization::text as tr;
+use zalivka::localization::{format as trf, text as tr};
 use zalivka::{device::Mode, drivers};
 
 impl App {
@@ -30,7 +30,9 @@ impl App {
                 |ui| {
                     let title = self
                         .target()
-                        .map(|device| format!("Mac (CPID {:04x})", device.chip_id))
+                        .map(|device| {
+                            trf("Mac (CPID {:04x})", &[&format!("{:04x}", device.chip_id)])
+                        })
                         .unwrap_or_else(|| {
                             if self.devices.is_empty() {
                                 "No Mac connected"
@@ -42,7 +44,7 @@ impl App {
                     ui.label(RichText::new(tr(title)).size(19.0).strong());
                     if let Some(device) = self.target() {
                         ui.label(
-                            RichText::new(tr(format!("ECID {:016x}", device.ecid)))
+                            RichText::new(trf("ECID {:016x}", &[&format!("{:016x}", device.ecid)]))
                                 .monospace()
                                 .size(12.0)
                                 .color(ui.visuals().weak_text_color()),
@@ -82,7 +84,7 @@ impl App {
                         ui.selectable_value(
                             &mut self.setup.ecid,
                             ecid.clone(),
-                            tr(format!("Mac, {ecid}, {:?}", d.mode)),
+                            trf("Mac, {ecid}, {:?}", &[&ecid, &tr(format!("{:?}", d.mode))]),
                         );
                     }
                 });
@@ -154,10 +156,10 @@ impl App {
                     caption(ui, "Checking the Apple catalog for the selected Mac");
                 }
                 Some(Some(Ok(release))) => {
-                    ui.strong(tr(format!(
+                    ui.strong(trf(
                         "Version {}, build {}",
-                        release.version, release.build
-                    )));
+                        &[&release.version, &release.build],
+                    ));
                     caption(ui, &release.product_type);
                 }
                 Some(Some(Err(error))) => {
@@ -213,11 +215,13 @@ impl App {
                     self.error("Could not open the firmware folder", format!("{error:#}"));
                 }
                 if self.setup.automatic
-                    && self
+                    && let Some(release) = self
                         .firmware
                         .as_ref()
-                        .is_some_and(|firmware| matches!(firmware.release, Some(Err(_))))
-                    && ui.button(tr("Retry")).clicked()
+                        .and_then(|firmware| firmware.release.as_ref())
+                    && ui
+                        .button(tr(if release.is_err() { "Retry" } else { "Refresh" }))
+                        .clicked()
                 {
                     self.refresh_firmware(ctx, true);
                 }
@@ -296,7 +300,14 @@ impl App {
                 ui.label(RichText::new(tr(job.action.title())).size(21.0).strong());
             });
             ui.add_space(12.0);
-            ui.label(RichText::new(tr(&job.phase)).size(16.0));
+            ui.label(
+                RichText::new(
+                    job.phase
+                        .strip_prefix("Stage: ")
+                        .map_or_else(|| tr(&job.phase), |stage| trf("Stage: {}", &[stage])),
+                )
+                .size(16.0),
+            );
             if job.action.writes_device() {
                 progress_bar(ui, job.overall_fraction);
             } else if job.transfers.is_empty() {
@@ -326,7 +337,10 @@ impl App {
             if idle > Duration::from_secs(5) {
                 caption(
                     ui,
-                    format!("Waiting for a response, {}", elapsed_text(idle.as_secs())),
+                    trf(
+                        "Waiting for a response, {}",
+                        &[&elapsed_text(idle.as_secs())],
+                    ),
                 );
             }
         });
@@ -338,7 +352,7 @@ impl App {
                 card(ui.ctx()).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(
-                        RichText::new(tr(&transfer.update.stage))
+                        RichText::new(super::widgets::transfer_stage(&transfer.update.stage))
                             .size(16.0)
                             .strong(),
                     );
@@ -349,16 +363,19 @@ impl App {
                         transfer
                             .update
                             .total
-                            .map(|total| format!(" of {}", human_bytes(total)))
+                            .map(|total| trf(" of {}", &[&human_bytes(total)]))
                             .unwrap_or_default()
                     );
-                    caption(ui, format!("Transferred: {size}"));
+                    caption(ui, trf("Transferred: {size}", &[&size]));
                     ui.add_space(8.0);
                     ui.columns(2, |columns| {
                         metric(
                             &mut columns[0],
                             "Speed",
-                            &format!("{:.1} MiB/s", transfer.speed(now) / 1048576.0),
+                            &trf(
+                                "{:.1} MiB/s",
+                                &[&format!("{:.1}", transfer.speed(now) / 1048576.0)],
+                            ),
                         );
                         let remaining = transfer
                             .remaining(now)

@@ -2,7 +2,11 @@
 use anyhow::{Context, Result, ensure};
 use plist::Value;
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, ops::Range};
+use std::{
+    collections::HashSet,
+    io::{Read, Seek, SeekFrom},
+    ops::Range,
+};
 
 pub(crate) const MAX_PLIST_BUNDLE: u64 = 32 * 1024 * 1024;
 
@@ -29,8 +33,7 @@ pub(crate) fn verify_plist_bundle(bytes: &[u8], expected: &[u8]) -> Result<Bundl
         bytes.len() as u64 <= MAX_PLIST_BUNDLE,
         "plist payload bundle exceeds memory limit"
     );
-    let value =
-        Value::from_reader(std::io::Cursor::new(bytes)).context("reading plist payload bundle")?;
+    let value = crate::wire::decode_plist(bytes).context("reading plist payload bundle")?;
     let mut report = BundleVerification::default();
     verify_plist_node(&value, expected, 0, &mut report)?;
     Ok(report)
@@ -134,42 +137,102 @@ pub(super) fn ftab_index(bytes: &[u8], length: u64) -> Result<Vec<FtabEntry>> {
 /// Byte ranges hashed by BuildManifest inside FTAB and UARP containers.
 /// Only the index must be present in `prefix`; payloads can be streamed later.
 pub fn payload_ranges(prefix: &[u8], length: u64) -> Result<Vec<std::ops::Range<u64>>> {
-    payload_ranges_inner(prefix, length, 0)
-}
-
-fn payload_ranges_inner(
-    prefix: &[u8],
-    length: u64,
-    depth: usize,
-) -> Result<Vec<std::ops::Range<u64>>> {
-    ensure!(depth <= 4, "firmware containers nested too deeply");
     ensure!(
         prefix.len() as u64 <= length,
         "firmware prefix exceeds file length"
     );
+    payload_ranges_inner(
+        &mut |offset, size| {
+            let start = usize::try_from(offset)?;
+            let end = start.checked_add(size).context("firmware index overflow")?;
+            Ok(prefix
+                .get(start..end)
+                .context("truncated firmware index")?
+                .to_vec())
+        },
+        0,
+        length,
+        prefix.len() as u64,
+        0,
+    )
+}
+
+pub(crate) fn container_prefix(prefix: &[u8]) -> bool {
+    prefix.get(36..40) == Some(b"ftab")
+        || matches!(prefix.get(..8), Some([0, 0, 0, 2 | 3, 0, 0, 0, 44]))
+}
+
+/// Read only bounded indexes at their actual offsets, including late children.
+pub(crate) fn payload_ranges_from(
+    reader: &mut (impl Read + Seek),
+    length: u64,
+) -> Result<Vec<Range<u64>>> {
+    payload_ranges_inner(
+        &mut |offset, size| {
+            reader.seek(SeekFrom::Start(offset))?;
+            let mut bytes = vec![0; size];
+            reader.read_exact(&mut bytes)?;
+            Ok(bytes)
+        },
+        0,
+        length,
+        length,
+        0,
+    )
+}
+
+fn payload_ranges_inner(
+    read: &mut impl FnMut(u64, usize) -> Result<Vec<u8>>,
+    base: u64,
+    length: u64,
+    available: u64,
+    depth: usize,
+) -> Result<Vec<std::ops::Range<u64>>> {
+    ensure!(depth <= 4, "firmware containers nested too deeply");
+    let prefix = read(
+        base,
+        length.min(available.saturating_sub(base)).min(48) as usize,
+    )?;
     let entries: Vec<_> = if prefix.get(36..40) == Some(b"ftab") {
-        ftab_index(prefix, length)?
+        ensure!(prefix.len() >= 48, "truncated FTAB header");
+        let count = u32::from_le_bytes(prefix[40..44].try_into()?) as usize;
+        ensure!(count <= 65536, "too many FTAB entries");
+        let end = 48 + count * 16;
+        ensure!(end as u64 <= length, "FTAB index outside file");
+        ftab_index(&read(base, end)?, length)?
             .into_iter()
             // Centauri's 2ftb describes device memory, not a nested on-disk
             // container. Its bytes are hashable, but its offsets are not ours.
             .map(|entry| (entry.range, entry.tag != *b"2ftb"))
             .collect()
     } else {
-        uarp_ranges(prefix, length)?
-            .into_iter()
-            .map(|range| (range, true))
-            .collect()
+        let ranges = if matches!(prefix.get(..8), Some([0, 0, 0, 2 | 3, 0, 0, 0, 44])) {
+            ensure!(prefix.len() >= 44, "truncated UARP header");
+            let start = u64::from(u32::from_be_bytes(prefix[36..40].try_into()?));
+            let size = u32::from_be_bytes(prefix[40..44].try_into()?) as usize;
+            let end = start + size as u64;
+            ensure!(
+                start >= 44 && end <= length && size <= 1024 * 1024,
+                "invalid UARP index"
+            );
+            uarp_index(&read(base + start, size)?, end, length)?
+        } else {
+            Vec::new()
+        };
+        ranges.into_iter().map(|range| (range, true)).collect()
     };
     let mut ranges: Vec<_> = entries.iter().map(|(range, _)| range.clone()).collect();
     // RT15 UARP v3 wraps an FTAB in its FIRM payload. Its manifest digests
     // describe rkos/cphy entries inside that table, plus the separate RRKO.
     for (range, descend) in entries {
-        if descend && range.start < prefix.len() as u64 {
-            let start = range.start as usize;
-            let end = range.end.min(prefix.len() as u64) as usize;
-            for child in
-                payload_ranges_inner(&prefix[start..end], range.end - range.start, depth + 1)?
-            {
+        if descend && base + range.start < available {
+            for child in payload_ranges_inner(
+                read,
+                base + range.start,
+                range.end - range.start,
+                available,
+                depth + 1,
+            )? {
                 ensure!(ranges.len() < 65536, "too many nested firmware payloads");
                 ranges.push(range.start + child.start..range.start + child.end);
             }
@@ -179,28 +242,18 @@ fn payload_ranges_inner(
 }
 
 /// Read UARP's index independently of recursive payload discovery.
-fn uarp_ranges(prefix: &[u8], length: u64) -> Result<Vec<Range<u64>>> {
-    if !matches!(prefix.get(..8), Some([0, 0, 0, 2 | 3, 0, 0, 0, 44])) {
-        return Ok(vec![]);
-    }
-    ensure!(prefix.len() >= 44, "truncated UARP header");
-    let mut position = u32::from_be_bytes(prefix[36..40].try_into()?) as usize;
-    let size = u32::from_be_bytes(prefix[40..44].try_into()?) as usize;
-    let end = position.checked_add(size).context("UARP index overflow")?;
-    ensure!(
-        position >= 44 && end <= prefix.len() && end as u64 <= length && size <= 1024 * 1024,
-        "invalid UARP index"
-    );
+fn uarp_index(rows: &[u8], index_end: u64, length: u64) -> Result<Vec<Range<u64>>> {
+    let mut position = 0;
     let mut ranges = Vec::new();
-    while position < end {
-        let row = &prefix[position..end];
+    while position < rows.len() {
+        let row = &rows[position..];
         ensure!(row.len() >= 40, "truncated UARP row");
         let size = u32::from_be_bytes(row[..4].try_into()?) as usize;
         ensure!(size >= 40 && size <= row.len(), "invalid UARP row length");
         let offset = u64::from(u32::from_be_bytes(row[32..36].try_into()?));
         let size_of_payload = u64::from(u32::from_be_bytes(row[36..40].try_into()?));
         ensure!(
-            offset >= end as u64 && offset + size_of_payload <= length,
+            offset >= index_end && offset + size_of_payload <= length,
             "UARP payload outside file"
         );
         ranges.push(offset..offset + size_of_payload);

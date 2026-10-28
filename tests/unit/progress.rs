@@ -94,14 +94,6 @@ fn transfer_identity_is_stable_and_unique_between_workers() {
     .unwrap();
     assert_ne!(first.id, second.id);
     assert_eq!(first.id, progress.update(progress.started, true).id);
-    let mut encoded = Vec::new();
-    Event::Transfer(first.clone())
-        .write_to(&mut encoded)
-        .unwrap();
-    assert_eq!(
-        Event::parse(std::str::from_utf8(&encoded).unwrap()),
-        Some(Event::Transfer(first))
-    );
 }
 
 #[test]
@@ -111,13 +103,8 @@ fn samples_measure_new_bytes_and_keep_resumed_offsets_out_of_the_rate() {
     let update = progress.update(progress.started + Duration::from_secs(2), false);
     assert_eq!(update.bytes_per_second, 100.0);
     assert_eq!(update.fraction(), Some(0.6));
-    let mut line = Vec::new();
-    Event::Transfer(update).write_to(&mut line).unwrap();
-    let Event::Transfer(parsed) = Event::parse(std::str::from_utf8(&line).unwrap()).unwrap() else {
-        panic!("expected a transfer event");
-    };
-    assert_eq!(parsed.completed, 600);
-    assert!(!parsed.finished);
+    assert_eq!(update.completed, 600);
+    assert!(!update.finished);
     progress.sampled_at += Duration::from_secs(2);
     progress.sampled_bytes = 600;
     let idle = progress.update(progress.started + Duration::from_secs(4), false);
@@ -126,64 +113,6 @@ fn samples_measure_new_bytes_and_keep_resumed_offsets_out_of_the_rate() {
     assert_eq!(finished.bytes_per_second, 50.0);
     progress.total = None;
     assert_eq!(progress.update(progress.started, true).fraction(), None);
-}
-
-#[test]
-fn malformed_progress_cannot_supply_a_fake_percentage() {
-    for json in [
-        r#"{"id":1,"stage":"x","completed":20,"total":10,"bytes_per_second":1,"elapsed_seconds":1,"finished":false}"#,
-        r#"{"id":1,"stage":"x","completed":0,"total":10,"bytes_per_second":-1,"elapsed_seconds":1,"finished":false}"#,
-    ] {
-        let json = json.replacen('{', r#"{"event":"transfer","#, 1);
-        assert!(Event::parse(&format!("{EVENT_PREFIX}{json}")).is_none());
-    }
-    assert!(Event::parse("Operation 13: 100%").is_none());
-    for weights in ["[]", "[[13,0]]"] {
-        assert!(
-            Event::parse(&format!(
-                r#"{EVENT_PREFIX}{{"event":"operation_weights","weights":{weights}}}"#
-            ))
-            .is_none()
-        );
-    }
-}
-
-#[test]
-fn duplicate_operation_weights_cannot_change_the_meaning_of_a_worker_event() {
-    for weights in [vec![(1, 1), (1, 2)], vec![(1, 1), (1, 0)]] {
-        let mut line = Vec::new();
-        Event::OperationWeights {
-            weights,
-            progresses: vec![],
-        }
-        .write_to(&mut line)
-        .unwrap();
-        assert!(Event::parse(std::str::from_utf8(&line).unwrap()).is_none());
-    }
-}
-
-#[test]
-fn operation_progress_snapshots_reject_unknown_duplicate_and_excessive_contributions() {
-    for progresses in [vec![(13, 1801)], vec![(99, 1)], vec![(13, 1), (13, 2)]] {
-        let mut line = Vec::new();
-        Event::OperationWeights {
-            weights: vec![(13, 1800)],
-            progresses,
-        }
-        .write_to(&mut line)
-        .unwrap();
-        assert!(Event::parse(std::str::from_utf8(&line).unwrap()).is_none());
-    }
-    let event = Event::OperationWeights {
-        weights: vec![(13, 1800)],
-        progresses: vec![(13, 450)],
-    };
-    let mut line = Vec::new();
-    event.write_to(&mut line).unwrap();
-    assert_eq!(
-        Event::parse(std::str::from_utf8(&line).unwrap()),
-        Some(event)
-    );
 }
 
 #[test]
@@ -200,11 +129,16 @@ fn completed_progress_is_terminal_and_finish_is_idempotent() {
 #[test]
 fn inaccurate_totals_do_not_hide_measured_progress() {
     let mut progress = Progress::new("x", Some(10), 11);
-    assert!(progress.update(Instant::now(), false).valid());
+    assert!(
+        progress
+            .update(Instant::now(), false)
+            .bytes_per_second
+            .is_finite()
+    );
     assert_eq!(progress.total, None);
     progress.total = Some(12);
     progress.advance(2);
     let update = progress.update(Instant::now(), false);
     assert_eq!((update.completed, update.total), (13, None));
-    assert!(update.valid());
+    assert!(update.bytes_per_second.is_finite());
 }

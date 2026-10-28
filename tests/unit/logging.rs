@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn diagnostic_overload_is_bounded_reported_and_does_not_discard_important_records() {
+    use std::sync::{Arc, Mutex};
+    let (entered, ready) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let warnings = Arc::new(Mutex::new(Vec::new()));
+    let output = warnings.clone();
+    let queue = Queue::new(move |record| {
+        if let Some(record) = record {
+            if record.source == "block" {
+                entered.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(5)).unwrap();
+            } else {
+                output.lock().unwrap().push(record);
+            }
+        }
+    })
+    .unwrap();
+    queue
+        .record(Record::new(
+            Level::Debug,
+            "block",
+            "x".repeat(MAX_QUEUED_BYTES - 128 - 5),
+        ))
+        .unwrap();
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(queue.budget.bytes.load(Ordering::Acquire), MAX_QUEUED_BYTES);
+    assert!(queue.diagnostic(1024, || panic!("overloaded dumps must not allocate")));
+    let error = Record::new(Level::Error, "restore", "preserve me");
+    assert_eq!(queue.record(error.clone()).unwrap_err(), error);
+    release.send(()).unwrap();
+    queue.flush().unwrap();
+    assert_eq!(queue.budget.bytes.load(Ordering::Acquire), 0);
+    assert!(
+        warnings
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|record| record.level == Level::Warning && record.message.contains("omitted 1"))
+    );
+}
+
+#[test]
 fn records_keep_their_level_and_source_through_the_elevated_pipe() {
     for level in [
         Level::Trace,
@@ -11,12 +53,11 @@ fn records_keep_their_level_and_source_through_the_elevated_pipe() {
     ] {
         let mut record = Record::new(level, "restore", "Подготовка macOS");
         record.elapsed_ms = 3_723_004;
-        let event = crate::progress::Event::Log(record.clone());
         let mut pipe = Vec::new();
-        event.write_to(&mut pipe).unwrap();
+        record.write_json(&mut pipe).unwrap();
         assert_eq!(
-            crate::progress::Event::parse(std::str::from_utf8(&pipe).unwrap()),
-            Some(event)
+            Record::parse_json(std::str::from_utf8(&pipe).unwrap()).unwrap(),
+            record
         );
         let text = record.to_string();
         assert!(text.starts_with("01:02:03.004 "));
@@ -343,10 +384,13 @@ fn trace_subprocess() {
         assert_eq!(*sent.lock().unwrap(), payload);
     };
     if native {
-        let context =
-            crate::progress::Context::new(|event| event.write_to(io::stdout().lock()).unwrap())
-                .with_async_logs(|| {})
-                .unwrap();
+        let context = crate::progress::Context::new(|event| {
+            if let crate::progress::Event::Log(record) = event {
+                record.write_json(io::stdout().lock()).unwrap();
+            }
+        })
+        .with_async_logs(|| {})
+        .unwrap();
         context.run(run);
         context.flush_logs().unwrap();
     } else {
@@ -356,7 +400,6 @@ fn trace_subprocess() {
 
 #[test]
 fn native_operations_always_trace_and_fdr_dumps_preserve_all_bytes_in_both_directions() {
-    use crate::progress::Event;
     for native in [false, true] {
         for level in ["info", "debug", "trace"] {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
@@ -384,10 +427,7 @@ fn native_operations_always_trace_and_fdr_dumps_preserve_all_bytes_in_both_direc
             let stdout = String::from_utf8(output.stdout).unwrap();
             let records: Vec<_> = stdout
                 .lines()
-                .filter_map(|line| match Event::parse(line) {
-                    Some(Event::Log(record)) => Some(record),
-                    _ => None,
-                })
+                .filter_map(|line| Record::parse_json(line).ok())
                 .collect();
             if !native {
                 assert_eq!(stderr.contains("TRACE"), level == "trace");

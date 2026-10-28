@@ -2,7 +2,6 @@
 *.ipsw
 *.part
 /artifacts/
-/docs/
 /scripts/runs/
 /.cache/
 .DS_Store

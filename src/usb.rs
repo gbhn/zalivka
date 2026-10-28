@@ -33,6 +33,59 @@ fn serial_number(device: &Device) -> Result<String> {
         .wait()?)
 }
 
+/// A disappearing neighbour must not prevent opening the requested ECID.
+fn find_ecid<T, R>(
+    ecid: u64,
+    devices: impl Iterator<Item = (Option<u64>, T)>,
+    mut read: impl FnMut(T) -> Result<(u64, R)>,
+) -> Result<R> {
+    let mut target_error = None;
+    let mut errors = Vec::new();
+    for (cached, device) in devices {
+        if cached.is_some_and(|cached| cached != ecid) {
+            continue;
+        }
+        match read(device) {
+            Ok((actual, device)) if actual == ecid => return Ok(device),
+            Ok(_) => {}
+            Err(error) => {
+                crate::log!(Warning, "usb:detect", "Reading candidate: {error:#}");
+                errors.push(format!("{error:#}"));
+                if cached == Some(ecid) {
+                    target_error = Some(error);
+                }
+            }
+        }
+    }
+    if let Some(error) = target_error {
+        return Err(error).with_context(|| format!("opening ECID {ecid:016x}"));
+    }
+    let error = anyhow::anyhow!("no Apple DFU/recovery device with ECID {ecid:016x}");
+    if errors.is_empty() {
+        Err(error)
+    } else {
+        Err(error.context(format!("unreadable USB candidates: {}", errors.join("; "))))
+    }
+}
+
+fn collect_devices(devices: impl Iterator<Item = Result<DeviceInfo>>) -> Result<Vec<DeviceInfo>> {
+    let mut found = Vec::new();
+    let mut errors = Vec::new();
+    for device in devices {
+        match device {
+            Ok(device) => found.push(device),
+            Err(error) => {
+                crate::log!(Warning, "usb:detect", "Reading candidate: {error:#}");
+                errors.push(format!("{error:#}"));
+            }
+        }
+    }
+    if found.is_empty() && !errors.is_empty() {
+        bail!("could not read Apple USB devices: {}", errors.join("; "));
+    }
+    Ok(found)
+}
+
 pub trait RecoveryTransport {
     fn control_in(
         &mut self,
@@ -88,48 +141,45 @@ impl RecoveryUsb {
         Ok(())
     }
     pub fn open(ecid: u64) -> Result<Self> {
-        for (usb, mode) in recovery_devices()? {
-            // Filter before claiming interfaces, when the OS has cached the serial.
-            if let Some(serial) = usb.serial_number()
-                && let Ok(info) = DeviceInfo::parse(serial, mode)
-                && info.ecid != ecid
-            {
-                continue;
-            }
+        let devices = recovery_devices()?.map(|(usb, mode)| {
+            let cached = usb
+                .serial_number()
+                .and_then(|serial| DeviceInfo::parse(serial, mode).ok())
+                .map(|info| info.ecid);
+            (cached, (usb, mode))
+        });
+        let (usb, device, mut info) = find_ecid(ecid, devices, |(usb, mode)| {
             let device = usb.open().wait().context("opening Apple USB device (Linux: udev permissions; Windows: compatible USB driver required)")?;
             let serial = serial_number(&device)?;
-            let mut info = DeviceInfo::parse(&serial, mode)?;
-            if info.ecid != ecid {
-                continue;
-            }
-            let selected = if mode == Mode::Recovery {
-                recovery_interface(device.active_configuration()?)?
-            } else {
-                (0, 0)
-            };
-            let interface = UsbInterface::claim(&device, &usb, selected.0)
-                .context("claiming Apple USB interface; another process or driver may own it")?;
-            interface.set_alt_setting(selected.1)?;
-            let bulk = if mode == Mode::Recovery {
-                Some(interface.bulk_out(0x04)?)
-            } else {
-                None
-            };
-            let nonces = device
-                .get_string_descriptor(std::num::NonZeroU8::MIN, 0x0409, TIMEOUT)
-                .wait()?;
-            info.set_nonces(&nonces)?;
-            return Ok(Self {
-                #[cfg(not(windows))]
-                device,
-                interface,
-                bulk,
-                info,
-                #[cfg(windows)]
-                topology: usb,
-            });
-        }
-        bail!("no Apple DFU/recovery device with ECID {ecid:016x}")
+            let info = DeviceInfo::parse(&serial, mode)?;
+            Ok((info.ecid, (usb, device, info)))
+        })?;
+        let selected = if info.mode == Mode::Recovery {
+            recovery_interface(device.active_configuration()?)?
+        } else {
+            (0, 0)
+        };
+        let interface = UsbInterface::claim(&device, &usb, selected.0)
+            .context("claiming Apple USB interface; another process or driver may own it")?;
+        interface.set_alt_setting(selected.1)?;
+        let bulk = if info.mode == Mode::Recovery {
+            Some(interface.bulk_out(0x04)?)
+        } else {
+            None
+        };
+        let nonces = device
+            .get_string_descriptor(std::num::NonZeroU8::MIN, 0x0409, TIMEOUT)
+            .wait()?;
+        info.set_nonces(&nonces)?;
+        Ok(Self {
+            #[cfg(not(windows))]
+            device,
+            interface,
+            bulk,
+            info,
+            #[cfg(windows)]
+            topology: usb,
+        })
     }
 }
 
@@ -225,8 +275,7 @@ impl RecoveryTransport for RecoveryUsb {
 
 pub fn detect() -> Result<Vec<DeviceInfo>> {
     crate::log!(Trace, "usb:detect", "Scanning for Apple USB devices");
-    let mut out = Vec::new();
-    for (usb, mode) in recovery_devices()? {
+    let out = collect_devices(recovery_devices()?.map(|(usb, mode)| {
         let serial = if let Some(s) = usb.serial_number() {
             s.to_owned()
         } else {
@@ -235,11 +284,15 @@ pub fn detect() -> Result<Vec<DeviceInfo>> {
         };
         let info = DeviceInfo::parse(&serial, mode)?;
         crate::log!(Trace, "usb:detect", "{info:?}");
-        out.push(info);
-    }
+        Ok(info)
+    }))?;
     crate::log!(Trace, "usb:detect", "Found={}", out.len());
     Ok(out)
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/usb_enumeration.rs"]
+mod enumeration_tests;
 
 /// USB mux interface, selected by the vendor-specific ff/fe/02 interface triple.
 pub struct MuxUsb {

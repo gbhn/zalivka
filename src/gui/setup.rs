@@ -61,6 +61,7 @@ pub(super) struct Setup {
     pub(super) cache: String,
     pub(super) tokens: String,
     pub(super) connect_data: String,
+    pub(super) release: Option<zalivka::catalog::Release>,
 }
 
 impl Default for Setup {
@@ -72,6 +73,7 @@ impl Default for Setup {
             cache: String::new(),
             tokens: String::new(),
             connect_data: String::new(),
+            release: None,
         }
     }
 }
@@ -110,6 +112,7 @@ impl Setup {
             } else {
                 None
             },
+            release: self.automatic.then(|| self.release.clone()).flatten(),
             ecid: parse_ecid(self.ecid.trim()).map_err(anyhow::Error::msg)?,
             identity: None,
             transcript: transcript.map(Path::to_path_buf),
@@ -133,7 +136,7 @@ impl Setup {
                 let ecid = parse_ecid(self.ecid.trim()).map_err(anyhow::Error::msg)?;
                 let directory =
                     (!self.cache.trim().is_empty()).then(|| Path::new(self.cache.trim()));
-                operations::fetch(ecid, directory)?;
+                operations::fetch(ecid, directory, self.release.as_ref())?;
             }
             Action::Verify => {
                 let report = operations::verify(self.local_file()?, None)?;

@@ -8,7 +8,7 @@ fn bundled_languages_are_valid_and_select_by_system_language() {
         let _language = localizer.enter();
         assert_eq!(text("Settings"), "Настройки");
         assert_eq!(
-            text("Version 15.0, build 24A335"),
+            format("Version {}, build {}", &["15.0", "24A335"]),
             "Версия 15.0, сборка 24A335"
         );
     }
@@ -58,7 +58,10 @@ fn third_party_language_pack_is_loaded_without_source_changes() {
     );
     let _language = localizer.enter();
     assert_eq!(text("Settings"), "Paramètres");
-    assert_eq!(text("Version 15, build 24A"), "Version 15, compilation 24A");
+    assert_eq!(
+        format("Version {}, build {}", &["15", "24A"]),
+        "Version 15, compilation 24A"
+    );
     assert_eq!(text("Technical details"), "Technical details");
     assert_eq!(
         text("An unknown technical error"),
@@ -70,7 +73,6 @@ fn third_party_language_pack_is_loaded_without_source_changes() {
 fn malformed_packs_do_not_replace_valid_languages() {
     let english: Pack = serde_json::from_str(include_str!("../../locales/en.json")).unwrap();
     for messages in [
-        BTreeMap::from([("Not a known key".into(), "value".into())]),
         BTreeMap::from([("Version {}, build {}".into(), "Version {}".into())]),
         BTreeMap::from([("Stage: {}".into(), "Stage: {missing}".into())]),
     ] {
@@ -99,17 +101,20 @@ fn formatted_ui_values_and_action_names_are_localized_at_render_time() {
     let localizer = Localizer::from_directories(&[], vec!["ru".into()], "system");
     let _language = localizer.enter();
     assert_eq!(text("Restore: error"), "Восстановление: ошибка");
-    assert_eq!(text("Verifying Settings"), "Проверка Settings");
     assert_eq!(
-        text("Transferred: 60 B of 100 B"),
+        format("Verifying {name}", &["Settings"]),
+        "Проверка Settings"
+    );
+    assert_eq!(
+        format("Transferred: {size}", &["60 Б из 100 Б"]),
         "Передано: 60 Б из 100 Б"
     );
     assert_eq!(
-        text("Verifying Firmware/test.img4"),
+        format("Verifying {name}", &["Firmware/test.img4"]),
         "Проверка Firmware/test.img4"
     );
     assert_eq!(
-        text("Stage: writing filesystem"),
+        format("Stage: {}", &["writing filesystem"]),
         "Этап: writing filesystem"
     );
 }
@@ -152,4 +157,27 @@ fn russian_ui_does_not_translate_diagnostics_or_operation_names() {
             .iter()
             .all(|record| !record.message.chars().any(|ch| ('А'..='я').contains(&ch)))
     );
+}
+
+#[test]
+fn explicit_parameters_are_opaque_and_translations_can_reorder_them() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("fr.json"), r#"{"locale":"fr","name":"Français","messages":{"Version {}, build {}":"Compilation {1}, version {0}"}}"#).unwrap();
+    let localizer = Localizer::from_directories(&[directory.path().into()], vec![], "fr");
+    let _language = localizer.enter();
+    assert_eq!(
+        format("Version {}, build {}", &["Settings {1}", "24A"]),
+        "Compilation 24A, version Settings {1}"
+    );
+    assert_eq!(text("Version 15, build 24A"), "Version 15, build 24A");
+}
+
+#[test]
+fn retired_diagnostic_keys_do_not_disable_existing_ui_language_packs() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("fr.json"), r#"{"locale":"fr","name":"Français","messages":{"Settings":"Paramètres","TX frame={} B":"obsolete diagnostic"}}"#).unwrap();
+    let localizer = Localizer::from_directories(&[directory.path().into()], vec![], "fr");
+    let _language = localizer.enter();
+    assert_eq!(text("Settings"), "Paramètres");
+    assert_eq!(text("TX frame={} B"), "TX frame={} B");
 }

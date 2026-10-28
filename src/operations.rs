@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 pub struct Restore {
     pub ipsw: Option<PathBuf>,
     pub firmware_dir: Option<PathBuf>,
+    pub release: Option<catalog::Release>,
     pub ecid: u64,
     pub identity: Option<usize>,
     pub transcript: Option<PathBuf>,
@@ -35,7 +36,13 @@ impl Restore {
             let directory = self
                 .firmware_dir
                 .map_or_else(catalog::cache_directory, Ok)?;
-            catalog::obtain(&device, &directory, self.identity, behavior)?
+            catalog::obtain(
+                &device,
+                &directory,
+                self.identity,
+                behavior,
+                self.release.as_ref(),
+            )?
         };
         restore::run(
             &ipsw,
@@ -76,12 +83,16 @@ pub fn verify(path: &Path, checksum: Option<&str>) -> Result<Verification> {
     Ok(report)
 }
 
-pub fn fetch(ecid: u64, directory: Option<&Path>) -> Result<PathBuf> {
+pub fn fetch(
+    ecid: u64,
+    directory: Option<&Path>,
+    release: Option<&catalog::Release>,
+) -> Result<PathBuf> {
     let device = usb::RecoveryUsb::open(ecid)?.info;
     let directory = directory
         .map(Path::to_path_buf)
         .map_or_else(catalog::cache_directory, Ok)?;
-    let path = catalog::obtain(&device, &directory, None, Behavior::Erase)?;
+    let path = catalog::obtain(&device, &directory, None, Behavior::Erase, release)?;
     crate::log!(Info, "firmware", "Saved: {}", path.display());
     Ok(path)
 }

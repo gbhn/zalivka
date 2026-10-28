@@ -1,4 +1,4 @@
-use super::{STREAM_CHUNK, copy_prefetched};
+use super::{Identity, Ipsw, STREAM_CHUNK, copy_prefetched};
 use std::{
     io::{self, Cursor, Read, Write},
     sync::{
@@ -142,4 +142,100 @@ fn prefetch_returns_a_worker_panic_as_an_error() {
     }
     let error = copy_prefetched(PanickingReader, &mut Vec::new()).unwrap_err();
     assert_eq!(error.to_string(), "IPSW reader panicked");
+}
+
+fn filesystem_fixture(corrupt: bool) -> (tempfile::NamedTempFile, Identity, Vec<u8>) {
+    let image = vec![0x35; 128 * 1024 + 17];
+    let identity = Identity::new(
+        0,
+        crate::wire::dict([(
+            "Manifest",
+            crate::wire::dict([(
+                "OS",
+                crate::wire::dict([("Info", crate::wire::dict([("Path", "OS.dmg".into())]))]),
+            )]),
+        )]),
+    );
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file("BuildManifest.plist", options).unwrap();
+    zip.write_all(
+        &crate::wire::xml(&crate::wire::dict([
+            (
+                "BuildIdentities",
+                plist::Value::Array(vec![identity.value.clone()]),
+            ),
+            (
+                "SupportedProductTypes",
+                plist::Value::Array(vec!["MacBookAir10,1".into()]),
+            ),
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    zip.start_file("OS.dmg", options).unwrap();
+    zip.write_all(&image).unwrap();
+    zip.finish().unwrap();
+    if corrupt {
+        let mut bytes = std::fs::read(file.path()).unwrap();
+        let offset = bytes
+            .windows(4)
+            .enumerate()
+            .find_map(|(offset, signature)| {
+                (signature == b"PK\x01\x02"
+                    && bytes.get(offset + 46..offset + 52) == Some(b"OS.dmg"))
+                .then_some(offset)
+            })
+            .unwrap();
+        bytes[offset + 16] ^= 1;
+        std::fs::write(file.path(), bytes).unwrap();
+    }
+    (file, identity, image)
+}
+
+#[test]
+fn prepared_filesystems_are_reused_with_independent_worker_cursors_and_cleaned_up() {
+    let (archive, identity, expected) = filesystem_fixture(false);
+    let mut ipsw = Ipsw::open(archive.path()).unwrap();
+    ipsw.prepare_filesystem(&identity).unwrap();
+    let temporary = ipsw.prepared_images["OS.dmg"].path().to_path_buf();
+    ipsw.prepare_filesystem(&identity).unwrap();
+    assert_eq!(ipsw.prepared_images["OS.dmg"].path(), temporary);
+    let worker = ipsw.reopen().unwrap();
+    let mut first = ipsw.prepared_image("OS.dmg").unwrap();
+    let mut second = worker.prepared_image("OS.dmg").unwrap();
+    first.read_exact(&mut [0; 7]).unwrap();
+    let mut streamed = Vec::new();
+    assert_eq!(
+        ipsw.stream("OS.dmg", &mut streamed).unwrap(),
+        expected.len() as u64
+    );
+    assert_eq!(streamed, expected);
+    let mut bytes = Vec::new();
+    second.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, expected);
+    drop(first);
+    drop(second);
+    drop(ipsw);
+    assert!(temporary.exists());
+    drop(worker);
+    assert!(!temporary.exists());
+}
+
+#[test]
+fn filesystem_preparation_rejects_storage_and_crc_failures_before_caching_an_image() {
+    let (archive, identity, _) = filesystem_fixture(false);
+    let mut ipsw = Ipsw::open(archive.path()).unwrap();
+    let not_a_directory = tempfile::NamedTempFile::new().unwrap();
+    assert!(
+        ipsw.prepare_filesystem_in(&identity, not_a_directory.path())
+            .is_err()
+    );
+    assert!(ipsw.prepared_images.is_empty());
+    let (archive, identity, _) = filesystem_fixture(true);
+    let mut ipsw = Ipsw::open(archive.path()).unwrap();
+    assert!(ipsw.prepare_filesystem(&identity).is_err());
+    assert!(ipsw.prepared_images.is_empty());
 }

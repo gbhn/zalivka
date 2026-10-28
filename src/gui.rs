@@ -93,6 +93,7 @@ enum Event {
 struct Notice {
     title: String,
     detail: String,
+    journal_error: Option<String>,
     tone: Tone,
     expires_at: Option<Instant>,
 }
@@ -210,6 +211,7 @@ impl App {
         self.notice = Some(Notice {
             title: title.into(),
             detail: error.to_string(),
+            journal_error: None,
             tone: Tone::Error,
             expires_at: None,
         });
@@ -246,11 +248,9 @@ impl App {
     ) -> std::io::Result<()> {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
-        let language = self.localization.clone();
         std::thread::Builder::new()
             .name(format!("zalivka-{name}"))
             .spawn(move || {
-                let _language = language.enter();
                 let _ = tx.send(task());
                 ctx.request_repaint();
             })
@@ -304,25 +304,28 @@ impl App {
             return;
         }
         self.picking = true;
+        let title = zalivka::localization::text(match picker {
+            Picker::Firmware => "Select firmware",
+            Picker::Cache => "Firmware folder",
+            Picker::Tokens => "Token file",
+            Picker::Connect => "DAWTKN file",
+            Picker::Log => "Save journal",
+        });
         if let Err(e) = self.background(ctx, "file", move || {
             let dialog = rfd::FileDialog::new();
             let path = match picker {
                 Picker::Firmware => dialog
-                    .set_title(zalivka::localization::text("Select firmware"))
+                    .set_title(&title)
                     .add_filter("Apple IPSW", &["ipsw"])
                     .pick_file(),
-                Picker::Cache => dialog
-                    .set_title(zalivka::localization::text("Firmware folder"))
-                    .pick_folder(),
+                Picker::Cache => dialog.set_title(&title).pick_folder(),
                 Picker::Tokens => dialog
-                    .set_title(zalivka::localization::text("Token file"))
+                    .set_title(&title)
                     .add_filter("Property list", &["plist"])
                     .pick_file(),
-                Picker::Connect => dialog
-                    .set_title(zalivka::localization::text("DAWTKN file"))
-                    .pick_file(),
+                Picker::Connect => dialog.set_title(&title).pick_file(),
                 Picker::Log => dialog
-                    .set_title(zalivka::localization::text("Save journal"))
+                    .set_title(&title)
                     .set_file_name("zalivka.log")
                     .save_file(),
             };
@@ -376,11 +379,26 @@ impl App {
         }
         self.next_job += 1;
         let id = self.next_job;
-        let result = Job::spawn(id, action, &self.setup, &self.tx, ctx);
+        let mut setup = self.setup.clone();
+        setup.release = self.firmware.as_ref().and_then(|selection| {
+            self.target()
+                .filter(|device| selection.matches(device))
+                .and(selection.release.as_ref())
+                .and_then(|release| release.as_ref().ok())
+                .cloned()
+        });
+        let result = Job::spawn(
+            id,
+            action,
+            &setup,
+            &self.tx,
+            ctx,
+            self.windows_reboot_required,
+        );
         match result {
             Ok((mut job, path)) => {
                 self.logs.clear();
-                for record in job.pending_logs() {
+                for record in job.pending_logs().unwrap_or_default() {
                     self.journal_line(record);
                 }
                 self.log_path = Some(path);

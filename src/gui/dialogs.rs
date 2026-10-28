@@ -4,7 +4,7 @@ use super::widgets::{caption, card, path_picker};
 use super::{App, Confirmation, Picker, setup::Action, theme};
 use eframe::egui::{self, Color32, RichText};
 use zalivka::device::{DeviceInfo, Mode};
-use zalivka::localization::text as tr;
+use zalivka::localization::{format as trf, text as tr};
 
 impl Confirmation {
     pub(super) fn ready(&self, target: Option<&DeviceInfo>) -> bool {
@@ -39,9 +39,12 @@ impl App {
                         );
                         ui.add_space(9.0);
                         ui.label(
-                            RichText::new(tr(format!("Mac, ECID {:016x}", pending.ecid)))
-                                .monospace()
-                                .color(ui.visuals().weak_text_color()),
+                            RichText::new(trf(
+                                "Mac, ECID {:016x}",
+                                &[&format!("{:016x}", pending.ecid)],
+                            ))
+                            .monospace()
+                            .color(ui.visuals().weak_text_color()),
                         );
                         ui.add_space(12.0);
                         ui.label(tr(if erase {

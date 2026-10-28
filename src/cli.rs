@@ -136,6 +136,7 @@ impl From<RestoreArgs> for operations::Restore {
         Self {
             ipsw: args.ipsw,
             firmware_dir: args.firmware_dir,
+            release: None,
             ecid: args.ecid,
             identity: args.identity,
             transcript: args.transcript,
@@ -363,7 +364,7 @@ pub(super) fn run() -> Result<()> {
             println!("Verified firmware saved to {}", output.display());
         }
         Command::Fetch { ecid, firmware_dir } => {
-            operations::fetch(ecid, firmware_dir.as_deref())?;
+            operations::fetch(ecid, firmware_dir.as_deref(), None)?;
         }
         Command::Restore { args, erase } => {
             ensure!(erase, "--erase is required");

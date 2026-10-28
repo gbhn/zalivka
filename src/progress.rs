@@ -1,8 +1,7 @@
 //! Transfer identities, byte counters and operation progress shared with the GUI.
-use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
-    io::{self, Write},
+    io,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -10,7 +9,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const EVENT_PREFIX: &str = "ZALIVKA_EVENT ";
 pub const MAC_STARTUP_HINT: &str = "Check that the Mac starts. If it shows the Activate Mac screen, connect the Mac to Wi-Fi or Ethernet and complete activation.";
 const INTERVAL: Duration = Duration::from_millis(500);
 static NEXT_TRANSFER: AtomicU64 = AtomicU64::new(1);
@@ -151,8 +149,7 @@ pub(crate) fn on_cancel(action: impl FnOnce() + Send + 'static) {
     }
 }
 /// Worker state is independent of human-readable logs and their retained history.
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Log(crate::logging::Record),
     Transfer(Update),
@@ -168,7 +165,6 @@ pub enum Event {
     OperationWeights {
         weights: Vec<(u64, u64)>,
         /// Completed weight units from restored, not percentages.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         progresses: Vec<(u64, u64)>,
     },
     OperationProgress {
@@ -178,44 +174,6 @@ pub enum Event {
 }
 
 impl Event {
-    pub fn parse(line: &str) -> Option<Self> {
-        let mut event: Self = serde_json::from_str(line.strip_prefix(EVENT_PREFIX)?).ok()?;
-        if let Self::Log(record) = &mut event {
-            record.normalize();
-        }
-        match &event {
-            Self::Transfer(update) if !update.valid() => None,
-            Self::OperationWeights {
-                weights,
-                progresses,
-            } if weights.iter().all(|(_, weight)| *weight == 0)
-                || {
-                    let mut seen = std::collections::HashSet::new();
-                    weights.iter().any(|(operation, _)| !seen.insert(operation))
-                }
-                || {
-                    let weights: std::collections::BTreeMap<_, _> =
-                        weights.iter().copied().collect();
-                    let mut seen = std::collections::HashSet::new();
-                    progresses.iter().any(|(operation, completed)| {
-                        !seen.insert(operation)
-                            || weights
-                                .get(operation)
-                                .is_none_or(|weight| completed > weight)
-                    })
-                } =>
-            {
-                None
-            }
-            _ => Some(event),
-        }
-    }
-
-    pub fn write_to(&self, mut output: impl Write) -> io::Result<()> {
-        let json = serde_json::to_string(self).map_err(io::Error::other)?;
-        writeln!(output, "{EVENT_PREFIX}{json}")
-    }
-
     pub fn emit(&self) {
         let context = CURRENT.with(|slot| slot.borrow().clone());
         if let Some(context) = context {
@@ -228,57 +186,7 @@ impl Event {
     }
 }
 
-/// One aggregate record per image, including early failures. The write duration
-/// contains the mux profile's USB/window/lock timings; those are nested costs.
-pub(crate) struct TransferProfile {
-    stage: String,
-    started: Instant,
-    pub bytes: u64,
-    pub read: Option<Duration>,
-    pub prepare: Duration,
-    pub write: Duration,
-    pub key_exchange: Duration,
-    pub finished: bool,
-}
-
-impl TransferProfile {
-    pub fn new(stage: impl Into<String>) -> Self {
-        Self {
-            stage: stage.into(),
-            started: Instant::now(),
-            bytes: 0,
-            read: None,
-            prepare: Duration::ZERO,
-            write: Duration::ZERO,
-            key_exchange: Duration::ZERO,
-            finished: false,
-        }
-    }
-}
-
-impl Drop for TransferProfile {
-    fn drop(&mut self) {
-        let elapsed = self.started.elapsed();
-        let measured =
-            self.read.unwrap_or_default() + self.prepare + self.write + self.key_exchange;
-        crate::log!(
-            Debug,
-            "transfer:stats",
-            "Profile {}: bytes={}, finished={}, elapsed={:.3}s, read={:?}, prepare={:.3}s, write={:.3}s, key_exchange={:.3}s, other={:.3}s",
-            self.stage,
-            self.bytes,
-            self.finished,
-            elapsed.as_secs_f64(),
-            self.read.map(|time| time.as_secs_f64()),
-            self.prepare.as_secs_f64(),
-            self.write.as_secs_f64(),
-            self.key_exchange.as_secs_f64(),
-            elapsed.saturating_sub(measured).as_secs_f64()
-        );
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Update {
     pub id: u64,
     pub stage: String,
@@ -291,14 +199,6 @@ pub struct Update {
 }
 
 impl Update {
-    fn valid(&self) -> bool {
-        self.bytes_per_second.is_finite()
-            && self.bytes_per_second >= 0.0
-            && self.elapsed_seconds.is_finite()
-            && self.elapsed_seconds >= 0.0
-            && self.total.is_none_or(|total| self.completed <= total)
-    }
-
     pub fn fraction(&self) -> Option<f32> {
         self.total.map(|total| {
             if total == 0 {
@@ -353,6 +253,10 @@ impl Progress {
             ),
         );
         progress
+    }
+
+    pub(crate) fn completed(&self) -> u64 {
+        self.completed
     }
 
     pub fn advance(&mut self, bytes: u64) {
