@@ -8,6 +8,7 @@ use std::{
 
 pub const EVENT_PREFIX: &str = "ZALIVKA_EVENT ";
 pub const WORKER_EVENTS_ENV: &str = "ZALIVKA_WORKER_EVENTS";
+pub const MAC_STARTUP_HINT: &str = "Проверьте запуск Mac. Если появился экран «Активировать Mac», подключите сам Mac к Wi-Fi или Ethernet и завершите активацию.";
 const INTERVAL: Duration = Duration::from_millis(500);
 static NEXT_TRANSFER: AtomicU64 = AtomicU64::new(1);
 /// Worker state is independent of human-readable logs and their retained history.
@@ -17,6 +18,9 @@ pub enum Event {
     Log(crate::logging::Record),
     Transfer(Update),
     RestoreCompleted,
+    ProvisioningWarning {
+        message: String,
+    },
     RebootRequired,
     Checkpoint {
         name: String,

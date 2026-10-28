@@ -4,7 +4,7 @@ use super::file_data::{FILE_DATA_BATCH, FileDataWriter, send_file_data};
 use super::keys::{ImagePrefix, key_exchange};
 use super::session::{
     acknowledge_final_status, finish_final_status, log_checkpoint, log_progress, operation_weights,
-    record_message, wait_for_restore_close,
+    provisioning_failed, record_message, wait_for_restore_close,
 };
 use super::*;
 
@@ -686,6 +686,62 @@ fn device_warnings_keep_their_text_and_level_for_every_checkpoint() {
             assert_eq!(output[2].level, Level::Error);
         }
     }
+}
+
+#[test]
+fn offline_ucrt_warns_even_when_checkpoints_and_final_status_report_success() {
+    let messages: Vec<Value> = include_str!("../fixtures/restored-ucrt-offline-26B123.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for checkpoint in &messages[..2] {
+        log_checkpoint(checkpoint, |_| {}).unwrap();
+        assert!(provisioning_failed(checkpoint));
+        assert_eq!(
+            wire::get(checkpoint, &["CHECKPOINT_RESULT"])
+                .unwrap()
+                .as_signed_integer(),
+            Some(0)
+        );
+    }
+    let status = &messages[2];
+    let mut output = Vec::new();
+    finish_final_status(&mut output, status, || Ok(())).unwrap();
+    assert_eq!(
+        wire::string(
+            &wire::receive(&mut output.as_slice()).unwrap(),
+            &["MsgType"]
+        )
+        .unwrap(),
+        "ReceivedFinalStatusMsg"
+    );
+
+    let original = &messages[0];
+    for (key, value, expected) in [
+        ("CHECKPOINT_NAME", "other_step".into(), false),
+        ("CHECKPOINT_COMPLETE", false.into(), false),
+        ("CHECKPOINT_ERROR", " ".into(), false),
+        ("CHECKPOINT_RESULT", (-1i64).into(), true),
+    ] {
+        let mut checkpoint = original.clone();
+        checkpoint
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(key.into(), value);
+        assert_eq!(provisioning_failed(&checkpoint), expected, "{checkpoint:?}");
+    }
+    let healthy = wire::dict([
+        ("CHECKPOINT_NAME", "create_production_dcrt".into()),
+        ("CHECKPOINT_COMPLETE", true.into()),
+        ("CHECKPOINT_RESULT", 0i64.into()),
+    ]);
+    assert!(!provisioning_failed(&healthy));
+    let mut failed = healthy;
+    failed
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("CHECKPOINT_RESULT".into(), (-1i64).into());
+    assert!(provisioning_failed(&failed));
 }
 
 #[test]

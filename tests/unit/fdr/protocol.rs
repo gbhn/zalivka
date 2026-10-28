@@ -128,7 +128,7 @@ fn proxy_handshake_accepts_greeting_and_direct_connect_with_fragmented_bytes() {
             greeting,
         };
         assert_eq!(
-            proxy_handshake(&mut peer).unwrap(),
+            proxy_handshake(&mut peer, 1).unwrap(),
             ("tbsc.apple.com".into(), 443)
         );
         let mut expected = if greeting {
@@ -170,7 +170,58 @@ fn proxy_handshake_rejects_invalid_and_truncated_requests_before_echoing_an_addr
             output: vec![],
             greeting: false,
         };
-        assert!(proxy_handshake(&mut peer).is_err());
-        assert!(peer.output.is_empty() || peer.output == [5, 0]);
+        assert!(proxy_handshake(&mut peer, 1).is_err());
+        assert!(peer.output.is_empty() || peer.output == [5, 0] || peer.output == [5, 0xff]);
+    }
+}
+
+#[test]
+fn proxy_greeting_selects_no_auth_from_the_entire_method_list() {
+    for methods in [vec![0, 1], vec![0, 2], vec![1, 0], vec![2, 1, 0], {
+        let mut methods = vec![1; 255];
+        methods[254] = 0;
+        methods
+    }] {
+        let host = b"tbsc.apple.com";
+        let mut connect = vec![5, 1, 0, 3, host.len() as u8];
+        connect.extend_from_slice(host);
+        connect.extend_from_slice(&443u16.to_be_bytes());
+        let mut input = methods.clone();
+        input.extend_from_slice(&connect);
+        input.extend_from_slice(b"TLS");
+        let mut peer = ProxyPeer {
+            input: Cursor::new(input),
+            output: vec![],
+            greeting: false,
+        };
+        assert_eq!(
+            proxy_handshake(&mut peer, methods.len() as u8).unwrap(),
+            ("tbsc.apple.com".into(), 443)
+        );
+        let mut expected = vec![5, 0, 5, 0];
+        expected.extend_from_slice(&connect[2..]);
+        assert_eq!(peer.output, expected);
+        assert_eq!(
+            peer.input.position() as usize,
+            methods.len() + connect.len()
+        );
+    }
+}
+
+#[test]
+fn proxy_greeting_rejects_missing_no_auth_without_accepting_connect() {
+    for methods in [vec![1], vec![2], vec![1, 2]] {
+        let mut peer = ProxyPeer {
+            input: Cursor::new(methods.clone()),
+            output: vec![],
+            greeting: false,
+        };
+        assert!(
+            proxy_handshake(&mut peer, methods.len() as u8)
+                .unwrap_err()
+                .to_string()
+                .contains("no-authentication")
+        );
+        assert_eq!(peer.output, [5, 0xff]);
     }
 }

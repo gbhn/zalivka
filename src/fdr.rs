@@ -150,7 +150,7 @@ fn control_loop(
                     thread::Builder::new()
                         .name("zalivka-fdr-connection".into())
                         .spawn(move || {
-                            let result = handle_connection(connection, &child_stop);
+                            let result = handle_connection(connection, &child_stop, crate::proxy::connect);
                             // FDR connections have independent lifetimes. The
                             // device can close one or request a replacement;
                             // restored's final status decides restore success.
@@ -183,7 +183,11 @@ impl Drop for Fdr {
     }
 }
 
-fn handle_connection(mut stream: MuxStream, stop: &AtomicBool) -> Result<()> {
+pub(crate) fn handle_connection<S: Read + Write>(
+    mut stream: MuxStream,
+    stop: &AtomicBool,
+    mut connect: impl FnMut(&str, u16) -> Result<S>,
+) -> Result<()> {
     stream.set_read_timeout(Duration::from_secs(1));
     let mut cmd = [0; 2];
     while read_exact_idle(&mut stream, &mut cmd, stop).context("reading FDR connection command")? {
@@ -194,13 +198,12 @@ fn handle_connection(mut stream: MuxStream, stop: &AtomicBool) -> Result<()> {
                 ping(&mut stream)?;
                 stream.set_read_timeout(Duration::from_secs(1));
             }
-            0x105 => {
+            _ if cmd[0] == 5 && cmd[1] != 0 => {
                 stream.set_read_timeout(Duration::from_secs(20));
-                let (host, port) = proxy_handshake(&mut stream)?;
+                let (host, port) = proxy_handshake(&mut stream, cmd[1])?;
                 crate::log!(Debug, "fdr", "Подключение прокси FDR к {host}:{port}");
                 let connecting = Instant::now();
-                let mut socket =
-                    crate::proxy::connect(&host, port).context("connecting FDR Apple endpoint")?;
+                let mut socket = connect(&host, port).context("connecting FDR Apple endpoint")?;
                 crate::log!(
                     Debug,
                     "fdr",

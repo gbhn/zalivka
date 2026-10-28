@@ -214,6 +214,22 @@ pub(super) fn log_checkpoint(
     })
 }
 
+pub(super) fn provisioning_failed(message: &Value) -> bool {
+    matches!(
+        wire::string(message, &["CHECKPOINT_NAME"]).ok(),
+        Some("create_production_ucrt" | "create_production_dcrt")
+    ) && wire::optional_boolean(message, &["CHECKPOINT_COMPLETE"])
+        .ok()
+        .flatten()
+        == Some(true)
+        && (wire::get(message, &["CHECKPOINT_RESULT"])
+            .ok()
+            .and_then(Value::as_signed_integer)
+            .is_some_and(|result| result != 0)
+            || wire::string(message, &["CHECKPOINT_ERROR"])
+                .is_ok_and(|error| !error.trim().is_empty()))
+}
+
 /// Once firmware is running, a diagnostic write must not interrupt the device
 /// protocol. A partial JSON line also makes the transcript unsafe to append to.
 pub(super) fn record_message(log: &mut Option<impl Write>, message: &Value) -> Option<Record> {
@@ -244,6 +260,7 @@ pub(super) fn run(
     let ecid = state.device.ecid;
     let mut started = false;
     let mut final_received = false;
+    let mut provisioning_error = false;
     let mut protocol = None;
     for attempt in 0..=3 {
         let (session, mut main, version) =
@@ -308,6 +325,14 @@ pub(super) fn run(
                             "restore",
                             "Канал восстановления закрыт после подтверждения"
                         );
+                        if provisioning_error {
+                            let message = "При получении сертификатов Apple произошла ошибка. Подключите сам Mac к Wi-Fi или Ethernet и завершите активацию.";
+                            crate::log!(Warning, "restore", "{message}");
+                            crate::progress::Event::ProvisioningWarning {
+                                message: message.into(),
+                            }
+                            .emit();
+                        }
                         return Ok(());
                     }
                     "ProgressMsg" => {
@@ -319,6 +344,10 @@ pub(super) fn run(
                     }
                     "CheckpointMsg" => {
                         let event = log_checkpoint(&message, crate::logging::publish)?;
+                        // A zero checkpoint result and final Status=0 do not
+                        // guarantee that Apple issued the activation certificates.
+                        // Keep this warning through reconnects and later steps.
+                        provisioning_error |= provisioning_failed(&message);
                         event.emit();
                     }
                     "AsyncWait" => {}

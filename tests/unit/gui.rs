@@ -392,6 +392,9 @@ fn stale_worker_events_do_not_enter_a_new_journal() {
             Output::Line("stale error".into()),
             Output::State(progress::Event::RestoreCompleted),
             Output::State(progress::Event::RebootRequired),
+            Output::State(progress::Event::ProvisioningWarning {
+                message: "stale activation warning".into(),
+            }),
             Output::Closed,
         ] {
             app.tx.send(Event::Worker(999, output)).unwrap();
@@ -593,7 +596,7 @@ fn exited_worker_keeps_final_lines_until_both_readers_finish() {
     let notice = app.notice.as_ref().unwrap();
     assert_eq!(notice.tone, Tone::Success);
     assert_eq!(notice.title, Action::Restore.completed_title());
-    assert_eq!(notice.detail, "Проверьте запуск Mac.");
+    assert_eq!(notice.detail, progress::MAC_STARTUP_HINT);
     assert!(
         std::fs::read_to_string(log.path())
             .unwrap()
@@ -648,11 +651,50 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
         assert_eq!(notice.tone, Tone::Success);
         assert!(notice.expires_at.is_some());
         let expected_detail = match action {
-            Action::Restore | Action::Revive => "Проверьте запуск Mac.",
+            Action::Restore | Action::Revive => progress::MAC_STARTUP_HINT,
             Action::ResetDrivers => "Подключите Mac заново и введите его в DFU.",
             _ => "",
         };
         assert_eq!(notice.detail, expected_detail);
+    }
+}
+
+#[test]
+fn provisioning_warning_survives_completion_and_journal_eviction() {
+    for action in [Action::Restore, Action::Revive] {
+        let mut app = App::new();
+        app.job = Some(job(action));
+        let message = "При получении сертификатов Apple произошла ошибка. Подключите сам Mac к Wi-Fi или Ethernet и завершите активацию.";
+        send_worker(
+            &mut app,
+            progress::Event::ProvisioningWarning {
+                message: message.into(),
+            },
+        );
+        send_worker(&mut app, progress::Event::RestoreCompleted);
+        for index in 0..4001 {
+            app.journal_line(Record::new(Level::Info, "test", format!("message {index}")));
+        }
+        let job = app.job.as_mut().unwrap();
+        let notice = job.completion_notice(true, false);
+        assert_eq!(notice.tone, Tone::Neutral);
+        assert!(notice.title.contains("проверьте активацию"));
+        assert_eq!(notice.detail, message);
+        assert!(notice.expires_at.is_none());
+        assert_eq!(job.overall_fraction, Some(1.0));
+        assert_eq!(job.completion_notice(false, false).tone, Tone::Error);
+        job.cancelled = true;
+        assert_eq!(
+            job.completion_notice(true, false).title,
+            "Операция остановлена"
+        );
+        job.cancelled = false;
+        app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
+        app.tx.send(Event::Worker(7, Output::Closed)).unwrap();
+        app.poll(&egui::Context::default());
+        assert!(app.job.is_none());
+        assert_eq!(app.notice.as_ref().unwrap().detail, message);
+        assert_eq!(app.logs.back().unwrap().level, Level::Warning);
     }
 }
 
@@ -738,7 +780,7 @@ fn worker_state_survives_journal_eviction_and_protects_restore_from_stopping() {
     let job = app.job.as_mut().unwrap();
     assert_eq!(
         job.completion_notice(true, false).detail,
-        "Проверьте запуск Mac."
+        progress::MAC_STARTUP_HINT
     );
     assert!(!job.can_stop());
     assert!(job.stop().is_err());

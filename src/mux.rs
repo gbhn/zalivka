@@ -462,6 +462,15 @@ impl Link {
         }
         c.window = u32::from(u16::from_be_bytes(tcp[14..16].try_into()?)) << 8;
         if flags & RST != 0 {
+            crate::log!(
+                Debug,
+                "usbmux",
+                "RST от Mac: {peer_port} -> {source}, seq={seq}, ack={ack}, buffered={} Б, reason={:?} (hex={}, bytes={})",
+                c.input.len(),
+                String::from_utf8_lossy(&data[..data.len().min(256)]),
+                hex::encode(&data[..data.len().min(256)]),
+                data.len()
+            );
             c.closed = true;
             return Ok(true);
         }
@@ -503,6 +512,12 @@ impl Link {
             c.ack = c.ack.wrapping_add(data.len() as u32);
         }
         if flags & 1 != 0 {
+            crate::log!(
+                Debug,
+                "usbmux",
+                "FIN от Mac: {peer_port} -> {source}, seq={seq}, ack={ack}, buffered={} Б",
+                c.input.len()
+            );
             c.ack = c.ack.wrapping_add(1);
             c.closed = true;
         }

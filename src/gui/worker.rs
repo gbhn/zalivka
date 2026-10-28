@@ -23,6 +23,7 @@ pub(super) struct Job {
     pub(super) readers: u8,
     pub(super) cancelled: bool,
     pub(super) restore_completed: bool,
+    provisioning_warning: Option<String>,
     pub(super) transfers: BTreeMap<u64, Transfer>,
     overall_operations: BTreeMap<u64, Operation>,
     pub(super) overall_fraction: Option<f32>,
@@ -98,6 +99,7 @@ impl Job {
             readers: 2,
             cancelled: false,
             restore_completed: false,
+            provisioning_warning: None,
             transfers: BTreeMap::new(),
             overall_operations: BTreeMap::new(),
             overall_fraction: None,
@@ -184,6 +186,9 @@ impl Job {
                 self.restore_completed = true;
                 self.overall_fraction = Some(1.0);
                 self.set_phase("Восстановление завершено");
+            }
+            progress::Event::ProvisioningWarning { message } => {
+                self.provisioning_warning = Some(message);
             }
             progress::Event::RebootRequired => {}
             progress::Event::Checkpoint { name, complete } => {
@@ -286,11 +291,19 @@ impl Job {
                 "Драйвер установлен. Перезагрузите компьютер перед восстановлением Mac.".into(),
                 Tone::Neutral,
             )
+        } else if self.action.writes_device()
+            && let Some(warning) = &self.provisioning_warning
+        {
+            (
+                format!("{}: проверьте активацию", self.action.completed_title()),
+                warning.clone(),
+                Tone::Neutral,
+            )
         } else {
             (
                 self.action.completed_title().into(),
                 if self.action.writes_device() {
-                    "Проверьте запуск Mac.".into()
+                    progress::MAC_STARTUP_HINT.into()
                 } else if self.action == Action::ResetDrivers {
                     "Подключите Mac заново и введите его в DFU.".into()
                 } else {

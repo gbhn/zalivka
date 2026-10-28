@@ -171,7 +171,12 @@ impl RestoreArgs {
             behavior,
             assets,
         )?;
-        zalivka::log!(Info, "restore", "Восстановление завершено");
+        zalivka::log!(
+            Info,
+            "restore",
+            "Восстановление завершено. {}",
+            progress::MAC_STARTUP_HINT
+        );
         progress::Event::RestoreCompleted.emit();
         Ok(())
     }

@@ -6,6 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "fdr_lab.rs"]
+mod fdr_lab;
+
 fn pac_server(script: &str) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();

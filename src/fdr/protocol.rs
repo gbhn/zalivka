@@ -3,7 +3,7 @@ use crate::{
     mux::{MuxStream, Session},
     wire,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use std::{
     io::{Read, Write},
@@ -105,29 +105,49 @@ pub(super) fn ping(stream: &mut (impl Read + Write)) -> Result<()> {
     wire::send_binary_le(stream, &wire::dict([("Pong", true.into())]))
 }
 
-/// The 05 01 command can begin either a SOCKS greeting (05 01 00) or
-/// CONNECT (05 01 00 03 ...). Acknowledge the single zero byte first:
-/// the greeting's sender waits for 05 00 before sending CONNECT. Parse
-/// bytes rather than relying on USB packet boundaries to tell them apart.
-pub(super) fn proxy_handshake(stream: &mut (impl Read + Write)) -> Result<(String, u16)> {
-    let mut zero = [0];
+/// Read all NMETHODS from the SOCKS5 greeting and select no authentication.
+/// Legacy direct CONNECT shares the 05 01 00 prefix with a one-method greeting;
+/// acknowledge it before reading on so a greeting's client can send CONNECT.
+pub(super) fn proxy_handshake(
+    stream: &mut (impl Read + Write),
+    method_count: u8,
+) -> Result<(String, u16)> {
+    ensure!(method_count != 0, "empty FDR SOCKS method list");
+    let mut methods = vec![0; usize::from(method_count)];
     stream
-        .read_exact(&mut zero)
-        .context("reading FDR proxy method")?;
-    ensure!(zero == [0], "unsupported FDR proxy method");
+        .read_exact(&mut methods)
+        .context("reading FDR proxy methods")?;
+    crate::log!(
+        Debug,
+        "fdr",
+        "SOCKS/FDR префикс: 05{method_count:02x}{}",
+        hex::encode(&methods)
+    );
+    if !methods.contains(&0) {
+        stream.write_all(&[5, 0xff])?;
+        bail!("FDR SOCKS client did not offer the no-authentication method");
+    }
+    let mut zero = [0];
     stream.write_all(&[5, 0])?;
+    crate::log!(Debug, "fdr", "SOCKS ответ: 0500");
 
     let mut address_type = [0; 2];
     stream
         .read_exact(&mut address_type)
         .context("reading FDR proxy address type or CONNECT")?;
-    if address_type == [5, 1] {
+    ensure!(
+        method_count == 1 || address_type == [5, 1],
+        "expected FDR SOCKS CONNECT after greeting"
+    );
+    let greeting = address_type == [5, 1];
+    if greeting {
         // The first command was a greeting; this is the actual CONNECT.
         stream
             .read_exact(&mut zero)
             .context("reading FDR proxy CONNECT reserved byte")?;
         ensure!(zero == [0], "unsupported FDR proxy CONNECT reserved byte");
         stream.write_all(&[5, 0])?;
+        crate::log!(Debug, "fdr", "SOCKS ответ CONNECT: 0500");
         stream
             .read_exact(&mut address_type)
             .context("reading FDR proxy address type")?;
@@ -144,8 +164,23 @@ pub(super) fn proxy_handshake(stream: &mut (impl Read + Write)) -> Result<(Strin
     let host = std::str::from_utf8(&address[..n - 2])?.trim_end_matches('\0');
     let port = u16::from_be_bytes(address[n - 2..].try_into()?);
     validate_proxy_target(host, port)?;
+    crate::log!(
+        Debug,
+        "fdr",
+        "SOCKS CONNECT: greeting={}, тело=0003{}{}",
+        greeting,
+        hex::encode(&address_type[1..]),
+        hex::encode(&address)
+    );
     stream.write_all(&[0, address_type[0], address_type[1]])?;
     stream.write_all(&address)?;
+    crate::log!(
+        Debug,
+        "fdr",
+        "SOCKS тело ответа: 0003{}{}",
+        hex::encode(&address_type[1..]),
+        hex::encode(&address)
+    );
     crate::log!(Debug, "fdr", "Запрос CONNECT к {host}:{port} принят");
     Ok((host.into(), port))
 }
