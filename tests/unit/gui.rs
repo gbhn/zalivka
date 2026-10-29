@@ -254,11 +254,42 @@ fn send_worker(app: &mut App, event: progress::Event) {
     app.poll(&egui::Context::default());
 }
 
-fn record_completion(app: &mut App, success: bool) {
+fn finished(success: bool) -> Output {
+    Output::Finished(worker::Completion {
+        success,
+        ..worker::Completion::default()
+    })
+}
+
+fn connect_worker(app: &mut App) -> std::sync::Arc<std::sync::Mutex<worker::Completion>> {
+    let job = app.job.as_mut().unwrap();
+    let (context, completion) = job
+        .worker_context(
+            &app.tx,
+            &egui::Context::default(),
+            app.windows_reboot_required,
+        )
+        .unwrap();
+    if job.context.cancelled() {
+        context.cancel();
+    }
+    job.context = context;
+    completion
+}
+
+fn finish_worker(app: &mut App, completion: worker::Completion) {
     let job = app.job.as_ref().unwrap();
-    let notice = job.completion_notice(success, app.windows_reboot_required);
-    let record = worker::completion_record(&notice, job.cancelled, job.started);
-    send_worker(app, progress::Event::Log(record));
+    let completion = completion.finish(job.action, job.started, &job.context, &job.journal);
+    app.tx
+        .send(Event::Worker(job.id, Output::Finished(completion)))
+        .unwrap();
+}
+
+fn record_completion(app: &mut App, success: bool) {
+    let state = connect_worker(app);
+    let mut completion = std::mem::take(&mut *state.lock().unwrap());
+    completion.success = success;
+    finish_worker(app, completion);
 }
 
 #[test]
@@ -368,9 +399,7 @@ fn completion_waits_for_pending_logs_without_blocking_the_gui() {
         let record = journal.write(Record::new(Level::Error, "test", "last operation error"));
         journal.push(record);
     }
-    app.tx
-        .send(Event::Worker(7, Output::Finished(false)))
-        .unwrap();
+    record_completion(&mut app, false);
     let (ready, locked) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let holder = std::thread::spawn(move || {
@@ -381,6 +410,10 @@ fn completion_waits_for_pending_logs_without_blocking_the_gui() {
     locked.recv().unwrap();
     app.poll(&egui::Context::default());
     let still_running = app.job.is_some();
+    let completed = app.job.as_mut().unwrap();
+    assert!(completed.completion.is_some());
+    assert!(completed.stop().is_err());
+    assert!(!completed.context.cancelled());
     let _ = release.send(());
     holder.join().unwrap();
     assert!(
@@ -508,7 +541,7 @@ fn stale_worker_events_do_not_enter_a_new_journal() {
             Output::State(progress::Event::ProvisioningWarning {
                 message: "stale activation warning".into(),
             }),
-            Output::Finished(true),
+            finished(true),
         ] {
             app.tx.send(Event::Worker(999, output)).unwrap();
         }
@@ -517,7 +550,7 @@ fn stale_worker_events_do_not_enter_a_new_journal() {
         assert!(app.notice.is_none());
         assert!(!app.windows_reboot_required);
         if let Some(job) = app.job {
-            assert_eq!(job.success, None);
+            assert!(job.completion.is_none());
             assert!(!job.restore_completed);
         }
     }
@@ -606,10 +639,9 @@ fn failed_journal_writes_keep_worker_state_and_report_partial_logging() {
     assert_eq!(app.logs.back().unwrap().message, "next record");
     send_worker(&mut app, progress::Event::RestoreCompleted);
     assert!(!app.job.as_ref().unwrap().can_stop());
+    record_completion(&mut app, true);
     for _ in 0..2 {
-        app.tx
-            .send(Event::Worker(7, Output::Finished(true)))
-            .unwrap();
+        app.tx.send(Event::Worker(7, finished(true))).unwrap();
     }
     app.poll(&egui::Context::default());
     let notice = app.notice.as_ref().unwrap();
@@ -631,9 +663,7 @@ fn a_failure_writing_the_final_record_cannot_report_a_complete_journal() {
     app.job = Some(operation);
     record_completion(&mut app, true);
     for _ in 0..2 {
-        app.tx
-            .send(Event::Worker(7, Output::Finished(true)))
-            .unwrap();
+        app.tx.send(Event::Worker(7, finished(true))).unwrap();
     }
     app.poll(&egui::Context::default());
     assert!(app.job.is_none());
@@ -679,18 +709,14 @@ fn native_completion_follows_final_events_and_journal_writes() {
     app.job = Some(operation);
     app.poll(&ctx);
     assert!(app.notice.is_none());
-    assert_eq!(app.job.as_ref().unwrap().success, None);
-    app.tx
-        .send(Event::Worker(999, Output::Finished(true)))
-        .unwrap();
+    assert!(app.job.as_ref().unwrap().completion.is_none());
+    app.tx.send(Event::Worker(999, finished(true))).unwrap();
     send_worker(
         &mut app,
         progress::Event::Log(Record::new(Level::Warning, "test", "final worker message")),
     );
     assert!(app.notice.is_none());
-    app.tx
-        .send(Event::Worker(7, Output::Finished(true)))
-        .unwrap();
+    record_completion(&mut app, true);
     app.poll(&ctx);
     assert!(app.job.is_none());
     let notice = app.notice.as_ref().unwrap();
@@ -702,6 +728,115 @@ fn native_completion_follows_final_events_and_journal_writes() {
             .unwrap()
             .contains("final worker message")
     );
+}
+
+#[test]
+fn completion_carries_reboot_and_journal_errors_without_earlier_gui_updates() {
+    for action in [Action::PrepareWindows, Action::ResetDrivers] {
+        let mut app = english_app();
+        app.job = Some(job(action));
+        app.tx
+            .send(Event::Worker(
+                7,
+                Output::Finished(worker::Completion {
+                    success: true,
+                    reboot_required: true,
+                    ..worker::Completion::default()
+                }),
+            ))
+            .unwrap();
+        // The terminal result cannot be replaced by a conflicting duplicate.
+        app.tx.send(Event::Worker(7, finished(false))).unwrap();
+        assert!(!app.windows_reboot_required);
+        app.poll(&egui::Context::default());
+        assert!(app.job.is_none());
+        assert!(app.windows_reboot_required);
+        assert_eq!(app.notice.as_ref().unwrap().title, "Restart Windows");
+    }
+
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut app = english_app();
+    app.job = Some(job(Action::Verify));
+    app.log_path = Some(log.path().into());
+    app.tx
+        .send(Event::Worker(
+            7,
+            Output::Finished(worker::Completion {
+                success: true,
+                journal_error: Some("journal thread stopped".into()),
+                ..worker::Completion::default()
+            }),
+        ))
+        .unwrap();
+    app.poll(&egui::Context::default());
+    assert!(app.job.is_none());
+    assert!(app.log_path.is_none());
+    assert!(app.journal_open);
+    let notice = app.notice.as_ref().unwrap();
+    assert_eq!(notice.title, Action::Verify.completed_title());
+    assert_eq!(notice.tone, Tone::Neutral);
+    assert_eq!(
+        notice.journal_error.as_deref(),
+        Some("journal thread stopped")
+    );
+    assert!(notice.expires_at.is_none());
+}
+
+#[test]
+fn completion_uses_context_cancellation_without_a_separate_gui_flag() {
+    let mut app = english_app();
+    app.job = Some(job(Action::Doctor));
+    let state = connect_worker(&mut app);
+    let context = app.job.as_ref().unwrap().context.clone();
+    std::thread::spawn(move || context.cancel()).join().unwrap();
+    let mut completion = std::mem::take(&mut *state.lock().unwrap());
+    completion.success = true;
+    finish_worker(&mut app, completion);
+    app.poll(&egui::Context::default());
+    assert!(app.job.is_none());
+    let notice = app.notice.as_ref().unwrap();
+    assert_eq!(notice.title, "Operation stopped");
+    assert_eq!(notice.tone, Tone::Neutral);
+    assert_eq!(app.logs.back().unwrap().level, Level::Info);
+    assert!(
+        app.logs
+            .back()
+            .unwrap()
+            .message
+            .starts_with("Operation stopped.")
+    );
+}
+
+#[test]
+fn final_record_failure_is_carried_in_the_result_before_the_gui_polls() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let operation = job(Action::Verify);
+    operation.journal.lock().unwrap().log =
+        std::io::BufWriter::new(File::open(log.path()).unwrap());
+    let mut app = english_app();
+    app.log_path = Some(log.path().into());
+    app.job = Some(operation);
+    record_completion(&mut app, true);
+    let event = app.rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let Event::Worker(7, Output::Finished(completion)) = &event else {
+        panic!("expected the completed worker result");
+    };
+    assert!(
+        completion.success,
+        "a journal failure must preserve the operation result"
+    );
+    assert!(completion.journal_error.is_some());
+    let notice = completion.notice(Action::Verify);
+    assert_eq!(notice.title, Action::Verify.completed_title());
+    assert_eq!(notice.tone, Tone::Neutral);
+    assert!(notice.expires_at.is_none());
+    assert!(app.notice.is_none());
+    assert!(app.log_path.is_some());
+    app.tx.send(event).unwrap();
+    app.poll(&egui::Context::default());
+    assert!(app.job.is_none());
+    assert!(app.log_path.is_none());
+    assert!(app.notice.as_ref().unwrap().journal_error.is_some());
 }
 
 #[test]
@@ -770,33 +905,42 @@ fn trace_bursts_do_not_evict_the_visible_operation_history() {
 
 #[test]
 fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
-    let mut job = job(Action::Restore);
-    job.cancelled = true;
-    for success in [false, true] {
-        let notice = job.completion_notice(success, true);
-        assert_eq!(notice.title, "Operation stopped");
-        assert!(notice.detail.is_empty());
-        assert_eq!(notice.tone, Tone::Neutral);
-        assert!(notice.expires_at.is_some());
+    use worker::Completion;
+    for action in [Action::Restore, Action::Revive] {
+        for success in [false, true] {
+            let notice = Completion {
+                success,
+                cancelled: true,
+                reboot_required: true,
+                ..Completion::default()
+            }
+            .notice(action);
+            assert_eq!(notice.title, "Operation stopped");
+            assert!(notice.detail.is_empty());
+            assert_eq!(notice.tone, Tone::Neutral);
+            assert!(notice.expires_at.is_some());
+        }
     }
-    job.action = Action::Revive;
-    assert_eq!(
-        job.completion_notice(false, true).title,
-        "Operation stopped"
-    );
-    job.cancelled = false;
     for action in [
         Action::Restore,
         Action::PrepareWindows,
         Action::ResetDrivers,
     ] {
-        job.action = action;
-        let notice = job.completion_notice(false, true);
+        let notice = Completion {
+            reboot_required: true,
+            ..Completion::default()
+        }
+        .notice(action);
         assert_eq!(notice.tone, Tone::Error);
         assert!(notice.title.ends_with(": error"));
         assert!(notice.expires_at.is_none());
     }
-    let notice = job.completion_notice(true, true);
+    let notice = Completion {
+        success: true,
+        reboot_required: true,
+        ..Completion::default()
+    }
+    .notice(Action::ResetDrivers);
     assert_eq!(notice.title, "Restart Windows");
     assert_eq!(notice.tone, Tone::Neutral);
     assert!(notice.expires_at.is_none());
@@ -809,8 +953,11 @@ fn completion_notice_preserves_cancel_failure_reboot_and_success_priority() {
         Action::PrepareWindows,
         Action::ResetDrivers,
     ] {
-        job.action = action;
-        let notice = job.completion_notice(true, false);
+        let notice = Completion {
+            success: true,
+            ..Completion::default()
+        }
+        .notice(action);
         assert_eq!(notice.title, action.completed_title());
         assert_eq!(notice.tone, Tone::Success);
         assert!(notice.expires_at.is_some());
@@ -828,38 +975,35 @@ fn provisioning_warning_survives_completion_and_journal_eviction() {
     for action in [Action::Restore, Action::Revive] {
         let mut app = english_app();
         app.job = Some(job(action));
+        let state = connect_worker(&mut app);
         let message = "Could not obtain Apple certificates. Connect the Mac to Wi-Fi or Ethernet and complete activation.";
-        send_worker(
-            &mut app,
+        app.job.as_ref().unwrap().context.run(|| {
             progress::Event::ProvisioningWarning {
                 message: message.into(),
-            },
-        );
+            }
+            .emit();
+        });
         send_worker(&mut app, progress::Event::RestoreCompleted);
         for index in 0..4001 {
             app.journal_line(Record::new(Level::Info, "test", format!("message {index}")));
         }
-        let job = app.job.as_mut().unwrap();
-        let notice = job.completion_notice(true, false);
+        let mut completion = std::mem::take(&mut *state.lock().unwrap());
+        completion.success = true;
+        let notice = completion.notice(action);
         assert_eq!(notice.tone, Tone::Neutral);
         assert!(notice.title.contains("check activation"));
         assert_eq!(notice.detail, message);
         assert!(notice.expires_at.is_none());
-        assert_eq!(job.overall_fraction, Some(1.0));
-        assert_eq!(job.completion_notice(false, false).tone, Tone::Error);
-        job.cancelled = true;
-        assert_eq!(
-            job.completion_notice(true, false).title,
-            "Operation stopped"
-        );
-        job.cancelled = false;
-        record_completion(&mut app, true);
-        app.tx
-            .send(Event::Worker(7, Output::Finished(true)))
-            .unwrap();
-        app.tx
-            .send(Event::Worker(7, Output::Finished(true)))
-            .unwrap();
+        assert_eq!(app.job.as_ref().unwrap().overall_fraction, Some(1.0));
+        completion.success = false;
+        assert_eq!(completion.notice(action).tone, Tone::Error);
+        completion.success = true;
+        completion.cancelled = true;
+        assert_eq!(completion.notice(action).title, "Operation stopped");
+        completion.cancelled = false;
+        finish_worker(&mut app, completion);
+        // A duplicate incomplete result cannot erase the worker's warning.
+        app.tx.send(Event::Worker(7, finished(true))).unwrap();
         app.poll(&egui::Context::default());
         assert!(app.job.is_none());
         assert_eq!(app.notice.as_ref().unwrap().detail, message);
@@ -885,9 +1029,7 @@ fn completion_records_label_duration_without_adding_it_to_notifications() {
         app.job = Some(operation);
         record_completion(&mut app, true);
         for _ in 0..2 {
-            app.tx
-                .send(Event::Worker(7, Output::Finished(true)))
-                .unwrap();
+            app.tx.send(Event::Worker(7, finished(true))).unwrap();
         }
         app.poll(&egui::Context::default());
         assert!(app.job.is_none());
@@ -955,17 +1097,30 @@ fn worker_state_survives_journal_eviction_and_protects_restore_from_stopping() {
     assert_eq!(app.logs.len(), 4000);
     let job = app.job.as_mut().unwrap();
     assert_eq!(
-        job.completion_notice(true, false).detail,
+        worker::Completion {
+            success: true,
+            ..worker::Completion::default()
+        }
+        .notice(job.action)
+        .detail,
         progress::MAC_STARTUP_HINT
     );
     assert!(!job.can_stop());
     assert!(job.stop().is_err());
     job.action = Action::PrepareWindows;
-    job.cancelled = false;
     assert!(!job.can_stop());
     job.action = Action::ResetDrivers;
     assert!(!job.can_stop());
-    assert_eq!(job.completion_notice(true, true).title, "Restart Windows");
+    assert_eq!(
+        worker::Completion {
+            success: true,
+            reboot_required: true,
+            ..worker::Completion::default()
+        }
+        .notice(job.action)
+        .title,
+        "Restart Windows"
+    );
     send_worker(&mut app, progress::Event::RebootRequired);
     assert!(app.windows_reboot_required);
 }
@@ -974,11 +1129,32 @@ fn worker_state_survives_journal_eviction_and_protects_restore_from_stopping() {
 fn driver_reset_waits_for_completion_and_prompts_to_reconnect_or_reboot() {
     let job = job(Action::ResetDrivers);
     assert!(!job.can_stop());
-    let notice = job.completion_notice(true, false);
+    let notice = worker::Completion {
+        success: true,
+        ..worker::Completion::default()
+    }
+    .notice(job.action);
     assert_eq!(notice.title, Action::ResetDrivers.completed_title());
     assert!(notice.detail.contains("enter DFU mode"));
-    assert_eq!(job.completion_notice(true, true).title, "Restart Windows");
-    assert_eq!(job.completion_notice(false, true).tone, Tone::Error);
+    assert_eq!(
+        worker::Completion {
+            success: true,
+            reboot_required: true,
+            ..worker::Completion::default()
+        }
+        .notice(job.action)
+        .title,
+        "Restart Windows"
+    );
+    assert_eq!(
+        worker::Completion {
+            reboot_required: true,
+            ..worker::Completion::default()
+        }
+        .notice(job.action)
+        .tone,
+        Tone::Error
+    );
 }
 
 #[test]

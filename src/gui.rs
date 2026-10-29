@@ -396,15 +396,12 @@ impl App {
             self.windows_reboot_required,
         );
         match result {
-            Ok((mut job, path)) => {
+            Ok((job, path)) => {
                 self.logs.clear();
-                for record in job.pending_logs().unwrap_or_default() {
-                    self.journal_line(record);
-                }
                 self.log_path = Some(path);
                 self.notice = None;
-                self.journal_error(job.log_error.as_deref());
                 self.job = Some(job);
+                self.collect_job_logs();
             }
             Err(e) => self.error("Could not start the operation", format!("{e:#}")),
         }

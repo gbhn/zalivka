@@ -327,7 +327,10 @@ impl App {
                 ));
             } else if job.can_stop()
                 && ui
-                    .add_enabled(!job.cancelled, egui::Button::new(tr("Stop")))
+                    .add_enabled(
+                        job.completion.is_none() && !job.context.cancelled(),
+                        egui::Button::new(tr("Stop")),
+                    )
                     .clicked()
                 && let Some(job) = &mut self.job
                 && let Err(e) = job.stop()

@@ -7,12 +7,11 @@ use std::time::Instant;
 use zalivka::progress;
 
 impl App {
-    fn collect_job_logs(&mut self) -> bool {
+    pub(super) fn collect_job_logs(&mut self) -> bool {
         if let Some(job) = &mut self.job {
-            let Some(lines) = job.pending_logs() else {
+            let Some((lines, error)) = job.pending_logs() else {
                 return false;
             };
-            let error = job.log_error.clone();
             if !lines.is_empty() {
                 job.last_activity = Instant::now();
             }
@@ -136,11 +135,14 @@ impl App {
         if !self.collect_job_logs() {
             return;
         }
-        let Some(success) = self.job.as_ref().and_then(|job| job.success) else {
+        if self.job.as_ref().is_none_or(|job| job.completion.is_none()) {
             return;
-        };
+        }
         let job = self.job.take().unwrap();
-        let notice = job.completion_notice(success, self.windows_reboot_required);
+        let completion = job.completion.as_ref().unwrap();
+        self.windows_reboot_required |= completion.reboot_required;
+        self.journal_error(completion.journal_error.as_deref());
+        let notice = completion.notice(job.action);
         if notice.tone == Tone::Error {
             self.journal_open = true;
         }
