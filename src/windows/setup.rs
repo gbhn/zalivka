@@ -1,4 +1,5 @@
 //! Windows host preparation. The embedded Apple CABs are unmodified signed packages.
+use super::package::{DRIVERS, Driver};
 use super::{wide, windows_directory};
 mod cleanup;
 mod log;
@@ -158,10 +159,13 @@ pub(crate) fn status() -> Result<HostStatus> {
             && d.driver()
                 .is_some_and(|name| name.eq_ignore_ascii_case("winusb"))
     });
+    let installed = super::package::installed()?;
     Ok(HostStatus {
         apple_service_installed: service.is_some(),
         apple_service_running: active,
-        apple_driver_installed: super::package::installed()?,
+        apple_driver_installed: installed.contains(&Driver::Usb),
+        apple_kis_driver_installed: installed.contains(&Driver::Kis)
+            && installed.contains(&Driver::Rsm),
         compatible_usb_driver,
     })
 }
@@ -234,24 +238,32 @@ fn prepare_elevated(reboot: &mut bool) -> Result<()> {
     );
     // Check the service first; don't replace the driver if stopping the conflict fails.
     stop_service().context("Windows setup: stopping Apple service")?;
-    if !super::package::installed()? {
+    let installed = super::package::installed()?;
+    for driver in DRIVERS {
+        if installed.contains(&driver) {
+            crate::log!(
+                Info,
+                "drivers",
+                "Apple {driver:?} package already installed"
+            );
+            continue;
+        }
         let directory = tempfile::Builder::new()
-            .prefix("zalivka-apple-usb-")
+            .prefix("zalivka-apple-driver-")
             .tempdir()
             .context("Creating temporary Apple driver directory")?;
         crate::log!(
             Info,
             "drivers:cab",
-            "Extracting Apple ({arch}): {}",
+            "Extracting Apple {driver:?} ({arch}): {}",
             directory.path().display()
         );
-        let inf = super::package::unpack(directory.path(), arch)
+        let inf = driver
+            .unpack(directory.path(), arch)
             .context("Windows setup: extracting Apple package")?;
         // Windows verifies the original CAT. No forced ranking or signing bypass.
         *reboot |=
             super::package::install(&inf).context("Windows setup: installing Apple driver")?;
-    } else {
-        crate::log!(Info, "drivers", "Apple package already installed");
     }
     crate::log!(Info, "drivers", "Checking installation");
     let host = status()?;
@@ -266,8 +278,8 @@ fn prepare_elevated(reboot: &mut bool) -> Result<()> {
         "Apple Mobile Device Service restarted. Close iTunes / Apple Devices or uninstall Apple Mobile Device Support in Windows apps."
     );
     ensure!(
-        host.apple_driver_installed,
-        "Windows did not confirm Apple driver installation"
+        host.apple_driver_installed && host.apple_kis_driver_installed,
+        "Windows did not confirm Apple USB and KIS/RSM driver installation"
     );
     crate::log!(
         Info,

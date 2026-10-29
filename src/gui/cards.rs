@@ -435,9 +435,12 @@ impl App {
             if !host.apple_driver_installed {
                 ui.label(tr("The Apple USB driver is missing. Install the signed driver bundled with Zalivka; internet access and iTunes are not required."));
             }
+            if !host.apple_kis_driver_installed {
+                ui.label(tr("The Apple KIS recovery driver is missing. Install the signed driver bundled with Zalivka."));
+            }
             if host.needs_preparation() {
                 ui.add_space(6.0);
-                let label = if !host.apple_driver_installed {
+                let label = if !host.apple_driver_installed || !host.apple_kis_driver_installed {
                     "Install missing drivers"
                 } else if host.apple_service_running {
                     "Stop Apple service"

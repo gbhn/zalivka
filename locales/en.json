@@ -147,6 +147,7 @@
     "Stop Apple service": "Stop Apple service",
     "System default": "System default",
     "Technical details": "Technical details",
+    "The Apple KIS recovery driver is missing. Install the signed driver bundled with Zalivka.": "The Apple KIS recovery driver is missing. Install the signed driver bundled with Zalivka.",
     "The Apple USB driver is missing. Install the signed driver bundled with Zalivka; internet access and iTunes are not required.": "The Apple USB driver is missing. Install the signed driver bundled with Zalivka; internet access and iTunes are not required.",
     "The button below stops the service. If it starts again, uninstall Apple Mobile Device Support in Windows apps.": "The button below stops the service. If it starts again, uninstall Apple Mobile Device Support in Windows apps.",
     "The disk journal is incomplete": "The disk journal is incomplete",

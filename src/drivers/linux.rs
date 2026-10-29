@@ -58,10 +58,19 @@ pub(super) fn install() -> Result<()> {
 
 fn install_with(path: &Path, reload: &mut Command) -> Result<()> {
     // Upgrade only our previous bundled rule; preserve administrator changes.
-    const PREVIOUS: &[u8] = b"# Apple DFU/recovery and restore interfaces. Access for the active local seat.\nSUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n";
+    const PREVIOUS: &[&[u8]] = &[
+        b"# Apple DFU/recovery and restore interfaces. Access for the active local seat.\nSUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n",
+        concat!(
+            "# Apple DFU/recovery and restore interfaces. Access for the active local seat.\n",
+            "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n\n",
+            "# Mac restore mode is handled directly by Zalivka, not usbmuxd. Override the\n",
+            "# activation/ownership set by 39-usbmuxd.rules; keep access for the active seat.\n",
+            "SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ATTR{idVendor}==\"05ac\", ATTR{idProduct}==\"12ac\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", OWNER:=\"root\", GROUP:=\"root\", MODE:=\"0600\"\n",
+        ).as_bytes(),
+    ];
     let replace = match std::fs::read(path) {
         Ok(existing) if existing == UDEV_RULES.as_bytes() => None,
-        Ok(existing) if existing == PREVIOUS => Some(true),
+        Ok(existing) if PREVIOUS.contains(&existing.as_slice()) => Some(true),
         Ok(_) => bail!("different udev rule already exists; refusing to overwrite"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
         Err(error) => return Err(error).context("reading existing udev rule"),

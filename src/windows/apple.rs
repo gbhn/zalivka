@@ -405,6 +405,14 @@ fn matches_instance(actual: &str, parent: Option<&str>, wanted: &str, number: u8
         && interface_number(actual) == Some(number)
 }
 
+fn matches_kis_instance(actual: &str, parent: Option<&str>, wanted: &str) -> bool {
+    actual.eq_ignore_ascii_case(wanted)
+        || (actual
+            .split_once('\\')
+            .is_some_and(|(bus, _)| bus.eq_ignore_ascii_case("KIS"))
+            && parent.is_some_and(|parent| parent.eq_ignore_ascii_case(wanted)))
+}
+
 impl AppleUsb {
     /// Opens only the requested device/interface. No invented MUX1 suffixes or driver changes.
     pub(crate) fn open(info: &nusb::DeviceInfo, number: u8) -> Result<Option<Self>> {
@@ -428,7 +436,14 @@ impl AppleUsb {
             let instance = path_instance(&path)?;
             let actual = String::from_utf16(&instance[..instance.len() - 1])?;
             let parent = parent_instance(&instance);
-            if !matches_instance(&actual, parent.as_deref(), &wanted, number) {
+            // RSM is a child of the selected KIS bus, without a USB MI number.
+            // Matching its actual parent also keeps neighbouring Macs separate.
+            let matches = if info.product_id() == 0x1881 {
+                matches_kis_instance(&actual, parent.as_deref(), &wanted)
+            } else {
+                matches_instance(&actual, parent.as_deref(), &wanted, number)
+            };
+            if !matches {
                 continue;
             }
             // SAFETY: path comes from Config Manager; optional pointer arguments are null.

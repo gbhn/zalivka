@@ -14,12 +14,15 @@ pub struct HostStatus {
     pub apple_service_installed: bool,
     pub apple_service_running: bool,
     pub apple_driver_installed: bool,
+    pub apple_kis_driver_installed: bool,
     pub compatible_usb_driver: bool,
 }
 
 impl HostStatus {
     pub fn needs_preparation(&self) -> bool {
-        self.apple_service_running || !self.apple_driver_installed
+        self.apple_service_running
+            || !self.apple_driver_installed
+            || !self.apple_kis_driver_installed
     }
 
     pub fn blocking_reason(&self) -> Option<&'static str> {

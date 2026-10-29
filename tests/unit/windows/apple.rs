@@ -505,6 +505,27 @@ fn selects_only_the_requested_device_and_interface() {
 }
 
 #[test]
+fn kis_selects_the_rsm_child_of_the_requested_usb_device() {
+    let usb = r"USB\VID_05AC&PID_1881\ECID_A";
+    let rsm = r"KIS\VID_05AC&PID_0001\PORTAL_1";
+    assert!(matches_kis_instance(rsm, Some(usb), usb));
+    assert!(matches_kis_instance(
+        &rsm.to_lowercase(),
+        Some(&usb.to_lowercase()),
+        usb
+    ));
+    assert!(matches_kis_instance(r"KIS\PORTAL\1", Some(usb), usb));
+    assert!(matches_kis_instance(usb, None, usb));
+    assert!(!matches_kis_instance(
+        rsm,
+        Some(r"USB\VID_05AC&PID_1881\ECID_B"),
+        usb
+    ));
+    assert!(!matches_kis_instance(rsm, None, usb));
+    assert!(!matches_kis_instance(r"HID\PORTAL\1", Some(usb), usb));
+}
+
+#[test]
 fn encodes_usb_setup_and_data_without_padding() {
     assert_eq!(
         control_packet(0x21, 1, 0x1234, 0xabcd, 3, &[1, 2, 3]),

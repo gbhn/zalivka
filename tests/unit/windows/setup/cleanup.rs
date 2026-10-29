@@ -3,7 +3,9 @@ use std::cell::RefCell;
 
 #[test]
 fn cleanup_selects_only_whole_apple_restore_device_ids() {
-    for pid in ["1227", "1280", "1281", "1282", "1283", "12AC"] {
+    for pid in [
+        "1227", "1280", "1281", "1282", "1283", "12AC", "F014", "1881",
+    ] {
         assert!(is_restore_device(&format!(
             r"USB\VID_05AC&PID_{pid}\serial"
         )));

@@ -115,8 +115,9 @@ pub fn doctor() -> Result<Vec<drivers::UsbDiagnostic>> {
         crate::log!(
             Info,
             "drivers",
-            "Apple driver: {}; Apple service running: {}",
+            "Apple USB driver: {}; Apple KIS/RSM drivers: {}; Apple service running: {}",
             host.apple_driver_installed,
+            host.apple_kis_driver_installed,
             host.apple_service_running
         );
         if let Some(reason) = host.blocking_reason() {

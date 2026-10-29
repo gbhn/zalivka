@@ -34,8 +34,9 @@ fn is_restore_device(instance: &str) -> bool {
         return false;
     };
     pid.len() == 4
-        && u16::from_str_radix(pid, 16)
-            .is_ok_and(|pid| crate::device::Mode::from_pid(pid).is_some() || pid == 0x12ac)
+        && u16::from_str_radix(pid, 16).is_ok_and(|pid| {
+            crate::device::Mode::from_pid(pid).is_some() || matches!(pid, 0x12ac | 0x1881)
+        })
 }
 
 struct DriverPrivilege {
@@ -215,7 +216,13 @@ pub(super) fn reset_elevated(reboot: &mut bool) -> Result<()> {
     let directory = tempfile::Builder::new()
         .prefix("zalivka-apple-reset-")
         .tempdir()?;
-    let inf = crate::windows::package::unpack(directory.path(), architecture()?)?;
+    let arch = architecture()?;
+    let mut infs = Vec::new();
+    for driver in crate::windows::package::DRIVERS {
+        let path = directory.path().join(format!("{driver:?}"));
+        std::fs::create_dir(&path)?;
+        infs.push(driver.unpack(&path, arch)?);
+    }
     let (set, targets) = devices()?;
     crate::log!(
         Info,
@@ -240,8 +247,10 @@ pub(super) fn reset_elevated(reboot: &mut bool) -> Result<()> {
                 );
             }
             // Keep all DriverStore packages: reinstall the original signed package with normal ranking.
-            *reboot |=
-                crate::windows::package::install(&inf).context("Reinstalling Apple USB driver")?;
+            for inf in &infs {
+                *reboot |= crate::windows::package::install(inf)
+                    .context("Reinstalling Apple restore driver")?;
+            }
             Ok(())
         },
         rescan,

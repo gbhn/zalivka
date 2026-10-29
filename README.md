@@ -40,13 +40,18 @@ zalivka drivers prepare
 zalivka doctor
 ```
 
-`drivers prepare` installs missing bundled Apple USB drivers, stops Apple Mobile
-Device Service if present, and checks USB access. If Windows requests a reboot,
-restart before continuing.
+`drivers prepare` installs missing bundled Apple USB and KIS recovery drivers
+for native Windows x64 or ARM64, stops Apple Mobile Device Service if present,
+and checks USB access. KIS installation includes its required RSM driver. All
+packages are signed originals from Microsoft Update Catalog and are embedded
+in the executable; setup does not need to download them or install iTunes.
+See [driver provenance and checks](packaging/apple-usb/README.md).
+If Windows requests a reboot, restart before continuing.
 
 If a Mac stops appearing after a restore, use **Settings → Reset Apple USB
 drivers** or `zalivka drivers reset`, then reconnect it and enter DFU mode again.
-Reset temporarily disconnects Apple DFU, Recovery, and Restore devices.
+Reset temporarily disconnects Apple DFU, Recovery, Restore, Port DFU and KIS
+devices and reinstalls the three driver packages.
 
 ### Linux USB setup
 
@@ -65,12 +70,13 @@ sudo ./zalivka drivers install-udev
 Reconnect the USB cable after installation. The rule grants access to the active
 local session. Use `zalivka doctor` to diagnose access or interface claim errors.
 
-For Mac restore mode (`05ac:12ac`), the rule also clears usbmuxd's udev activation
+For SoC DFU (`1227`), iBoot Recovery (`1280`–`1283`), restored (`12ac`),
+Port DFU (`f014`) and KIS (`1881`), the rule also clears usbmuxd's udev activation
 and assigns USB access to root/the active local user instead of the usbmux
 account. It runs after `39-usbmuxd.rules` and before the seat ACL rule, preventing
 usbmuxd from claiming the restore interface while leaving normal iPhone/iPad
 IDs alone. Reinstall the rule after updating Zalivka; the installer can upgrade
-the previous bundled version and preserves custom administrator rules. If
+both previous bundled versions and preserves custom administrator rules. If
 usbmuxd already has the Mac open, stop it once and reconnect/re-enter DFU before
 retrying. A root-run usbmuxd can bypass device permissions and must be stopped.
 

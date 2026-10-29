@@ -523,6 +523,7 @@ fn disconnected_or_recovery_target_blocks_a_write() {
         apple_service_installed: false,
         apple_service_running: false,
         apple_driver_installed: true,
+        apple_kis_driver_installed: true,
         compatible_usb_driver: false,
     }));
     app.setup.ecid = "2a".into();
@@ -543,6 +544,7 @@ fn windows_conflicts_and_failed_checks_block_restore_before_worker_start() {
         apple_service_installed: true,
         apple_service_running: true,
         apple_driver_installed: true,
+        apple_kis_driver_installed: true,
         compatible_usb_driver: false,
     };
     app.host = Ok(Some(host.clone()));
@@ -2063,6 +2065,7 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
             apple_service_installed: false,
             apple_service_running: false,
             apple_driver_installed: false,
+            apple_kis_driver_installed: false,
             compatible_usb_driver: false,
         }));
         for _ in 0..20 {

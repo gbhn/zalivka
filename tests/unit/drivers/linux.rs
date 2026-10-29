@@ -72,6 +72,16 @@ fn installer_upgrades_the_previous_bundled_rule_and_keeps_custom_rules_protected
     std::fs::write(&path, "# Apple DFU/recovery and restore interfaces. Access for the active local seat.\nSUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n").unwrap();
     install_with(&path, &mut exit(0)).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), UDEV_RULES);
+    // The second shipped version protected only restored (12ac).
+    std::fs::write(&path, concat!(
+        "# Apple DFU/recovery and restore interfaces. Access for the active local seat.\n",
+        "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n\n",
+        "# Mac restore mode is handled directly by Zalivka, not usbmuxd. Override the\n",
+        "# activation/ownership set by 39-usbmuxd.rules; keep access for the active seat.\n",
+        "SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ATTR{idVendor}==\"05ac\", ATTR{idProduct}==\"12ac\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", OWNER:=\"root\", GROUP:=\"root\", MODE:=\"0600\"\n",
+    )).unwrap();
+    install_with(&path, &mut exit(0)).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), UDEV_RULES);
 }
 
 #[test]

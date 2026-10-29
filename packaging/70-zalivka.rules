@@ -1,6 +1,7 @@
 # Apple DFU/recovery and restore interfaces. Access for the active local seat.
 SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", TAG+="uaccess"
 
-# Mac restore mode is handled directly by Zalivka, not usbmuxd. Override the
-# activation/ownership set by 39-usbmuxd.rules; keep access for the active seat.
-SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="05ac", ATTR{idProduct}=="12ac", ENV{USBMUX_SUPPORTED}="0", ENV{SYSTEMD_WANTS}="", OWNER:="root", GROUP:="root", MODE:="0600"
+# SoC DFU, iBoot Recovery, restored, Port DFU and KIS belong to Zalivka.
+# Override usbmuxd activation/ownership while keeping the active seat's ACL.
+# Normal iPhone/iPad modes retain the system's usbmuxd policy.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="05ac", ATTR{idProduct}=="1227|128[0-3]|12ac|f014|1881", ENV{USBMUX_SUPPORTED}="0", ENV{SYSTEMD_WANTS}="", OWNER:="root", GROUP:="root", MODE:="0600"

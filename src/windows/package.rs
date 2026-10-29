@@ -34,6 +34,74 @@ pub(super) const FILES: [&str; 5] = [
     "AppleLowerFilter.sys",
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Driver {
+    Usb,
+    Kis,
+    Rsm,
+}
+
+pub(super) const DRIVERS: [Driver; 3] = [Driver::Usb, Driver::Kis, Driver::Rsm];
+
+impl Driver {
+    fn files(self) -> &'static [&'static str] {
+        match self {
+            Self::Usb => &FILES,
+            Self::Kis => &[
+                "AppleKIS.inf",
+                "applekis.cat",
+                "AppleKIS.sys",
+                "AppleKISInterface.dll",
+            ],
+            Self::Rsm => &[
+                "AppleRSM.inf",
+                "applersm.cat",
+                "AppleRSM.sys",
+                "AppleRSMInterface.dll",
+            ],
+        }
+    }
+
+    fn archive(self, arch: &str) -> Result<(&'static [u8], &'static str)> {
+        Ok(match (self, arch) {
+            (Self::Usb, "amd64") => (X64_CAB, X64_SHA256),
+            (Self::Usb, "arm64") => (ARM64_CAB, ARM64_SHA256),
+            (Self::Kis, "amd64") => (
+                include_bytes!("../../packaging/apple-usb/apple-kis-x64.cab"),
+                "6639a067886abe2e434b9ce46191f29c9dd7c66659cb5dc6dba8a52ce763ee22",
+            ),
+            (Self::Kis, "arm64") => (
+                include_bytes!("../../packaging/apple-usb/apple-kis-arm64.cab"),
+                "92049778c86211c0033be7ac229db4668a033b7ba812ef9a8cc06b5bcd706781",
+            ),
+            (Self::Rsm, "amd64") => (
+                include_bytes!("../../packaging/apple-usb/apple-rsm-x64.cab"),
+                "79bc94933d2b3b713b08c41a43e9629c2e4ae6004d339f4ca5f43fa630e7544a",
+            ),
+            (Self::Rsm, "arm64") => (
+                include_bytes!("../../packaging/apple-usb/apple-rsm-arm64.cab"),
+                "98508d33348b9ebeee1d7e06b6174e6f73c42ea1def280b4f66d2114c4bf97d1",
+            ),
+            _ => bail!("Unsupported driver architecture: {arch}"),
+        })
+    }
+
+    fn complete(self, inf: &Path) -> bool {
+        inf.file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case(self.files()[0]))
+            && inf.parent().is_some_and(|directory| {
+                self.files()
+                    .iter()
+                    .all(|name| directory.join(name).is_file())
+            })
+    }
+
+    pub(super) fn unpack(self, directory: &Path, arch: &str) -> Result<PathBuf> {
+        let (bytes, expected) = self.archive(arch)?;
+        unpack(directory, bytes, expected, self.files())
+    }
+}
+
 fn driver_store_inf(published: &Path) -> Result<Option<PathBuf>> {
     let published = super::wide(published);
     let mut path = [0u16; 260];
@@ -65,19 +133,21 @@ fn driver_store_inf(published: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(OsString::from_wide(&path[..end]).into()))
 }
 
-fn complete_apple_package(inf: &Path) -> bool {
-    inf.file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case("AppleUsb.inf"))
-        && inf
-            .parent()
-            .is_some_and(|directory| FILES.iter().all(|name| directory.join(name).is_file()))
+pub(super) fn installed() -> Result<HashSet<Driver>> {
+    const USB_DEVICE: GUID = GUID::from_u128(0x88bae032_5a81_49f0_bc3d_a4ff138216d6);
+    const SYSTEM: GUID = GUID::from_u128(0x4d36e97d_e325_11ce_bfc1_08002be10318);
+    let mut found = HashSet::new();
+    // Apple RSM is a System-class child of the USBDevice-class KIS bus.
+    for class in [&USB_DEVICE, &SYSTEM] {
+        installed_for_class(class, &mut found)?;
+    }
+    Ok(found)
 }
 
-pub(super) fn installed() -> Result<bool> {
-    const USB_DEVICE: GUID = GUID::from_u128(0x88bae032_5a81_49f0_bc3d_a4ff138216d6);
+fn installed_for_class(class: &GUID, found: &mut HashSet<Driver>) -> Result<()> {
     // An empty class set works without a connected device. SetupAPI selects the
     // platform's driver models from published INFs, including ExcludeFromSelect.
-    let set = unsafe { SetupDiCreateDeviceInfoList(&USB_DEVICE, ptr::null_mut()) };
+    let set = unsafe { SetupDiCreateDeviceInfoList(class, ptr::null_mut()) };
     ensure!(
         set != INVALID_HANDLE_VALUE as isize,
         "USB driver list: {}",
@@ -151,36 +221,34 @@ pub(super) fn installed() -> Result<bool> {
         if !seen.insert(published.clone()) {
             continue;
         }
-        if let Some(inf) = driver_store_inf(&published)?
-            && complete_apple_package(&inf)
-        {
-            crate::log!(
-                Debug,
-                "drivers",
-                "Apple package verified using SetupAPI: {}",
-                inf.display()
-            );
-            return Ok(true);
+        if let Some(inf) = driver_store_inf(&published)? {
+            for driver in DRIVERS {
+                if driver.complete(&inf) {
+                    crate::log!(
+                        Debug,
+                        "drivers",
+                        "Apple {driver:?} package verified using SetupAPI: {}",
+                        inf.display()
+                    );
+                    found.insert(driver);
+                }
+            }
         }
     }
     crate::log!(
         Debug,
         "drivers",
-        "SetupAPI did not find a complete Apple USB package for this Windows installation"
+        "Apple driver packages found so far: {found:?}"
     );
-    Ok(false)
+    Ok(())
 }
 
-pub(super) fn unpack(directory: &Path, arch: &str) -> Result<PathBuf> {
-    let (bytes, expected) = match arch {
-        "amd64" => (X64_CAB, X64_SHA256),
-        "arm64" => (ARM64_CAB, ARM64_SHA256),
-        _ => bail!("Unsupported driver architecture: {arch}"),
-    };
+fn unpack(directory: &Path, bytes: &[u8], expected: &str, files: &[&str]) -> Result<PathBuf> {
     crate::log!(
         Trace,
         "drivers:cab",
-        "{arch}; size={} B; SHA-256={expected}",
+        "{}; size={} B; SHA-256={expected}",
+        files[0],
         bytes.len()
     );
     ensure!(
@@ -191,7 +259,7 @@ pub(super) fn unpack(directory: &Path, arch: &str) -> Result<PathBuf> {
     let mut cabinet =
         cab::Cabinet::new(Cursor::new(bytes)).context("Reading bundled Apple driver package")?;
     // Only these fixed filenames can be extracted into the temporary directory.
-    for name in FILES {
+    for &name in files {
         let size = cabinet
             .get_file_entry(name)
             .with_context(|| format!("Driver package is missing {name}"))?
@@ -217,7 +285,7 @@ pub(super) fn unpack(directory: &Path, arch: &str) -> Result<PathBuf> {
             "Incomplete Apple driver file: {name}"
         );
     }
-    Ok(directory.join("AppleUsb.inf"))
+    Ok(directory.join(files[0]))
 }
 
 pub(crate) fn install(inf: &Path) -> Result<bool> {
