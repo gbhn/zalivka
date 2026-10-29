@@ -18,33 +18,23 @@ pub(crate) fn plist_prefix(bytes: &[u8]) -> bool {
     bytes.starts_with(b"bplist00") || bytes.starts_with(b"<?xml") || bytes.starts_with(b"<plist")
 }
 
-#[derive(Default)]
-pub(crate) struct BundleVerification {
-    pub payloads: usize,
-    pub manifest_digest: bool,
-}
-
-/// Verify named payload records without using controller, model or path names.
-pub(crate) fn verify_plist_bundle(bytes: &[u8], expected: &[u8]) -> Result<BundleVerification> {
+/// Verify every payload record once and return the digests of the verified records.
+/// Callers can match several manifest requirements without parsing the bundle again.
+pub(crate) fn verify_plist_bundle(bytes: &[u8]) -> Result<HashSet<Vec<u8>>> {
     if !plist_prefix(bytes) {
-        return Ok(BundleVerification::default());
+        return Ok(HashSet::new());
     }
     ensure!(
         bytes.len() as u64 <= MAX_PLIST_BUNDLE,
         "plist payload bundle exceeds memory limit"
     );
     let value = crate::wire::decode_plist(bytes).context("reading plist payload bundle")?;
-    let mut report = BundleVerification::default();
-    verify_plist_node(&value, expected, 0, &mut report)?;
-    Ok(report)
+    let mut digests = HashSet::new();
+    verify_plist_node(&value, 0, &mut digests)?;
+    Ok(digests)
 }
 
-fn verify_plist_node(
-    value: &Value,
-    expected: &[u8],
-    depth: usize,
-    report: &mut BundleVerification,
-) -> Result<()> {
+fn verify_plist_node(value: &Value, depth: usize, digests: &mut HashSet<Vec<u8>>) -> Result<()> {
     ensure!(depth <= 32, "plist payload bundle nested too deeply");
     if let Some(fields) = value.as_dictionary() {
         if let Some(payload) = fields.get("Payload") {
@@ -54,18 +44,17 @@ fn verify_plist_node(
                 .and_then(Value::as_data)
                 .context("bundle payload has no data Digest")?;
             verify_bundle_payload(payload, digest)?;
-            report.payloads += 1;
-            report.manifest_digest |= digest == expected;
+            digests.insert(digest.to_vec());
         }
         for (name, child) in fields {
             if name != "Payload" {
-                verify_plist_node(child, expected, depth + 1, report)
+                verify_plist_node(child, depth + 1, digests)
                     .with_context(|| format!("checking bundle field {name}"))?;
             }
         }
     } else if let Some(values) = value.as_array() {
         for child in values {
-            verify_plist_node(child, expected, depth + 1, report)?;
+            verify_plist_node(child, depth + 1, digests)?;
         }
     }
     Ok(())

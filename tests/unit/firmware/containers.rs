@@ -20,33 +20,41 @@ fn bundle_records_are_verified_recursively_and_metadata_alone_is_insufficient() 
             Value::Array(vec![record(b"config", &Sha256::digest(b"config"))]),
         ),
     ]);
-    let check =
-        |value: &Value, digest: &[u8]| verify_plist_bundle(&wire::xml(value).unwrap(), digest);
-    let report = check(&bundle, &digest).unwrap();
-    assert_eq!(report.payloads, 2);
-    assert!(report.manifest_digest);
+    let check = |value: &Value| verify_plist_bundle(&wire::xml(value).unwrap());
+    let digests = check(&bundle).unwrap();
+    assert_eq!(digests.len(), 2);
+    assert!(digests.contains(&digest));
+    assert!(digests.contains(Sha256::digest(b"config").as_slice()));
+    assert!(!digests.contains([0; 32].as_slice()));
     let mut binary = vec![];
     bundle.to_writer_binary(&mut binary).unwrap();
-    assert!(
-        verify_plist_bundle(&binary, &digest)
-            .unwrap()
-            .manifest_digest
-    );
-    assert!(!check(&bundle, &[0; 32]).unwrap().manifest_digest);
+    assert_eq!(verify_plist_bundle(&binary).unwrap(), digests);
     let fields = bundle.as_dictionary_mut().unwrap()["unknown product"]
         .as_dictionary_mut()
         .unwrap();
     fields.insert("Payload".into(), Value::Data(b"tampered firmware".to_vec()));
-    assert!(check(&bundle, &digest).is_err());
+    assert!(check(&bundle).is_err());
     let metadata = wire::dict([("Digest", Value::Data(digest.clone()))]);
-    assert!(!check(&metadata, &digest).unwrap().manifest_digest);
-    assert_eq!(
-        verify_plist_bundle(b"raw firmware", &digest)
-            .unwrap()
-            .payloads,
-        0
-    );
-    assert!(verify_plist_bundle(b"<?xml invalid", &digest).is_err());
+    assert!(check(&metadata).unwrap().is_empty());
+    assert!(verify_plist_bundle(b"raw firmware").unwrap().is_empty());
+    assert!(verify_plist_bundle(b"<?xml invalid").is_err());
+}
+
+#[test]
+fn repeated_bundle_digests_do_not_skip_verification_of_another_payload() {
+    let digest = Sha256::digest(b"firmware").to_vec();
+    for corrupt in [false, true] {
+        let bundle = Value::Array(vec![
+            record(b"firmware", &digest),
+            record(if corrupt { b"modified" } else { b"firmware" }, &digest),
+        ]);
+        let result = verify_plist_bundle(&wire::xml(&bundle).unwrap());
+        if corrupt {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap(), HashSet::from([digest.clone()]));
+        }
+    }
 }
 
 #[test]
@@ -55,9 +63,9 @@ fn bundle_verification_bounds_nesting_and_requires_payload_digests() {
     for _ in 0..34 {
         nested = Value::Array(vec![nested]);
     }
-    assert!(verify_plist_bundle(&wire::xml(&nested).unwrap(), &[0; 32]).is_err());
+    assert!(verify_plist_bundle(&wire::xml(&nested).unwrap()).is_err());
     let missing_digest = wire::dict([("Payload", Value::Data(vec![1]))]);
-    assert!(verify_plist_bundle(&wire::xml(&missing_digest).unwrap(), &[0; 32]).is_err());
+    assert!(verify_plist_bundle(&wire::xml(&missing_digest).unwrap()).is_err());
 }
 
 #[test]
@@ -86,7 +94,7 @@ fn flash_image_codec_checks_banks_lengths_and_nested_configuration() {
         ("firmware", record(&image, &digest)),
         ("config", record(b"changed", &Sha256::digest(b"original"))),
     ]);
-    assert!(verify_plist_bundle(&wire::xml(&bundle).unwrap(), &digest).is_err());
+    assert!(verify_plist_bundle(&wire::xml(&bundle).unwrap()).is_err());
 }
 
 #[test]

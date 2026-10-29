@@ -70,7 +70,7 @@ fn a_valid_outer_digest_does_not_hide_a_corrupt_bundle_payload() {
             bytes.len() as u64,
             &mut [0; 64],
         );
-        let prepared = firmware::verify_plist_bundle(&bytes, &expected);
+        let prepared = firmware::verify_plist_bundle(&bytes);
         assert_eq!(result.is_ok(), prepared.is_ok(), "corrupt={corrupt}");
         assert_eq!(result.is_ok(), !corrupt);
     }

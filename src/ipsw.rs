@@ -178,14 +178,14 @@ impl Ipsw {
         let expected = component_digest(entry)?
             .context("namespace updater requires a nonempty supported manifest Digest")?;
         let data = self.read_limited(id.path(name)?, crate::firmware::MAX_PLIST_BUNDLE)?;
-        let report = crate::firmware::verify_plist_bundle(&data, expected)
+        let digests = crate::firmware::verify_plist_bundle(&data)
             .with_context(|| format!("checking component {name} payload bundle"))?;
         ensure!(
-            report.payloads > 0,
+            !digests.is_empty(),
             "namespace updater requires a verified plist payload bundle; payload layout is not described"
         );
         ensure!(
-            report.manifest_digest || verify_digest(&data, expected).is_ok(),
+            digests.contains(expected) || verify_digest(&data, expected).is_ok(),
             "component {name} digest mismatch"
         );
         Ok(data)
@@ -198,13 +198,13 @@ impl Ipsw {
         let data = self.read(id.path(name)?)?;
         if let Some(expected) = digest {
             let inputs = digest::DigestInput::variants(&data, data.len() as u64, tag)?;
-            let bundle = crate::firmware::verify_plist_bundle(&data, expected)
+            let digests = crate::firmware::verify_plist_bundle(&data)
                 .with_context(|| format!("checking component {name} payload bundle"))?;
             if let Err(error) =
                 digest::verify_component_digest(inputs, |input| input.matches(&data, expected))
             {
                 ensure!(
-                    bundle.manifest_digest,
+                    digests.contains(expected),
                     "component {name} digest mismatch: {error}"
                 );
             }
@@ -238,7 +238,7 @@ impl Ipsw {
     pub fn stream(&mut self, path: &str, out: &mut impl Write) -> Result<u64> {
         validate_path(path)?;
         if self.prepared_images.contains_key(path) {
-            return Ok(std::io::copy(&mut self.prepared_image(path)?, out)?);
+            return Ok(std::io::copy(&mut self.image(path)?, out)?);
         }
         let mut entry = self.archive.by_name(path)?;
         crate::log!(
@@ -278,7 +278,7 @@ impl Ipsw {
             return Ok(());
         }
         if self.archive.by_name(path)?.compression() == zip::CompressionMethod::Stored {
-            return self.verify_filesystem(id);
+            return self.verify_filesystem_to(id, &mut std::io::sink());
         }
         let size = self.size(path)?;
         crate::storage::require(directory, size)?;
@@ -288,19 +288,6 @@ impl Ipsw {
         image.flush()?;
         self.prepared_images.insert(path.into(), Arc::new(image));
         Ok(())
-    }
-
-    pub(crate) fn prepared_image(&self, path: &str) -> Result<File> {
-        self.prepared_images
-            .get(path)
-            .context("compressed filesystem was not prepared before starting restore")?
-            .reopen()
-            .context("opening prepared filesystem")
-    }
-
-    /// Exhaust a stored filesystem ZIP entry before starting a destructive restore.
-    pub fn verify_filesystem(&mut self, id: &Identity) -> Result<()> {
-        self.verify_filesystem_to(id, &mut std::io::sink())
     }
 
     fn verify_filesystem_to(&mut self, id: &Identity, out: &mut impl Write) -> Result<()> {
@@ -335,37 +322,45 @@ impl Ipsw {
             .collect()
     }
 
-    /// Separate descriptor so ASR can seek within uncompressed ZIP entries.
-    /// Deflated images are expanded into a temporary file by the restore engine.
-    pub fn stored_image(&mut self, path: &str) -> Result<Option<ImageReader>> {
+    /// An independent, bounded cursor over a stored entry or a prepared image.
+    /// Compressed filesystems must be prepared before booting the device.
+    pub fn image(&mut self, path: &str) -> Result<ImageReader> {
+        validate_path(path)?;
         let entry = self.archive.by_name(path)?;
-        if entry.compression() != zip::CompressionMethod::Stored {
-            return Ok(None);
-        }
-        let start = entry.data_start().context("ZIP entry has no data offset")?;
         let size = entry.size();
         let expected_crc = entry.crc32();
-        ensure!(
-            entry.compressed_size() == size,
-            "stored ZIP entry size mismatch: {path}"
-        );
-        let mut file = File::open(&self.path)?;
-        let archive_size = file.metadata()?.len();
+        let (mut file, start) = if let Some(prepared) = self.prepared_images.get(path) {
+            (prepared.reopen().context("opening prepared filesystem")?, 0)
+        } else {
+            ensure!(
+                entry.compression() == zip::CompressionMethod::Stored,
+                "compressed filesystem was not prepared before starting restore"
+            );
+            ensure!(
+                entry.compressed_size() == size,
+                "stored ZIP entry size mismatch: {path}"
+            );
+            (
+                File::open(&self.path)?,
+                entry.data_start().context("ZIP entry has no data offset")?,
+            )
+        };
+        let backing_size = file.metadata()?.len();
         ensure!(
             start
                 .checked_add(size)
-                .is_some_and(|end| end <= archive_size),
-            "stored ZIP entry extends beyond IPSW: {path}"
+                .is_some_and(|end| end <= backing_size),
+            "filesystem image extends beyond its backing file: {path}"
         );
         file.seek(SeekFrom::Start(start))?;
-        Ok(Some(ImageReader {
+        Ok(ImageReader {
             file,
             start,
             size,
             position: 0,
             expected_crc,
             crc: Some(crc32fast::Hasher::new()),
-        }))
+        })
     }
 
     pub fn preflight(&mut self, id: &mut Identity) -> Result<()> {
@@ -548,10 +543,15 @@ fn copy_prefetched(mut input: impl Read + Send, out: &mut impl Write) -> Result<
 pub struct ImageReader {
     file: File,
     start: u64,
-    pub size: u64,
+    size: u64,
     position: u64,
     expected_crc: u32,
     crc: Option<crc32fast::Hasher>,
+}
+impl ImageReader {
+    pub fn size(&self) -> u64 {
+        self.size
+    }
 }
 impl Read for ImageReader {
     fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
@@ -562,7 +562,7 @@ impl Read for ImageReader {
         if n == 0 && limit != 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                "truncated stored IPSW image",
+                "truncated filesystem image",
             ));
         }
         self.position += n as u64;
@@ -571,7 +571,7 @@ impl Read for ImageReader {
             if self.position == self.size && crc.clone().finalize() != self.expected_crc {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "stored IPSW image CRC mismatch",
+                    "filesystem image CRC mismatch",
                 ));
             }
         }

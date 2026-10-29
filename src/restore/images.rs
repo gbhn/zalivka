@@ -10,14 +10,9 @@ use plist::{Dictionary, Value};
 use std::io::Write;
 
 pub(super) fn serve_asr(ipsw: &mut Ipsw, id: &Identity, stream: &mut MuxStream) -> Result<()> {
-    let path = id.path("OS")?;
-    let length = ipsw.size(path)?;
-    if let Some(mut image) = ipsw.stored_image(path)? {
-        asr::transfer(stream, &mut image, length)
-    } else {
-        let mut image = ipsw.prepared_image(path)?;
-        asr::transfer(stream, &mut image, length)
-    }
+    let mut image = ipsw.image(id.path("OS")?)?;
+    let length = image.size();
+    asr::transfer(stream, &mut image, length)
 }
 
 pub(super) fn bootability(ipsw: &mut Ipsw, out: &mut impl Write) -> Result<()> {

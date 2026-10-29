@@ -11,8 +11,8 @@ fn stored_filesystem_crc_is_checked_before_restore_and_after_validation_seeks() 
     bytes[data_start + 20] ^= 1;
     std::fs::write(file.path(), bytes).unwrap();
     let mut ipsw = Ipsw::open(file.path()).unwrap();
-    assert!(ipsw.verify_filesystem(&identity()).is_err());
-    let mut image = ipsw.stored_image("Firmware/OS").unwrap().unwrap();
+    assert!(ipsw.prepare_filesystem(&identity()).is_err());
+    let mut image = ipsw.image("Firmware/OS").unwrap();
     image.seek(SeekFrom::Start(10)).unwrap();
     image.read_exact(&mut [0; 4]).unwrap();
     image.seek(SeekFrom::Start(0)).unwrap();
@@ -898,6 +898,69 @@ fn shared_files_keep_each_components_digest_algorithm_and_restore_tag() {
 }
 
 #[test]
+fn shared_bundles_match_each_authenticated_digest_and_reject_metadata_only_digests() {
+    let first = b"firmware payload";
+    let second = b"configuration";
+    let first_digest = sha1::Sha1::digest(first).to_vec();
+    let second_digest = sha2::Sha256::digest(second).to_vec();
+    let bundle = Value::Array(vec![
+        wire::dict([
+            ("Payload", Value::Data(first.to_vec())),
+            ("Digest", Value::Data(first_digest.clone())),
+        ]),
+        wire::dict([
+            ("Payload", Value::Data(second.to_vec())),
+            ("Digest", Value::Data(second_digest.clone())),
+        ]),
+        wire::dict([("Digest", Value::Data(vec![0; 32]))]),
+    ]);
+    for binary in [false, true] {
+        let mut bytes = Vec::new();
+        if binary {
+            bundle.to_writer_binary(&mut bytes).unwrap();
+        } else {
+            bytes = wire::xml(&bundle).unwrap();
+        }
+        for compression in [
+            zip::CompressionMethod::Stored,
+            zip::CompressionMethod::Deflated,
+        ] {
+            let mut id = identity();
+            for (name, digest) in [
+                ("BundleFirmware", first_digest.clone()),
+                ("BundleConfiguration", second_digest.clone()),
+                ("WholeBundle", Sha384::digest(&bytes).to_vec()),
+            ] {
+                let mut entry = component_entry("shared.plist", &bytes);
+                entry
+                    .as_dictionary_mut()
+                    .unwrap()
+                    .insert("Digest".into(), Value::Data(digest));
+                manifest_mut(&mut id).insert(name.into(), entry);
+            }
+            let files = [("shared.plist", bytes.as_slice())];
+            let file = fixture_compression(Some(id.clone()), false, &files, compression);
+            let mut ipsw = Ipsw::open(file.path()).unwrap();
+            for name in ["BundleFirmware", "BundleConfiguration", "WholeBundle"] {
+                assert_eq!(ipsw.component(&id, name).unwrap(), bytes);
+            }
+            assert_eq!(ipsw.verify_all().unwrap().manifest_digests, 9);
+
+            let mut invalid = component_entry("shared.plist", &bytes);
+            invalid
+                .as_dictionary_mut()
+                .unwrap()
+                .insert("Digest".into(), Value::Data(vec![0; 32]));
+            manifest_mut(&mut id).insert("MetadataOnly".into(), invalid);
+            let file = fixture_compression(Some(id.clone()), false, &files, compression);
+            let mut ipsw = Ipsw::open(file.path()).unwrap();
+            assert!(ipsw.component(&id, "MetadataOnly").is_err());
+            assert!(ipsw.verify_all().is_err());
+        }
+    }
+}
+
+#[test]
 fn empty_components_have_the_same_digest_in_memory_and_streaming() {
     let mut id = identity();
     manifest_mut(&mut id).insert("Empty".into(), component_entry("empty", b""));
@@ -1010,8 +1073,8 @@ fn zip64_streams_five_gib_with_bounded_memory() {
     std::io::copy(&mut std::io::repeat(0).take(size), &mut zip).unwrap();
     zip.finish().unwrap();
     let mut ipsw = Ipsw::open(file.path()).unwrap();
-    let mut image = ipsw.stored_image("large.dmg").unwrap().unwrap();
-    assert_eq!(image.size, size);
+    let mut image = ipsw.image("large.dmg").unwrap();
+    assert_eq!(image.size(), size);
     image
         .seek(SeekFrom::Start(4 * 1024 * 1024 * 1024 + 99))
         .unwrap();
@@ -1032,11 +1095,11 @@ fn ipsw_identity_selection_and_stored_image_have_bounded_seeks() {
         .unwrap();
     ipsw.preflight(&mut id).unwrap();
     assert_eq!(ipsw.component(&id, "iBSS").unwrap(), im4p(b"test"));
-    let mut image = ipsw.stored_image(id.path("OS").unwrap()).unwrap().unwrap();
+    let mut image = ipsw.image(id.path("OS").unwrap()).unwrap();
     let mut data = vec![];
     image.read_to_end(&mut data).unwrap();
     assert_eq!(data, im4p(b"test"));
-    assert!(image.seek(SeekFrom::Start(image.size + 1)).is_err());
+    assert!(image.seek(SeekFrom::Start(image.size() + 1)).is_err());
     image.seek(SeekFrom::End(-1)).unwrap();
     let mut byte = [0];
     image.read_exact(&mut byte).unwrap();
@@ -1403,13 +1466,13 @@ fn direct_stored_images_reject_inconsistent_sizes_and_physical_truncation() {
     assert!(
         Ipsw::open(file.path())
             .unwrap()
-            .stored_image("Firmware/OS")
+            .image("Firmware/OS")
             .is_err()
     );
 
     let file = fixture(None, false);
     let mut ipsw = Ipsw::open(file.path()).unwrap();
-    let mut image = ipsw.stored_image("Firmware/OS").unwrap().unwrap();
+    let mut image = ipsw.image("Firmware/OS").unwrap();
     std::fs::OpenOptions::new()
         .write(true)
         .open(file.path())

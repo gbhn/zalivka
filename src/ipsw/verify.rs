@@ -205,14 +205,14 @@ impl EntryDigests {
             .into_iter()
             .map(|(key, hash)| (key, hash.finalize()))
             .collect();
+        // Verify all payload records even when an outer-file digest matches.
+        let bundle_digests = bundle
+            .as_ref()
+            .map(|bytes| firmware::verify_plist_bundle(bytes))
+            .transpose()
+            .with_context(|| format!("checking payload bundle {name}"))?
+            .unwrap_or_default();
         for (component, tag) in checks {
-            // Match preparation: an outer file digest never excuses a broken
-            // payload record inside a plist bundle.
-            let verified_bundle = bundle
-                .as_ref()
-                .map(|bytes| firmware::verify_plist_bundle(bytes, &component.expected))
-                .transpose()
-                .with_context(|| format!("checking payload bundle {name}"))?;
             let digest = verify_component_digest(inputs.iter().copied().chain(tag), |input| {
                 Ok(actual
                     .get(&(component.expected.len(), input))
@@ -220,7 +220,7 @@ impl EntryDigests {
             });
             if let Err(error) = digest {
                 ensure!(
-                    verified_bundle.is_some_and(|report| report.manifest_digest),
+                    bundle_digests.contains(component.expected.as_slice()),
                     "manifest digest mismatch: {name}: {error}"
                 );
             }

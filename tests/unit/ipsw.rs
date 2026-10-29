@@ -144,7 +144,10 @@ fn prefetch_returns_a_worker_panic_as_an_error() {
     assert_eq!(error.to_string(), "IPSW reader panicked");
 }
 
-fn filesystem_fixture(corrupt: bool) -> (tempfile::NamedTempFile, Identity, Vec<u8>) {
+fn filesystem_fixture(
+    compression: zip::CompressionMethod,
+    corrupt: bool,
+) -> (tempfile::NamedTempFile, Identity, Vec<u8>) {
     let image = vec![0x35; 128 * 1024 + 17];
     let identity = Identity::new(
         0,
@@ -158,8 +161,7 @@ fn filesystem_fixture(corrupt: bool) -> (tempfile::NamedTempFile, Identity, Vec<
     );
     let file = tempfile::NamedTempFile::new().unwrap();
     let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::SimpleFileOptions::default().compression_method(compression);
     zip.start_file("BuildManifest.plist", options).unwrap();
     zip.write_all(
         &crate::wire::xml(&crate::wire::dict([
@@ -197,15 +199,15 @@ fn filesystem_fixture(corrupt: bool) -> (tempfile::NamedTempFile, Identity, Vec<
 
 #[test]
 fn prepared_filesystems_are_reused_with_independent_worker_cursors_and_cleaned_up() {
-    let (archive, identity, expected) = filesystem_fixture(false);
+    let (archive, identity, expected) = filesystem_fixture(zip::CompressionMethod::Deflated, false);
     let mut ipsw = Ipsw::open(archive.path()).unwrap();
     ipsw.prepare_filesystem(&identity).unwrap();
     let temporary = ipsw.prepared_images["OS.dmg"].path().to_path_buf();
     ipsw.prepare_filesystem(&identity).unwrap();
     assert_eq!(ipsw.prepared_images["OS.dmg"].path(), temporary);
-    let worker = ipsw.reopen().unwrap();
-    let mut first = ipsw.prepared_image("OS.dmg").unwrap();
-    let mut second = worker.prepared_image("OS.dmg").unwrap();
+    let mut worker = ipsw.reopen().unwrap();
+    let mut first = ipsw.image("OS.dmg").unwrap();
+    let mut second = worker.image("OS.dmg").unwrap();
     first.read_exact(&mut [0; 7]).unwrap();
     let mut streamed = Vec::new();
     assert_eq!(
@@ -226,7 +228,7 @@ fn prepared_filesystems_are_reused_with_independent_worker_cursors_and_cleaned_u
 
 #[test]
 fn filesystem_preparation_rejects_storage_and_crc_failures_before_caching_an_image() {
-    let (archive, identity, _) = filesystem_fixture(false);
+    let (archive, identity, _) = filesystem_fixture(zip::CompressionMethod::Deflated, false);
     let mut ipsw = Ipsw::open(archive.path()).unwrap();
     let not_a_directory = tempfile::NamedTempFile::new().unwrap();
     assert!(
@@ -234,8 +236,89 @@ fn filesystem_preparation_rejects_storage_and_crc_failures_before_caching_an_ima
             .is_err()
     );
     assert!(ipsw.prepared_images.is_empty());
-    let (archive, identity, _) = filesystem_fixture(true);
+    let (archive, identity, _) = filesystem_fixture(zip::CompressionMethod::Deflated, true);
     let mut ipsw = Ipsw::open(archive.path()).unwrap();
     assert!(ipsw.prepare_filesystem(&identity).is_err());
     assert!(ipsw.prepared_images.is_empty());
+}
+
+#[test]
+fn stored_and_prepared_images_have_the_same_bounds_and_independent_cursors() {
+    use std::io::{Seek, SeekFrom};
+
+    for compression in [
+        zip::CompressionMethod::Stored,
+        zip::CompressionMethod::Deflated,
+    ] {
+        let (archive, identity, expected) = filesystem_fixture(compression, false);
+        let mut ipsw = Ipsw::open(archive.path()).unwrap();
+        if compression == zip::CompressionMethod::Deflated {
+            assert!(
+                ipsw.image("OS.dmg")
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("not prepared")
+            );
+        }
+        ipsw.prepare_filesystem(&identity).unwrap();
+        let mut first = ipsw.image("OS.dmg").unwrap();
+        let mut worker = ipsw.reopen().unwrap();
+        let mut second = worker.image("OS.dmg").unwrap();
+        assert_eq!(first.size(), expected.len() as u64);
+        assert_eq!(second.size(), first.size());
+        assert!(first.seek(SeekFrom::Start(first.size() + 1)).is_err());
+        assert!(first.seek(SeekFrom::Current(-1)).is_err());
+        assert!(
+            first
+                .seek(SeekFrom::End(-((first.size() + 1) as i64)))
+                .is_err()
+        );
+        first.seek(SeekFrom::End(-7)).unwrap();
+        let mut tail = Vec::new();
+        first.read_to_end(&mut tail).unwrap();
+        assert_eq!(tail, expected[expected.len() - 7..]);
+        assert_eq!(first.read(&mut [0; 1]).unwrap(), 0);
+        first.seek(SeekFrom::Start(0)).unwrap();
+        for image in [&mut first, &mut second] {
+            let mut bytes = Vec::new();
+            image.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, expected);
+        }
+    }
+}
+
+#[test]
+fn prepared_images_detect_changed_bytes_after_validation_seeks_and_truncated_storage() {
+    use std::io::{Seek, SeekFrom};
+
+    for truncated in [false, true] {
+        let (archive, identity, _) = filesystem_fixture(zip::CompressionMethod::Deflated, false);
+        let mut ipsw = Ipsw::open(archive.path()).unwrap();
+        ipsw.prepare_filesystem(&identity).unwrap();
+        let mut image = ipsw.image("OS.dmg").unwrap();
+        image.seek(SeekFrom::Start(10)).unwrap();
+        image.read_exact(&mut [0; 7]).unwrap();
+        let mut backing = std::fs::OpenOptions::new()
+            .write(true)
+            .open(ipsw.prepared_images["OS.dmg"].path())
+            .unwrap();
+        if truncated {
+            backing.set_len(0).unwrap();
+        } else {
+            backing.seek(SeekFrom::Start(20)).unwrap();
+            backing.write_all(&[0xff]).unwrap();
+            backing.flush().unwrap();
+        }
+        image.seek(SeekFrom::Start(0)).unwrap();
+        assert_eq!(
+            image.read_to_end(&mut Vec::new()).unwrap_err().kind(),
+            if truncated {
+                io::ErrorKind::UnexpectedEof
+            } else {
+                io::ErrorKind::InvalidData
+            }
+        );
+        assert!(ipsw.stream("OS.dmg", &mut Vec::new()).is_err());
+    }
 }
