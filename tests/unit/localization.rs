@@ -77,7 +77,7 @@ fn malformed_packs_do_not_replace_valid_languages() {
         BTreeMap::from([("Stage: {}".into(), "Stage: {missing}".into())]),
     ] {
         assert!(
-            Language::new(
+            Pack::new(
                 Pack {
                     locale: "fr".into(),
                     name: "Français".into(),

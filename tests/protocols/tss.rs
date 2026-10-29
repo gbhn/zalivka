@@ -364,30 +364,21 @@ fn component_rules_use_device_parameters_independently_of_manifest_order() {
             .clone();
         let second = wire::dict([
             ("Trusted", true.into()),
+            ("Digest", Value::Data(vec![])),
             (
                 "Info",
-                wire::dict([(
-                    "RestoreRequestRules",
-                    Value::Array(vec![wire::dict([
-                        ("Conditions", wire::dict([("First", prepared)])),
-                        ("Actions", wire::dict([("ESEC", false.into())])),
-                    ])]),
-                )]),
+                wire::dict([
+                    ("Personalize", true.into()),
+                    (
+                        "RestoreRequestRules",
+                        Value::Array(vec![wire::dict([
+                            ("Conditions", wire::dict([("First", prepared)])),
+                            ("Actions", wire::dict([("ESEC", false.into())])),
+                        ])]),
+                    ),
+                ]),
             ),
         ]);
-        let mut second = second;
-        second
-            .as_dictionary_mut()
-            .unwrap()
-            .insert("Digest".into(), Value::Data(vec![]));
-        second
-            .as_dictionary_mut()
-            .unwrap()
-            .get_mut("Info")
-            .unwrap()
-            .as_dictionary_mut()
-            .unwrap()
-            .insert("Personalize".into(), true.into());
         manifest_mut(&mut id).insert("Second".into(), second.clone());
         let forward = build(&device_info(), &id).unwrap();
         let entries = manifest_mut(&mut id);

@@ -2,8 +2,7 @@
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
 use zalivka::localization::{format as trf, text as tr};
 
-pub(super) fn caption(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
-    let text: String = text.into();
+pub(super) fn caption(ui: &mut egui::Ui, text: impl AsRef<str>) -> egui::Response {
     ui.label(
         RichText::new(tr(text))
             .small()

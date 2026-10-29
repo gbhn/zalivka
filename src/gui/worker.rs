@@ -216,7 +216,8 @@ impl Job {
             progress::Event::RestoreCompleted => {
                 self.restore_completed = true;
                 self.overall_fraction = Some(1.0);
-                self.set_phase("Restore complete");
+                self.phase = "Restore complete".into();
+                self.transfers.clear();
             }
             progress::Event::ProvisioningWarning { message } => {
                 self.provisioning_warning = Some(message);
@@ -289,15 +290,6 @@ impl Job {
             let fraction = percent / 100.0;
             self.overall_fraction = Some(self.overall_fraction.unwrap_or_default().max(fraction));
         }
-    }
-
-    fn set_phase(&mut self, phase: &str) {
-        self.phase = phase.into();
-        self.transfers.clear();
-    }
-
-    pub(super) fn finished(&self) -> Option<bool> {
-        self.success
     }
 
     pub(super) fn completion_notice(&self, success: bool, reboot_required: bool) -> Notice {

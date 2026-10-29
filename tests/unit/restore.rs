@@ -318,6 +318,16 @@ fn data_ports_require_explicit_asr_ports_and_keep_all_bounds() {
     }
 }
 
+fn round_trip(message: &Value, binary: bool) -> Value {
+    let mut framed = Vec::new();
+    if binary {
+        wire::send_binary(&mut framed, message).unwrap();
+    } else {
+        wire::send(&mut framed, message).unwrap();
+    }
+    wire::receive(&mut framed.as_slice()).unwrap()
+}
+
 fn j313_identity() -> Identity {
     Identity::new(
         3,
@@ -583,13 +593,7 @@ fn signed_progress_survives_xml_and_binary_plist_framing() {
             ("Progress", progress.into()),
         ]);
         for binary in [false, true] {
-            let mut framed = Vec::new();
-            if binary {
-                wire::send_binary(&mut framed, &message).unwrap();
-            } else {
-                wire::send(&mut framed, &message).unwrap();
-            }
-            let received = wire::receive(&mut std::io::Cursor::new(framed)).unwrap();
+            let received = round_trip(&message, binary);
             let mut output = Vec::new();
             let event = log_progress(&received, |record| output.push(record)).unwrap();
             assert_eq!(output.len(), 1);
@@ -634,13 +638,7 @@ fn optional_operation_weights_preserve_the_device_ids_without_blocking_restore()
     let message: Value =
         serde_json::from_str(include_str!("../fixtures/restored-operation-weights.json")).unwrap();
     for binary in [false, true] {
-        let mut framed = Vec::new();
-        if binary {
-            wire::send_binary(&mut framed, &message).unwrap();
-        } else {
-            wire::send(&mut framed, &message).unwrap();
-        }
-        let received = wire::receive(&mut std::io::Cursor::new(framed)).unwrap();
+        let received = round_trip(&message, binary);
         assert_eq!(
             operation_weights(&received).unwrap(),
             crate::progress::Event::OperationWeights {
@@ -695,13 +693,7 @@ fn operation_weight_snapshots_preserve_completed_units_and_cap_them_to_the_weigh
             wire::dict([("id_13", 450u64.into()), ("id_18", 999u64.into())]),
         );
     for binary in [false, true] {
-        let mut framed = Vec::new();
-        if binary {
-            wire::send_binary(&mut framed, &message).unwrap();
-        } else {
-            wire::send(&mut framed, &message).unwrap();
-        }
-        let received = wire::receive(&mut std::io::Cursor::new(framed)).unwrap();
+        let received = round_trip(&message, binary);
         let Some(crate::progress::Event::OperationWeights { progresses, .. }) =
             operation_weights(&received)
         else {
@@ -1916,14 +1908,7 @@ fn aea_handles_multiple_key_requests_and_rejects_unrelated_messages() {
         } else {
             result.unwrap();
             assert_eq!(count, 2);
-            let mut replies = vec![];
-            for packet in output.lock().unwrap().iter().skip(2) {
-                let decoded = mux::decode_packet(packet, 2).unwrap();
-                if decoded.protocol == 6 && decoded.payload.len() > 20 {
-                    replies.extend_from_slice(&decoded.payload[20..]);
-                }
-            }
-            let mut replies = Cursor::new(replies);
+            let mut replies = Cursor::new(bytes_on(&output, 1234));
             for _ in 0..2 {
                 assert_eq!(
                     wire::number(

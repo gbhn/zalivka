@@ -47,28 +47,34 @@ const PIPE_INFO: u32 = 0x2200a4;
 const INTERFACE_INFO: u32 = 0x2200a8;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Clone)]
 pub(crate) struct AppleUsb {
-    handle: OwnedHandle,
+    handle: Arc<OwnedHandle>,
 }
 
-type ReadRequest = (Arc<AppleUsb>, u8, usize, Ioctl);
-
-/// Windows cancels IRPs when their submitting thread exits. Keep that thread
-/// alive for the input endpoint, independently of short-lived ASR/FDR workers.
-pub(crate) struct ReadSubmitter {
-    requests: Option<mpsc::SyncSender<ReadRequest>>,
-    completed: mpsc::Receiver<Result<PendingRead>>,
+/// Keep submission on a persistent thread: Windows cancels IRPs when their
+/// submitting thread exits. This endpoint also owns/rearms its pending read,
+/// so ASR/FDR workers never need to manage that lifetime themselves.
+pub(crate) struct BulkReader {
+    pending: Option<IoctlRequest<'static>>,
+    requests: Option<mpsc::SyncSender<()>>,
+    completed: mpsc::Receiver<Result<IoctlRequest<'static>>>,
     worker: Option<JoinHandle<()>>,
 }
 
-impl ReadSubmitter {
-    pub(crate) fn new() -> Result<Self> {
-        let (requests, incoming) = mpsc::sync_channel::<ReadRequest>(1);
+impl BulkReader {
+    pub(crate) fn new(device: AppleUsb, pipe: u8) -> Result<Self> {
+        Self::new_using(device, pipe, DeviceIoControl)
+    }
+
+    fn new_using(device: AppleUsb, pipe: u8, submit: Ioctl) -> Result<Self> {
+        pipe_ioctl(pipe, true)?;
+        let (requests, incoming) = mpsc::sync_channel(1);
         let (finished, completed) = mpsc::sync_channel(1);
         let worker = thread::Builder::new().name("zalivka-usb-in".into()).spawn(
             crate::progress::inherit(move || {
-                while let Ok((device, pipe, length, submit)) = incoming.recv() {
-                    let result = PendingRead::begin_using(device, pipe, length, submit);
+                while incoming.recv().is_ok() {
+                    let result = device.read_using(pipe, 65536, submit);
                     if finished.send(result).is_err() {
                         break;
                     }
@@ -76,41 +82,51 @@ impl ReadSubmitter {
             }),
         )?;
         Ok(Self {
+            pending: None,
             requests: Some(requests),
             completed,
             worker: Some(worker),
         })
     }
 
-    pub(crate) fn begin(
-        &mut self,
-        device: Arc<AppleUsb>,
-        pipe: u8,
-        length: usize,
-    ) -> Result<PendingRead> {
-        self.begin_using(device, pipe, length, DeviceIoControl)
-    }
-
-    fn begin_using(
-        &mut self,
-        device: Arc<AppleUsb>,
-        pipe: u8,
-        length: usize,
-        submit: Ioctl,
-    ) -> Result<PendingRead> {
+    fn rearm(&mut self) -> Result<()> {
         self.requests
             .as_ref()
-            .context("Apple USB read submitter closed")?
-            .send((device, pipe, length, submit))
-            .map_err(|_| anyhow::anyhow!("Apple USB read submitter stopped"))?;
-        self.completed
-            .recv()
-            .context("waiting for Apple USB read submission")?
+            .context("Apple USB reader closed")?
+            .send(())
+            .map_err(|_| anyhow::anyhow!("Apple USB reader stopped"))?;
+        self.pending = Some(
+            self.completed
+                .recv()
+                .context("waiting for Apple USB read submission")??,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn input_ready(&self) -> Option<crate::mux::InputReady> {
+        self.pending.as_ref().map(IoctlRequest::input_ready)
+    }
+
+    pub(crate) fn read(&mut self) -> Result<Vec<u8>> {
+        if self.pending.is_none() {
+            self.rearm()?;
+        }
+        match self.pending.as_mut().unwrap().poll(Duration::ZERO)? {
+            Some(data) => {
+                // Keep ACK reception active while mux decodes this packet and
+                // submits the next outgoing burst. Idle polls retain the read.
+                self.rearm()?;
+                Ok(data)
+            }
+            None => Ok(Vec::new()),
+        }
     }
 }
 
-impl Drop for ReadSubmitter {
+impl Drop for BulkReader {
     fn drop(&mut self) {
+        // Drain before the submitting thread exits, on every shutdown path.
+        drop(self.pending.take());
         drop(self.requests.take());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -118,29 +134,38 @@ impl Drop for ReadSubmitter {
     }
 }
 
-/// Keep one IN request alive across short mux polls. A poll timeout must not
-/// cancel a partially received USB packet or hold up outgoing file data.
-pub(crate) struct PendingRead {
-    device: Arc<AppleUsb>,
+/// Own every allocation touched by Windows until completion or cancellation.
+/// Reads keep this request across idle mux polls; control and OUT transfers
+/// wait synchronously through the same submission and cleanup path.
+struct IoctlRequest<'a> {
+    handle: Arc<OwnedHandle>,
+    input: &'a [u8],
     ready: crate::mux::InputReady,
     overlapped: Box<UnsafeCell<OVERLAPPED>>,
     output: Vec<u8>,
+    transferred: Box<UnsafeCell<u32>>,
     pending: bool,
-    transferred: u32,
 }
-// SAFETY: the allocation addresses stay fixed when moved; only one &mut owner
-// polls the request. Windows owns the OVERLAPPED/buffer until completion/drain.
-unsafe impl Send for PendingRead {}
+// SAFETY: Windows only touches heap allocations whose addresses stay fixed
+// across moves. One mutable owner polls/drains the request; the input borrow
+// prevents its caller from changing or freeing input before the request drops.
+unsafe impl Send for IoctlRequest<'_> {}
 
-impl PendingRead {
-    fn begin_using(device: Arc<AppleUsb>, pipe: u8, length: usize, submit: Ioctl) -> Result<Self> {
-        let code = pipe_ioctl(pipe, true)?;
-        let length = u32::try_from(length)?;
-        // SAFETY: unnamed event, no borrowed security attributes.
+impl<'a> IoctlRequest<'a> {
+    fn begin(
+        device: &AppleUsb,
+        code: u32,
+        input: &'a [u8],
+        output_len: usize,
+        submit: Ioctl,
+    ) -> Result<Self> {
+        let input_len = u32::try_from(input.len()).context("Apple USB input too large")?;
+        let output_size = u32::try_from(output_len).context("Apple USB output too large")?;
+        // SAFETY: unnamed manual-reset event, no borrowed security attributes.
         let event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
         ensure!(
             !event.is_null(),
-            "creating Apple USB read event: {}",
+            "creating Apple USB event: {}",
             io::Error::last_os_error()
         );
         // SAFETY: newly created owned event.
@@ -149,10 +174,8 @@ impl PendingRead {
             hEvent: event.as_raw_handle(),
             ..Default::default()
         }));
-        // The notification owns the event. A writer may wait outside the mux
-        // lock while another reader retires this request and rearms a new one.
-        // Clones retain the old event until every waiter has returned; each new
-        // request gets its own event, so completion cannot be lost by a reset.
+        // A writer can wait after a reader retires this request. Every request
+        // gets a new event; notification clones retain it until all waits end.
         let ready = crate::mux::InputReady::new(move |timeout| {
             // SAFETY: the closure owns the event for the entire bounded wait.
             match unsafe {
@@ -163,98 +186,150 @@ impl PendingRead {
             } {
                 WAIT_OBJECT_0 => Ok(true),
                 WAIT_TIMEOUT => Ok(false),
-                _ => Err(io::Error::last_os_error()).context("waiting for Apple USB IN event"),
+                _ => Err(io::Error::last_os_error()).context("waiting for Apple USB event"),
             }
         });
-        let mut read = Self {
-            device,
+        let mut request = Self {
+            handle: device.handle.clone(),
+            input,
             ready,
             overlapped,
-            output: vec![0; length as usize],
+            output: vec![0; output_len],
+            transferred: Box::new(UnsafeCell::new(0)),
             pending: false,
-            transferred: 0,
         };
-        // SAFETY: heap-backed OVERLAPPED and buffer are retained by read until
-        // completion or a cancelling Drop. No input buffer is used for IN.
+        // SAFETY: the request retains input, output, count, OVERLAPPED and
+        // event until completion/drain, including after a move to another thread.
         let ok = unsafe {
             submit(
-                read.device.handle.as_raw_handle(),
+                request.handle.as_raw_handle(),
                 code,
-                ptr::null(),
-                0,
-                read.output.as_mut_ptr().cast(),
-                length,
-                &mut read.transferred,
-                read.overlapped.get(),
+                if request.input.is_empty() {
+                    ptr::null()
+                } else {
+                    request.input.as_ptr().cast()
+                },
+                input_len,
+                if request.output.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    request.output.as_mut_ptr().cast()
+                },
+                output_size,
+                request.transferred.get(),
+                request.overlapped.get(),
             )
         };
         if ok == 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-                return Err(error).with_context(|| format!("Apple USB IN IOCTL {code:#x}"));
+                return Err(error).with_context(|| format!("Apple USB IOCTL {code:#x}"));
             }
-            read.pending = true;
+            request.pending = true;
         }
-        Ok(read)
+        Ok(request)
     }
 
-    pub(crate) fn input_ready(&self) -> crate::mux::InputReady {
+    fn input_ready(&self) -> crate::mux::InputReady {
         self.ready.clone()
     }
 
-    pub(crate) fn poll(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>> {
-        if self.pending {
-            // SAFETY: the request, event and output allocation remain alive.
-            let ok = unsafe {
-                GetOverlappedResultEx(
-                    self.device.handle.as_raw_handle(),
-                    self.overlapped.get(),
-                    &mut self.transferred,
-                    timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32,
-                    0,
-                )
-            };
-            if ok == 0 {
-                let error = io::Error::last_os_error();
-                // With a zero timeout GetOverlappedResultEx reports an
-                // unfinished operation as IO_INCOMPLETE, not WAIT_TIMEOUT.
-                if matches!(error.raw_os_error(), Some(code)
-                    if code == WAIT_TIMEOUT as i32 || code == ERROR_IO_INCOMPLETE as i32)
-                {
-                    return Ok(None);
-                }
-                // An aborted driver request may have consumed bytes without
-                // returning them. Do not silently resume a damaged mux stream.
-                // ReadSubmitter prevents cancellation on service-worker exit.
-                return Err(error).context("receiving Apple USB IN completion");
-            }
-            self.pending = false;
+    fn wait(&mut self, timeout: Duration) -> io::Result<bool> {
+        if !self.pending {
+            return Ok(true);
         }
+        // SAFETY: Windows retains these heap allocations until we drain it.
+        let ok = unsafe {
+            GetOverlappedResultEx(
+                self.handle.as_raw_handle(),
+                self.overlapped.get(),
+                self.transferred.get(),
+                timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32,
+                0,
+            )
+        };
+        if ok == 0 {
+            let error = io::Error::last_os_error();
+            // A zero timeout reports IO_INCOMPLETE rather than WAIT_TIMEOUT.
+            if matches!(error.raw_os_error(), Some(code)
+                if code == WAIT_TIMEOUT as i32 || code == ERROR_IO_INCOMPLETE as i32)
+            {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        self.pending = false;
+        Ok(true)
+    }
+
+    fn take_output(&mut self) -> Result<Vec<u8>> {
+        // SAFETY: wait/cancel has retired the request before output is read.
+        let transferred = unsafe { *self.transferred.get() } as usize;
         ensure!(
-            self.transferred as usize <= self.output.len(),
-            "invalid Apple USB IN length"
+            transferred <= self.output.len(),
+            "Apple USB returned an invalid transfer length"
         );
-        self.output.truncate(self.transferred as usize);
-        Ok(Some(std::mem::take(&mut self.output)))
+        self.output.truncate(transferred);
+        Ok(std::mem::take(&mut self.output))
+    }
+
+    fn poll(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>> {
+        // Idle reads stay pending. Cancelling a partial USB packet on each
+        // short mux poll could silently discard bytes from the device stream.
+        if !self
+            .wait(timeout)
+            .context("receiving Apple USB IN completion")?
+        {
+            return Ok(None);
+        }
+        self.take_output().map(Some)
+    }
+
+    fn finish(mut self, timeout: Duration) -> Result<Vec<u8>> {
+        let waited = self.wait(timeout);
+        if !matches!(waited, Ok(true)) {
+            let timed_out = matches!(waited, Ok(false));
+            if let Err(error) = self.cancel() {
+                if timed_out && error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Apple USB transfer timed out",
+                    )
+                    .into());
+                }
+                return Err(error.into());
+            }
+            // Completion may win the race with cancellation. Preserve those
+            // successfully transferred bytes, as the former synchronous path did.
+        }
+        self.take_output()
+    }
+
+    fn cancel(&mut self) -> io::Result<()> {
+        if !self.pending {
+            return Ok(());
+        }
+        // SAFETY: cancel only our request and drain before releasing buffers.
+        let completed = unsafe {
+            CancelIoEx(self.handle.as_raw_handle(), self.overlapped.get());
+            GetOverlappedResult(
+                self.handle.as_raw_handle(),
+                self.overlapped.get(),
+                self.transferred.get(),
+                1,
+            )
+        };
+        self.pending = false;
+        if completed == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 }
 
-impl Drop for PendingRead {
+impl Drop for IoctlRequest<'_> {
     fn drop(&mut self) {
-        if self.pending {
-            let mut transferred = 0;
-            // SAFETY: cancel only our request and wait for completion before its
-            // buffers, OVERLAPPED and event are released, even after an error.
-            unsafe {
-                CancelIoEx(self.device.handle.as_raw_handle(), self.overlapped.get());
-                GetOverlappedResult(
-                    self.device.handle.as_raw_handle(),
-                    self.overlapped.get(),
-                    &mut transferred,
-                    1,
-                );
-            }
-        }
+        let _ = self.cancel();
     }
 }
 
@@ -361,7 +436,7 @@ impl AppleUsb {
             }
             // SAFETY: CreateFileW returned a new owned, valid handle.
             let device = Self {
-                handle: unsafe { OwnedHandle::from_raw_handle(handle) },
+                handle: Arc::new(unsafe { OwnedHandle::from_raw_handle(handle) }),
             };
             // Verify the handle with a read-only USB request, not just a cached PnP name.
             let descriptor = device.control_in(
@@ -407,59 +482,9 @@ impl AppleUsb {
         timeout: Duration,
         submit: Ioctl,
     ) -> Result<Vec<u8>> {
-        let input_len = u32::try_from(input.len()).context("Apple USB input too large")?;
-        let output_size = u32::try_from(output_len).context("Apple USB output too large")?;
-        let mut output = vec![0u8; output_len];
-        // SAFETY: no security attributes/name; CreateEventW returns a fresh event.
-        let event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
-        ensure!(
-            !event.is_null(),
-            "creating Apple USB event: {}",
-            io::Error::last_os_error()
-        );
-        // SAFETY: event is a fresh valid owned HANDLE.
-        let event = unsafe { OwnedHandle::from_raw_handle(event) };
-        let mut overlapped = OVERLAPPED {
-            hEvent: event.as_raw_handle(),
-            ..Default::default()
-        };
-        let mut transferred = 0;
-        // SAFETY: buffers, event and OVERLAPPED remain alive until completion, including cancellation.
-        let ok = unsafe {
-            submit(
-                self.handle.as_raw_handle(),
-                code,
-                if input.is_empty() {
-                    ptr::null()
-                } else {
-                    input.as_ptr().cast()
-                },
-                input_len,
-                if output.is_empty() {
-                    ptr::null_mut()
-                } else {
-                    output.as_mut_ptr().cast()
-                },
-                output_size,
-                &mut transferred,
-                &mut overlapped,
-            )
-        };
-        if ok == 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-                return Err(error).with_context(|| format!("Apple USB IOCTL {code:#x}"));
-            }
-            transferred = self
-                .complete_pending(&overlapped, timeout)
-                .with_context(|| format!("Apple USB IOCTL {code:#x}"))?;
-        }
-        ensure!(
-            transferred as usize <= output.len(),
-            "Apple USB returned an invalid transfer length"
-        );
-        output.truncate(transferred as usize);
-        Ok(output)
+        IoctlRequest::begin(self, code, input, output_len, submit)?
+            .finish(timeout)
+            .with_context(|| format!("Apple USB IOCTL {code:#x}"))
     }
 
     /// AppleUsbFilter forwards this device reset to WinUSB; no hub port cycle.
@@ -469,45 +494,8 @@ impl AppleUsb {
         Ok(())
     }
 
-    /// The caller keeps the OVERLAPPED, its event and all buffers alive until this
-    /// returns. Every error path drains the request before those can be dropped.
-    fn complete_pending(&self, overlapped: &OVERLAPPED, timeout: Duration) -> Result<u32> {
-        let mut transferred = 0;
-        let millis = timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32;
-        // SAFETY: overlapped is a live request submitted on this handle.
-        let ok = unsafe {
-            GetOverlappedResultEx(
-                self.handle.as_raw_handle(),
-                overlapped,
-                &mut transferred,
-                millis,
-                0,
-            )
-        };
-        if ok == 0 {
-            let error = io::Error::last_os_error();
-            // SAFETY: cancel only this request, then drain it before freeing its buffers.
-            unsafe {
-                CancelIoEx(self.handle.as_raw_handle(), overlapped);
-            }
-            let completed = unsafe {
-                GetOverlappedResult(self.handle.as_raw_handle(), overlapped, &mut transferred, 1)
-            };
-            if completed == 0 {
-                let completion_error = io::Error::last_os_error();
-                if error.raw_os_error() == Some(WAIT_TIMEOUT as i32)
-                    && completion_error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32)
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "Apple USB transfer timed out",
-                    )
-                    .into());
-                }
-                return Err(completion_error.into());
-            }
-        }
-        Ok(transferred)
+    fn read_using(&self, pipe: u8, length: usize, submit: Ioctl) -> Result<IoctlRequest<'static>> {
+        IoctlRequest::begin(self, pipe_ioctl(pipe, true)?, &[], length, submit)
     }
 
     pub(crate) fn control_in(&self, request: ControlIn, timeout: Duration) -> Result<Vec<u8>> {

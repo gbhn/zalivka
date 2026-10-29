@@ -12,7 +12,7 @@ unsafe extern "system" fn read_pipe(
     returned: *mut u32,
     overlapped: *mut OVERLAPPED,
 ) -> i32 {
-    // SAFETY: PendingRead owns the output/OVERLAPPED for this named-pipe I/O.
+    // SAFETY: IoctlRequest owns the output/OVERLAPPED for this named-pipe I/O.
     unsafe {
         windows_sys::Win32::Storage::FileSystem::ReadFile(
             handle,
@@ -24,10 +24,9 @@ unsafe extern "system" fn read_pipe(
     }
 }
 
-fn connected_pipe(label: &str) -> (Arc<AppleUsb>, OwnedHandle) {
+fn connected_pipe(label: &str) -> (AppleUsb, OwnedHandle) {
     use windows_sys::Win32::{
-        Storage::FileSystem::PIPE_ACCESS_DUPLEX,
-        System::Pipes::{ConnectNamedPipe, CreateNamedPipeW},
+        Storage::FileSystem::PIPE_ACCESS_DUPLEX, System::Pipes::CreateNamedPipeW,
     };
     let name: Vec<u16> = format!(r"\\.\pipe\zalivka-{label}-{}", std::process::id())
         .encode_utf16()
@@ -48,17 +47,10 @@ fn connected_pipe(label: &str) -> (Arc<AppleUsb>, OwnedHandle) {
     };
     assert!(server != INVALID_HANDLE_VALUE);
     // SAFETY: freshly created owned handle.
-    let device = Arc::new(AppleUsb {
-        handle: unsafe { OwnedHandle::from_raw_handle(server) },
-    });
-    let mut connect = OVERLAPPED::default();
-    // SAFETY: connect remains alive until complete_pending below; this is
-    // the only outstanding request on the server during connection.
-    assert_eq!(unsafe { ConnectNamedPipe(server, &mut connect) }, 0);
-    assert_eq!(
-        io::Error::last_os_error().raw_os_error(),
-        Some(ERROR_IO_PENDING as i32)
-    );
+    let device = AppleUsb {
+        handle: Arc::new(unsafe { OwnedHandle::from_raw_handle(server) }),
+    };
+    let connect = IoctlRequest::begin(&device, 0, &[], 0, connect_pipe).unwrap();
     // SAFETY: same live pipe name; client uses synchronous writes.
     let client = unsafe {
         CreateFileW(
@@ -74,9 +66,7 @@ fn connected_pipe(label: &str) -> (Arc<AppleUsb>, OwnedHandle) {
     assert!(client != INVALID_HANDLE_VALUE);
     // SAFETY: freshly opened owned client handle.
     let client = unsafe { OwnedHandle::from_raw_handle(client) };
-    device
-        .complete_pending(&connect, Duration::from_secs(1))
-        .unwrap();
+    connect.finish(Duration::from_secs(1)).unwrap();
     (device, client)
 }
 
@@ -97,9 +87,7 @@ unsafe extern "system" fn removed_device(
 #[test]
 fn immediate_input_submission_failure_preserves_device_removal_for_reconnect() {
     let (device, _client) = connected_pipe("removed-device");
-    let error = PendingRead::begin_using(device, 1, 4096, removed_device)
-        .err()
-        .unwrap();
+    let error = device.read_using(1, 4096, removed_device).err().unwrap();
     assert!(crate::mux::is_device_removal(&error));
     assert_eq!(
         error.downcast_ref::<io::Error>().unwrap().raw_os_error(),
@@ -110,25 +98,22 @@ fn immediate_input_submission_failure_preserves_device_removal_for_reconnect() {
 #[test]
 fn input_submission_outlives_service_workers_without_cancelling_or_losing_data() {
     use windows_sys::Win32::Storage::FileSystem::WriteFile;
-    let (device, client) = connected_pipe("persistent-submitter");
-    let mut submitter = ReadSubmitter::new().unwrap();
+    let (device, client) = connected_pipe("persistent-reader");
+    let mut reader = BulkReader::new_using(device.clone(), 1, read_pipe).unwrap();
     for bytes in [
         b"first packet".as_slice(),
         b"packet after another worker exit",
     ] {
-        let worker_device = device.clone();
-        let (returned, mut read) = std::thread::spawn(move || {
-            let read = submitter
-                .begin_using(worker_device, 1, 4096, read_pipe)
-                .unwrap();
-            (submitter, read)
+        reader = std::thread::spawn(move || {
+            assert!(reader.read().unwrap().is_empty());
+            reader
         })
         .join()
         .unwrap();
-        submitter = returned;
-        // The service thread has exited, but the real I/O owner is still
-        // alive. A raw PendingRead here would complete with error 995.
-        assert!(read.poll(Duration::from_millis(10)).unwrap().is_none());
+        // The service thread has exited; the endpoint's submission thread
+        // still owns the Windows I/O. Direct submission would be cancelled.
+        let ready = reader.input_ready().unwrap();
+        assert!(!ready.wait(Duration::from_millis(10)).unwrap());
         let mut sent = 0;
         // SAFETY: synchronous client write from a live byte slice.
         assert_ne!(
@@ -143,15 +128,16 @@ fn input_submission_outlives_service_workers_without_cancelling_or_losing_data()
             },
             0
         );
-        assert_eq!(read.poll(Duration::from_secs(1)).unwrap().unwrap(), bytes);
+        assert!(ready.wait(Duration::from_secs(1)).unwrap());
+        assert_eq!(reader.read().unwrap(), bytes);
+        // Consumption immediately rearms on the persistent thread. Old
+        // notifications remain valid and the new read has its own event.
+        assert!(ready.wait(Duration::ZERO).unwrap());
+        assert!(!reader.input_ready().unwrap().wait(Duration::ZERO).unwrap());
     }
-    let read = submitter
-        .begin_using(device.clone(), 1, 4096, read_pipe)
-        .unwrap();
-    drop(read); // Cancel and drain an idle read before the submitter exits.
-    drop(submitter);
-    // The endpoint remains usable after shutdown.
-    let mut next = PendingRead::begin_using(device, 1, 4096, read_pipe).unwrap();
+    drop(reader); // Cancel/drain the idle read before its submitting thread exits.
+    // The same device handle remains usable after endpoint shutdown.
+    let mut next = device.read_using(1, 4096, read_pipe).unwrap();
     assert!(next.poll(Duration::ZERO).unwrap().is_none());
 }
 
@@ -159,7 +145,7 @@ fn input_submission_outlives_service_workers_without_cancelling_or_losing_data()
 fn read_event_wakes_on_completion_and_remains_valid_after_retiring_request() {
     use windows_sys::Win32::Storage::FileSystem::WriteFile;
     let (device, client) = connected_pipe("read-event");
-    let mut read = PendingRead::begin_using(device.clone(), 1, 4096, read_pipe).unwrap();
+    let mut read = device.read_using(1, 4096, read_pipe).unwrap();
     let ready = read.input_ready();
     assert!(!ready.wait(Duration::ZERO).unwrap());
     assert!(!ready.wait(Duration::from_millis(1)).unwrap());
@@ -188,7 +174,7 @@ fn read_event_wakes_on_completion_and_remains_valid_after_retiring_request() {
     drop(read);
     // A different reader may retire/rearm before the waiting writer resumes.
     // Its old notification must retain a valid, still-signaled event handle.
-    let next = PendingRead::begin_using(device, 1, 4096, read_pipe).unwrap();
+    let next = device.read_using(1, 4096, read_pipe).unwrap();
     let next_ready = next.input_ready();
     assert!(ready.wait(Duration::ZERO).unwrap());
     assert!(!next_ready.wait(Duration::ZERO).unwrap());
@@ -201,7 +187,7 @@ fn read_event_wakes_on_completion_and_remains_valid_after_retiring_request() {
 fn persistent_read_survives_idle_polls_and_drains_on_drop_without_losing_bytes() {
     use windows_sys::Win32::Storage::FileSystem::WriteFile;
     let (device, client) = connected_pipe("persistent-read");
-    let mut read = PendingRead::begin_using(device.clone(), 1, 4096, read_pipe).unwrap();
+    let mut read = device.read_using(1, 4096, read_pipe).unwrap();
     for timeout in [Duration::ZERO, Duration::from_millis(1), Duration::ZERO] {
         assert!(read.poll(timeout).unwrap().is_none());
         assert!(read.pending);
@@ -223,11 +209,11 @@ fn persistent_read_survives_idle_polls_and_drains_on_drop_without_losing_bytes()
     );
     assert_eq!(read.poll(Duration::from_secs(1)).unwrap().unwrap(), bytes);
     drop(read);
-    let mut cancelled = PendingRead::begin_using(device.clone(), 1, 4096, read_pipe).unwrap();
+    let mut cancelled = device.read_using(1, 4096, read_pipe).unwrap();
     assert!(cancelled.poll(Duration::from_millis(1)).unwrap().is_none());
     drop(cancelled);
     // The same handle works after cancellation; the next packet is intact.
-    let mut next = PendingRead::begin_using(device, 1, 4096, read_pipe).unwrap();
+    let mut next = device.read_using(1, 4096, read_pipe).unwrap();
     assert_ne!(
         unsafe {
             WriteFile(
@@ -250,7 +236,7 @@ fn raw_read_reports_worker_exit_cancellation_and_keeps_the_handle_usable() {
     let (device, client) = connected_pipe("worker-exit");
     let worker_device = device.clone();
     let mut read = std::thread::spawn(move || {
-        let mut read = PendingRead::begin_using(worker_device, 1, 4096, read_pipe).unwrap();
+        let mut read = worker_device.read_using(1, 4096, read_pipe).unwrap();
         assert!(read.poll(Duration::ZERO).unwrap().is_none());
         read
     })
@@ -265,7 +251,7 @@ fn raw_read_reports_worker_exit_cancellation_and_keeps_the_handle_usable() {
     );
     drop(read);
 
-    let mut next = PendingRead::begin_using(device.clone(), 1, 4096, read_pipe).unwrap();
+    let mut next = device.read_using(1, 4096, read_pipe).unwrap();
     let bytes = b"restored message after ASR worker exit";
     let mut sent = 0;
     // SAFETY: synchronous client write from a live immutable byte slice.
@@ -286,7 +272,7 @@ fn raw_read_reports_worker_exit_cancellation_and_keeps_the_handle_usable() {
 
     // A genuine pipe failure is still returned, rather than converted to an
     // empty successful read together with the recoverable cancellation.
-    let mut broken = PendingRead::begin_using(device, 1, 4096, read_pipe).unwrap();
+    let mut broken = device.read_using(1, 4096, read_pipe).unwrap();
     assert!(broken.poll(Duration::ZERO).unwrap().is_none());
     drop(client);
     let error = broken.poll(Duration::from_secs(1)).unwrap_err();
@@ -303,7 +289,7 @@ fn event_device() -> AppleUsb {
     assert!(!event.is_null(), "{}", io::Error::last_os_error());
     AppleUsb {
         // SAFETY: CreateEventW returned a new owned handle.
-        handle: unsafe { OwnedHandle::from_raw_handle(event) },
+        handle: Arc::new(unsafe { OwnedHandle::from_raw_handle(event) }),
     }
 }
 
@@ -390,7 +376,80 @@ fn device_reset_preserves_os_failure_and_rejects_an_invalid_response_length() {
     let error = device
         .ioctl_using(RESET, &[], 0, TIMEOUT, invalid_response)
         .unwrap_err();
-    assert!(error.to_string().contains("invalid transfer length"));
+    assert!(format!("{error:#}").contains("invalid transfer length"));
+}
+
+#[test]
+fn synchronous_ioctl_waits_for_the_same_overlapped_input_completion() {
+    use windows_sys::Win32::Storage::FileSystem::WriteFile;
+    let (device, client) = connected_pipe("synchronous-input");
+    let bytes = b"packet received through the synchronous IOCTL path";
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(10));
+        let mut sent = 0;
+        // SAFETY: synchronous write from a live byte slice.
+        assert_ne!(
+            unsafe {
+                WriteFile(
+                    client.as_raw_handle(),
+                    bytes.as_ptr(),
+                    bytes.len() as u32,
+                    &mut sent,
+                    ptr::null_mut(),
+                )
+            },
+            0
+        );
+        client
+    });
+    assert_eq!(
+        device
+            .ioctl_using(0, &[], 4096, Duration::from_secs(1), read_pipe)
+            .unwrap(),
+        bytes
+    );
+    drop(writer.join().unwrap());
+}
+
+#[test]
+fn cancelling_one_request_keeps_other_reads_and_the_shared_handle_alive() {
+    use windows_sys::Win32::Storage::FileSystem::WriteFile;
+    let (device, client) = connected_pipe("independent-requests");
+    let first = device.read_using(1, 4096, read_pipe).unwrap();
+    let mut second = device.read_using(1, 4096, read_pipe).unwrap();
+    drop(first);
+    drop(device);
+    assert!(second.poll(Duration::ZERO).unwrap().is_none());
+    let bytes = b"only the abandoned request was cancelled";
+    let mut sent = 0;
+    // SAFETY: synchronous write from a live byte slice. The second request
+    // retains the server handle even after the AppleUsb wrapper is dropped.
+    assert_ne!(
+        unsafe {
+            WriteFile(
+                client.as_raw_handle(),
+                bytes.as_ptr(),
+                bytes.len() as u32,
+                &mut sent,
+                ptr::null_mut(),
+            )
+        },
+        0
+    );
+    assert_eq!(second.poll(Duration::from_secs(1)).unwrap().unwrap(), bytes);
+}
+
+#[test]
+fn endpoint_submission_failure_preserves_device_removal_and_shuts_down() {
+    let mut reader = BulkReader::new_using(event_device(), 1, removed_device).unwrap();
+    let error = reader.read().unwrap_err();
+    assert!(crate::mux::is_device_removal(&error));
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().raw_os_error(),
+        Some(1167)
+    );
+    assert!(reader.input_ready().is_none());
+    drop(reader);
 }
 
 #[test]
@@ -450,11 +509,24 @@ fn resolves_pipe_ordinals_and_rejects_invalid_descriptors() {
     assert!(pipe_ioctl(8, false).is_err());
 }
 
+unsafe extern "system" fn connect_pipe(
+    handle: HANDLE,
+    _: u32,
+    _: *const c_void,
+    _: u32,
+    _: *mut c_void,
+    _: u32,
+    _: *mut u32,
+    overlapped: *mut OVERLAPPED,
+) -> i32 {
+    // SAFETY: request owns the live handle and OVERLAPPED until completion/drain.
+    unsafe { windows_sys::Win32::System::Pipes::ConnectNamedPipe(handle, overlapped) }
+}
+
 #[test]
 fn cancels_and_drains_a_pending_ioctl_before_returning() {
     use windows_sys::Win32::{
-        Storage::FileSystem::PIPE_ACCESS_DUPLEX,
-        System::Pipes::{ConnectNamedPipe, CreateNamedPipeW},
+        Storage::FileSystem::PIPE_ACCESS_DUPLEX, System::Pipes::CreateNamedPipeW,
     };
     // A real pending Windows I/O request, without requiring USB hardware.
     // No client connects, so the deadline must cancel and drain the request.
@@ -482,28 +554,10 @@ fn cancels_and_drains_a_pending_ioctl_before_returning() {
     );
     // SAFETY: CreateNamedPipeW returned a new owned handle, closed at test exit.
     let device = AppleUsb {
-        handle: unsafe { OwnedHandle::from_raw_handle(handle) },
+        handle: Arc::new(unsafe { OwnedHandle::from_raw_handle(handle) }),
     };
-    // SAFETY: unnamed manual-reset event, no optional pointers supplied.
-    let event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
-    assert!(!event.is_null(), "{}", io::Error::last_os_error());
-    // SAFETY: new owned event, retained through request completion.
-    let event = unsafe { OwnedHandle::from_raw_handle(event) };
-    let mut overlapped = OVERLAPPED {
-        hEvent: event.as_raw_handle(),
-        ..Default::default()
-    };
-    // SAFETY: request and event stay alive until complete_pending drains the operation.
-    assert_eq!(
-        unsafe { ConnectNamedPipe(device.handle.as_raw_handle(), &mut overlapped) },
-        0
-    );
-    assert_eq!(
-        io::Error::last_os_error().raw_os_error(),
-        Some(ERROR_IO_PENDING as i32)
-    );
     let error = device
-        .complete_pending(&overlapped, Duration::from_millis(10))
+        .ioctl_using(0, &[], 0, Duration::from_millis(10), connect_pipe)
         .unwrap_err();
     assert_eq!(
         error.downcast_ref::<io::Error>().unwrap().kind(),

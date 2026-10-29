@@ -13,9 +13,7 @@ fn empty_tls_read_does_not_start_a_handshake_or_touch_the_socket() {
         ServerName::try_from("localhost").unwrap(),
     )
     .unwrap();
-    let mut stream = Stream {
-        transport: Transport::Tls(Box::new(StreamOwned::new(connection, socket))),
-    };
+    let mut stream = Stream::Tls(Box::new(StreamOwned::new(connection, socket)));
     assert_eq!(stream.read(&mut []).unwrap(), 0);
     assert_eq!(
         peer.read(&mut [0]).unwrap_err().kind(),
@@ -319,9 +317,7 @@ fn https_proxy_verifies_the_certificate_and_preserves_target_bytes() {
             config,
         );
         if success {
-            let mut stream = Stream {
-                transport: transport.unwrap(),
-            };
+            let mut stream = transport.unwrap();
             let proxy = Proxy::new("https://localhost:443").unwrap();
             http_connect(
                 &mut stream,

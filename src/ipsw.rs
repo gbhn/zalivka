@@ -22,10 +22,7 @@ const STREAM_CHUNK: usize = 256 * 1024;
 
 /// Signing-only entries may omit a path; present metadata must still be valid.
 pub(crate) fn component_path(entry: &Value) -> Result<Option<&str>> {
-    let Some(info) = wire::dictionary(entry)?.get("Info") else {
-        return Ok(None);
-    };
-    let Some(path) = wire::dictionary(info)?.get("Path") else {
+    let Some(path) = wire::optional(entry, &["Info", "Path"])? else {
         return Ok(None);
     };
     let path = path.as_string().context("invalid component path")?;
@@ -283,26 +280,8 @@ impl Ipsw {
         crate::storage::require(directory, size)?;
         let mut image = tempfile::NamedTempFile::new_in(directory)
             .context("preparing filesystem temporary storage before restore")?;
-        let mut entry = self.archive.by_name(path)?;
-        let mut progress =
-            crate::progress::Progress::new(format!("Verifying {path}"), Some(size), 0);
-        let mut buffer = vec![0; 1024 * 1024];
-        let mut copied = 0;
-        loop {
-            crate::progress::check_cancelled()?;
-            let n = entry
-                .read(&mut buffer)
-                .with_context(|| format!("checking filesystem {path}"))?;
-            if n == 0 {
-                break;
-            }
-            image.write_all(&buffer[..n])?;
-            copied += n as u64;
-            progress.advance(n as u64);
-        }
-        ensure!(copied == size, "truncated filesystem {path}");
+        self.verify_filesystem_to(id, &mut image)?;
         image.flush()?;
-        progress.finish();
         self.prepared_images.insert(path.into(), Arc::new(image));
         Ok(())
     }
@@ -317,11 +296,17 @@ impl Ipsw {
 
     /// Exhaust a stored filesystem ZIP entry before starting a destructive restore.
     pub fn verify_filesystem(&mut self, id: &Identity) -> Result<()> {
+        self.verify_filesystem_to(id, &mut std::io::sink())
+    }
+
+    fn verify_filesystem_to(&mut self, id: &Identity, out: &mut impl Write) -> Result<()> {
         let path = id.path("OS")?;
         let mut entry = self.archive.by_name(path)?;
+        let size = entry.size();
         let mut progress =
-            crate::progress::Progress::new(format!("Verifying {path}"), Some(entry.size()), 0);
+            crate::progress::Progress::new(format!("Verifying {path}"), Some(size), 0);
         let mut buffer = vec![0; 1024 * 1024];
+        let mut copied = 0;
         loop {
             crate::progress::check_cancelled()?;
             let n = entry
@@ -330,8 +315,11 @@ impl Ipsw {
             if n == 0 {
                 break;
             }
+            out.write_all(&buffer[..n])?;
+            copied += n as u64;
             progress.advance(n as u64);
         }
+        ensure!(copied == size, "truncated filesystem {path}");
         progress.finish();
         Ok(())
     }

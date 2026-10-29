@@ -16,7 +16,7 @@ use std::{
 pub(crate) enum UsbInterface {
     Native(Interface),
     #[cfg(windows)]
-    Apple(std::sync::Arc<crate::windows::apple::AppleUsb>),
+    Apple(crate::windows::apple::AppleUsb),
 }
 
 impl UsbInterface {
@@ -26,7 +26,7 @@ impl UsbInterface {
             Err(error) => {
                 #[cfg(windows)]
                 match crate::windows::apple::AppleUsb::open(_info, number) {
-                    Ok(Some(apple)) => return Ok(Self::Apple(std::sync::Arc::new(apple))),
+                    Ok(Some(apple)) => return Ok(Self::Apple(apple)),
                     Ok(None) => {}
                     Err(apple) => {
                         return Err(apple).with_context(|| {
@@ -103,12 +103,10 @@ impl UsbInterface {
         match self {
             Self::Native(i) => Ok(BulkInput::Native(i.endpoint(address)?)),
             #[cfg(windows)]
-            Self::Apple(i) => Ok(BulkInput::Apple(
+            Self::Apple(i) => Ok(BulkInput::Apple(crate::windows::apple::BulkReader::new(
                 i.clone(),
                 i.pipe(address)?,
-                None,
-                crate::windows::apple::ReadSubmitter::new()?,
-            )),
+            )?)),
         }
     }
 }
@@ -116,7 +114,7 @@ impl UsbInterface {
 pub(super) enum BulkOutput {
     Native(nusb::Endpoint<Bulk, Out>),
     #[cfg(windows)]
-    Apple(std::sync::Arc<crate::windows::apple::AppleUsb>, u8),
+    Apple(crate::windows::apple::AppleUsb, u8),
 }
 
 impl BulkOutput {
@@ -187,20 +185,14 @@ impl BulkOutput {
 pub(super) enum BulkInput {
     Native(nusb::Endpoint<Bulk, In>),
     #[cfg(windows)]
-    Apple(
-        std::sync::Arc<crate::windows::apple::AppleUsb>,
-        u8,
-        Option<crate::windows::apple::PendingRead>,
-        // Drop/drain the pending request before its submitting thread exits.
-        crate::windows::apple::ReadSubmitter,
-    ),
+    Apple(crate::windows::apple::BulkReader),
 }
 
 impl BulkInput {
     pub(super) fn input_ready(&self) -> Option<crate::mux::InputReady> {
         match self {
             #[cfg(windows)]
-            Self::Apple(_, _, Some(pending), _) => Some(pending.input_ready()),
+            Self::Apple(reader) => reader.input_ready(),
             _ => None,
         }
     }
@@ -229,20 +221,7 @@ impl BulkInput {
                 }
             }
             #[cfg(windows)]
-            Self::Apple(i, pipe, pending, submitter) => {
-                if pending.is_none() {
-                    *pending = Some(submitter.begin(i.clone(), *pipe, 65536)?);
-                }
-                match pending.as_mut().unwrap().poll(timeout)? {
-                    Some(data) => {
-                        // Keep ACK reception active while mux decodes the
-                        // previous read and submits the next outgoing burst.
-                        *pending = Some(submitter.begin(i.clone(), *pipe, 65536)?);
-                        Ok(data)
-                    }
-                    None => Ok(Vec::new()),
-                }
-            }
+            Self::Apple(reader) => reader.read(),
         }
     }
 }

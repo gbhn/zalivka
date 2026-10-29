@@ -110,16 +110,9 @@ impl Identity {
     }
     pub fn is_macos(&self) -> Result<bool> {
         recovery_variant(&self.value)?;
-        Ok(wire::optional(&self.value, &["Info", "MacOSVariant"])?
-            .map(|value| {
-                value
-                    .as_string()
-                    .filter(|value| !value.is_empty())
-                    .context("invalid MacOSVariant")
-            })
-            .transpose()?
-            .is_some())
+        Ok(wire::optional(&self.value, &["Info", "MacOSVariant"])?.is_some())
     }
+
     pub fn behavior(&self) -> Result<Behavior> {
         match self.info("RestoreBehavior")?.as_string() {
             Some("Erase") => Ok(Behavior::Erase),
@@ -163,14 +156,8 @@ impl IdentitySummary {
                 .context("invalid RestoreBehavior")?
                 .into(),
             macos_variant: wire::optional(value, &["Info", "MacOSVariant"])?
-                .map(|value| {
-                    value
-                        .as_string()
-                        .filter(|value| !value.is_empty())
-                        .context("invalid MacOSVariant")
-                        .map(str::to_owned)
-                })
-                .transpose()?,
+                .and_then(Value::as_string)
+                .map(str::to_owned),
             components: wire::dictionary(wire::get(value, &["Manifest"])?)?.len(),
         })
     }

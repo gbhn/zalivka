@@ -561,36 +561,29 @@ fn canary_v3_self_test_roundtrips_both_loops_without_tss_or_binary_chunking() {
                 ("DataChunkSize", 1u64.into()),
             ]);
             if modern {
-                args.as_dictionary_mut().unwrap().extend(
-                    wire::dictionary(&wire::dict([
-                        (
-                            "DeviceGeneratedRequest",
-                            wire::dict([("QueryLoop0", query.into())]),
-                        ),
-                        (
-                            "DeviceGeneratedTags",
-                            wire::dict([
-                                (
-                                    "BuildIdentityTags",
-                                    Value::Array(vec!["TestFirmware".into()]),
-                                ),
-                                (
-                                    "ResponseTags",
-                                    Value::Array(vec![
-                                        "Test,Ticket,1".into(),
-                                        "Test,Ticket,2".into(),
-                                    ]),
-                                ),
-                                (
-                                    "LoopInstance",
-                                    if query { "InstanceA" } else { "InstanceB" }.into(),
-                                ),
-                            ]),
-                        ),
-                    ]))
-                    .unwrap()
-                    .clone(),
-                );
+                args.as_dictionary_mut().unwrap().extend([
+                    (
+                        "DeviceGeneratedRequest".into(),
+                        wire::dict([("QueryLoop0", query.into())]),
+                    ),
+                    (
+                        "DeviceGeneratedTags".into(),
+                        wire::dict([
+                            (
+                                "BuildIdentityTags",
+                                Value::Array(vec!["TestFirmware".into()]),
+                            ),
+                            (
+                                "ResponseTags",
+                                Value::Array(vec!["Test,Ticket,1".into(), "Test,Ticket,2".into()]),
+                            ),
+                            (
+                                "LoopInstance",
+                                if query { "InstanceA" } else { "InstanceB" }.into(),
+                            ),
+                        ]),
+                    ),
+                ]);
             }
             state
                 .serve(

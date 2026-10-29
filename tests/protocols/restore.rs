@@ -537,11 +537,7 @@ fn cpio_header_matches_odc_wire_format() {
 #[test]
 fn restored_dispatch_transfers_identity_ticket_signed_boot_object_and_asr_image() {
     let file = fixture(None, false);
-    let ipsw = Ipsw::open(file.path()).unwrap();
-    let mut state = restore::ContextState {
-        ipsw,
-        ..restore_state(file.path())
-    };
+    let mut state = restore_state(file.path());
     let initiate = wire::xml(&wire::dict([("Command", "Initiate".into())])).unwrap();
     let payload = wire::xml(&wire::dict([("Command", "Payload".into())])).unwrap();
     let (usb, output) = mock_mux(vec![
@@ -575,23 +571,8 @@ fn restored_dispatch_transfers_identity_ticket_signed_boot_object_and_asr_image(
         ]);
         state.serve(&session, &mut main, &message).unwrap();
     }
-    let output = output.lock().unwrap();
-    let mut control = Vec::new();
-    let mut asr = Vec::new();
-    for packet in output.iter().skip(2) {
-        let packet = mux::decode_packet(packet, 2).unwrap();
-        if packet.protocol != 6 || packet.payload.len() < 20 {
-            continue;
-        }
-        let port = u16::from_be_bytes(packet.payload[2..4].try_into().unwrap());
-        if port == 62078 {
-            control.extend_from_slice(&packet.payload[20..]);
-        }
-        if port == 12345 {
-            asr.extend_from_slice(&packet.payload[20..]);
-        }
-    }
-    let mut control = Cursor::new(control);
+    let mut control = mux_output(&output, 62078);
+    let asr = mux_output(&output, 12345).into_inner();
     let id = wire::receive(&mut control).unwrap();
     assert!(wire::get(&id, &["BuildIdentityDict"]).is_ok());
     assert_eq!(wire::receive(&mut control).unwrap(), id);
@@ -711,14 +692,7 @@ fn ticket_selection_uses_request_type_with_distinct_macos_identity() {
             )
             .is_err()
     );
-    let mut data = vec![];
-    for bytes in output.lock().unwrap().iter().skip(2) {
-        let packet = mux::decode_packet(bytes, 2).unwrap();
-        if packet.protocol == 6 {
-            data.extend_from_slice(&packet.payload[20..]);
-        }
-    }
-    let mut input = Cursor::new(data);
+    let mut input = mux_output(&output, 62078);
     let root = wire::receive(&mut input).unwrap();
     assert_eq!(
         wire::get(&root, &["RootTicketData"])
@@ -1293,12 +1267,6 @@ fn system_image_metadata_requests_use_manifest_components_and_exact_file_keys() 
             ]),
         );
     }
-    declare_type(&mut state.restore.identity, "SystemVolume", "isys");
-    declare_type(
-        &mut state.restore.identity,
-        "Ap,SystemVolumeCanonicalMetadata",
-        "msys",
-    );
     for (old, new) in [
         ("SystemVolume", "FutureSystemPayload"),
         ("Ap,SystemVolumeCanonicalMetadata", "FutureCanonicalPayload"),

@@ -11,7 +11,7 @@ use std::{
 };
 
 thread_local! {
-    static ACTIVE: RefCell<Option<Arc<Language>>> = const { RefCell::new(None) };
+    static ACTIVE: RefCell<Option<Arc<Pack>>> = const { RefCell::new(None) };
 }
 
 #[derive(Clone, Deserialize)]
@@ -20,10 +20,6 @@ struct Pack {
     locale: String,
     name: String,
     messages: BTreeMap<String, String>,
-}
-
-struct Language {
-    pack: Pack,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,7 +71,7 @@ fn fields(parts: &[Part]) -> BTreeMap<&str, usize> {
     result
 }
 
-impl Language {
+impl Pack {
     fn new(mut pack: Pack, english: &Pack) -> Result<Self> {
         pack.locale = normalize(&pack.locale);
         ensure!(
@@ -102,12 +98,11 @@ impl Language {
                 "translation placeholders differ: {source}"
             );
         }
-        Ok(Self { pack })
+        Ok(pack)
     }
 
     fn text(&self, message: &str) -> String {
-        self.pack
-            .messages
+        self.messages
             .get(message)
             .cloned()
             .unwrap_or_else(|| message.into())
@@ -116,10 +111,10 @@ impl Language {
 
 #[derive(Clone)]
 pub struct Localizer {
-    languages: BTreeMap<String, Arc<Language>>,
+    languages: BTreeMap<String, Arc<Pack>>,
     system: Vec<String>,
     preference: String,
-    selected: Arc<Language>,
+    selected: Arc<Pack>,
 }
 
 impl Localizer {
@@ -147,8 +142,8 @@ impl Localizer {
         let mut languages = BTreeMap::new();
         for pack in [english.clone(), russian] {
             let language =
-                Arc::new(Language::new(pack, &english).expect("valid built-in language pack"));
-            languages.insert(language.pack.locale.clone(), language);
+                Arc::new(Pack::new(pack, &english).expect("valid built-in language pack"));
+            languages.insert(language.locale.clone(), language);
         }
         for directory in directories {
             let Ok(entries) = std::fs::read_dir(directory) else {
@@ -163,18 +158,18 @@ impl Localizer {
                 .collect();
             files.sort();
             for file in files {
-                let loaded = (|| -> Result<Language> {
+                let loaded = (|| -> Result<Pack> {
                     let bytes = crate::storage::read_limited(
                         std::fs::File::open(&file)?,
                         1024 * 1024,
                         "language pack exceeds 1 MiB",
                     )?;
                     let text = std::str::from_utf8(&bytes)?.trim_start_matches('\u{feff}');
-                    Language::new(serde_json::from_str(text)?, &english)
+                    Pack::new(serde_json::from_str(text)?, &english)
                 })();
                 match loaded {
                     Ok(language) => {
-                        languages.insert(language.pack.locale.clone(), Arc::new(language));
+                        languages.insert(language.locale.clone(), Arc::new(language));
                     }
                     Err(error) => crate::log!(
                         Warning,
@@ -220,15 +215,15 @@ impl Localizer {
         &self.preference
     }
     pub fn language(&self) -> &str {
-        &self.selected.pack.locale
+        &self.selected.locale
     }
     pub fn name(&self) -> &str {
-        &self.selected.pack.name
+        &self.selected.name
     }
     pub fn languages(&self) -> Vec<(String, String)> {
         self.languages
             .iter()
-            .map(|(id, language)| (id.clone(), language.pack.name.clone()))
+            .map(|(id, language)| (id.clone(), language.name.clone()))
             .collect()
     }
     pub fn enter(&self) -> LanguageGuard {
@@ -243,7 +238,7 @@ impl Localizer {
 }
 
 pub struct LanguageGuard {
-    previous: Option<Arc<Language>>,
+    previous: Option<Arc<Pack>>,
     thread: PhantomData<Rc<()>>,
 }
 impl Drop for LanguageGuard {

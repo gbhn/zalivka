@@ -106,18 +106,15 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         let ticket = tss::send(&tss::request(&usb.info, &identity)?)
             .context("personalizing diagnostic iBSS")?;
         let bytes = img4::personalize_with_metadata(name, &component, &ticket, &identity.value)?;
-        let chip_id = usb.info.chip_id;
-        let board_id = usb.info.board_id;
+        let original_device = usb.info.clone();
         crate::log!(Debug, "boot", "iBSS in RAM: {} B", bytes.len());
         let upload = dfu::upload(&mut usb, Mode::Dfu, &bytes, true);
         drop(usb);
         usb = reconnect_after_ibss(upload, Some(Mode::Recovery), |mode| {
             wait_recovery(ecid, mode)
         })?;
-        ensure!(
-            usb.info.chip_id == chip_id && usb.info.board_id == board_id,
-            "hardware identity changed after diagnostic iBSS"
-        );
+        validate_reconnected_device(&original_device, &usb.info)
+            .context("hardware identity changed after diagnostic iBSS")?;
     }
     let mut variables = serde_json::Map::new();
     for name in [

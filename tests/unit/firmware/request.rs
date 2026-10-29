@@ -38,23 +38,19 @@ fn explicit_tag_lists_are_required_and_must_be_unambiguous() {
             Some(Value::Array(vec!["same".into(), "same".into()])),
         ] {
             let mut args = arguments("UnlistedController");
-            args.as_dictionary_mut().unwrap().extend(
-                wire::dictionary(&wire::dict([
-                    (
-                        "DeviceGeneratedRequest",
-                        wire::dict([("@NewTicket", true.into())]),
-                    ),
-                    (
-                        "DeviceGeneratedTags",
-                        wire::dict([
-                            ("BuildIdentityTags", Value::Array(vec![])),
-                            ("ResponseTags", Value::Array(vec!["NewTicket".into()])),
-                        ]),
-                    ),
-                ]))
-                .unwrap()
-                .clone(),
-            );
+            args.as_dictionary_mut().unwrap().extend([
+                (
+                    "DeviceGeneratedRequest".into(),
+                    wire::dict([("@NewTicket", true.into())]),
+                ),
+                (
+                    "DeviceGeneratedTags".into(),
+                    wire::dict([
+                        ("BuildIdentityTags", Value::Array(vec![])),
+                        ("ResponseTags", Value::Array(vec!["NewTicket".into()])),
+                    ]),
+                ),
+            ]);
             let fields = args
                 .as_dictionary_mut()
                 .unwrap()

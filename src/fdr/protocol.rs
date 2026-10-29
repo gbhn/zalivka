@@ -202,11 +202,6 @@ pub fn validate_proxy_target(host: &str, port: u16) -> Result<()> {
         crate::net::is_apple_host(&host),
         "FDR requested a non-Apple endpoint"
     );
-    ensure!(
-        host.bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-'),
-        "invalid FDR hostname"
-    );
     Ok(())
 }
 

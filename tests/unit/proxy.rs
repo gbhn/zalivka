@@ -1,4 +1,5 @@
 use super::*;
+use std::io::{self, Read, Write};
 
 #[test]
 fn environment_policy_is_scheme_specific_and_invalid_config_does_not_bypass() {

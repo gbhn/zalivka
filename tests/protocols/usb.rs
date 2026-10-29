@@ -465,23 +465,12 @@ impl RecoveryTransport for MockUsb {
 
 #[test]
 fn empty_firmware_is_rejected_before_any_usb_request_in_both_modes() {
-    struct NoUsb;
-    impl RecoveryTransport for NoUsb {
-        fn control_in(&mut self, _: u8, _: u8, _: u16, _: u16, _: u16) -> Result<Vec<u8>> {
-            panic!("USB request for empty firmware")
-        }
-        fn control_out(&mut self, _: u8, _: u8, _: u16, _: u16, _: &[u8]) -> Result<()> {
-            panic!("USB request for empty firmware")
-        }
-        fn bulk_out(&mut self, _: &[u8]) -> Result<()> {
-            panic!("USB write for empty firmware")
-        }
-        fn reset(&mut self) -> Result<()> {
-            panic!("USB reset for empty firmware")
-        }
-    }
     for mode in [Mode::Dfu, Mode::Recovery] {
-        assert!(dfu::upload(&mut NoUsb, mode, &[], true).is_err());
+        let mut usb = MockUsb::default();
+        assert!(dfu::upload(&mut usb, mode, &[], true).is_err());
+        assert!(usb.requests.is_empty());
+        assert!(usb.bulk.is_empty());
+        assert_eq!(usb.resets, 0);
     }
 }
 

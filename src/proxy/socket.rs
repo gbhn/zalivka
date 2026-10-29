@@ -13,18 +13,15 @@ use std::{
 };
 use ureq::{Proxy, ProxyProtocol};
 
-enum Transport {
+pub(crate) enum Stream {
     Tcp(TcpStream),
     Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
 }
-pub(crate) struct Stream {
-    transport: Transport,
-}
 impl Stream {
     fn tcp(&self) -> &TcpStream {
-        match &self.transport {
-            Transport::Tcp(s) => s,
-            Transport::Tls(s) => &s.sock,
+        match self {
+            Self::Tcp(s) => s,
+            Self::Tls(s) => &s.sock,
         }
     }
 }
@@ -33,23 +30,32 @@ impl Read for Stream {
         if out.is_empty() {
             return Ok(0);
         }
-        match &mut self.transport {
-            Transport::Tcp(s) => s.read(out),
-            Transport::Tls(s) => s.read(out),
+        match self {
+            Self::Tcp(s) => s.read(out),
+            Self::Tls(s) => s.read(out),
         }
+        .map_err(|error| {
+            // Unix reports an expired SO_RCVTIMEO as WouldBlock. Keep the
+            // blocking tunnel's read timeout consistent across platforms.
+            if error.kind() == io::ErrorKind::WouldBlock {
+                io::Error::new(io::ErrorKind::TimedOut, error)
+            } else {
+                error
+            }
+        })
     }
 }
 impl Write for Stream {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        match &mut self.transport {
-            Transport::Tcp(s) => s.write(bytes),
-            Transport::Tls(s) => s.write(bytes),
+        match self {
+            Self::Tcp(s) => s.write(bytes),
+            Self::Tls(s) => s.write(bytes),
         }
     }
     fn flush(&mut self) -> io::Result<()> {
-        match &mut self.transport {
-            Transport::Tcp(s) => s.flush(),
-            Transport::Tls(s) => s.flush(),
+        match self {
+            Self::Tcp(s) => s.flush(),
+            Self::Tls(s) => s.flush(),
         }
     }
 }
@@ -145,9 +151,7 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
         stream
     } else {
         crate::log!(Debug, "proxy:connect", "{host}:{port} direct");
-        Stream {
-            transport: Transport::Tcp(tcp_connect(host, port, timeout)?),
-        }
+        Stream::Tcp(tcp_connect(host, port, timeout)?)
     };
     stream.flush()?;
     Ok(stream)
@@ -156,12 +160,11 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
 fn proxy_stream(proxy: &Proxy, timeout: Duration) -> Result<Stream> {
     let tcp =
         tcp_connect(proxy.host(), proxy.port(), timeout).context("connecting configured proxy")?;
-    let transport = if proxy.protocol() == ProxyProtocol::Https {
-        tls_transport(tcp, proxy.host(), tls_config()?)?
+    if proxy.protocol() == ProxyProtocol::Https {
+        tls_transport(tcp, proxy.host(), tls_config()?)
     } else {
-        Transport::Tcp(tcp)
-    };
-    Ok(Stream { transport })
+        Ok(Stream::Tcp(tcp))
+    }
 }
 
 impl super::connect::Connection for Stream {
@@ -171,14 +174,14 @@ impl super::connect::Connection for Stream {
         Ok(())
     }
 }
-fn tls_transport(tcp: TcpStream, host: &str, config: Arc<ClientConfig>) -> Result<Transport> {
+fn tls_transport(tcp: TcpStream, host: &str, config: Arc<ClientConfig>) -> Result<Stream> {
     let host = socket_host(host);
     let name = ServerName::try_from(host.to_owned()).context("invalid HTTPS proxy hostname")?;
     let mut tls = StreamOwned::new(ClientConnection::new(config, name)?, tcp);
     while tls.conn.is_handshaking() {
         tls.conn.complete_io(&mut tls.sock)?;
     }
-    Ok(Transport::Tls(Box::new(tls)))
+    Ok(Stream::Tls(Box::new(tls)))
 }
 fn http_connect(
     stream: &mut Stream,

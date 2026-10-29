@@ -1,9 +1,6 @@
 //! Shared proxy policy for HTTP requests and the opaque restoreOS FDR tunnel.
 use anyhow::{Context, Result, ensure};
-use std::{
-    io::{self, Read, Write},
-    sync::Arc,
-};
+use std::sync::Arc;
 use ureq::unversioned::transport::{ConnectionDetails, Connector, DefaultConnector, Transport};
 use ureq::{Proxy, http::Uri};
 
@@ -258,7 +255,7 @@ impl Transport for TunnelTransport {
     }
 }
 
-pub(crate) fn connect(host: &str, port: u16) -> Result<Tunnel> {
+pub(crate) fn connect(host: &str, port: u16) -> Result<socket::Stream> {
     let uri = target_uri(host, port)?;
     connect_via(&uri, for_url(&uri)?)
 }
@@ -285,7 +282,7 @@ fn target_uri(host: &str, port: u16) -> Result<Uri> {
     Ok(uri)
 }
 
-fn connect_via(uri: &Uri, proxy: Option<Proxy>) -> Result<Tunnel> {
+fn connect_via(uri: &Uri, proxy: Option<Proxy>) -> Result<socket::Stream> {
     let host = uri.host().context("tunnel destination has no host")?;
     let port = uri
         .port_u16()
@@ -295,33 +292,7 @@ fn connect_via(uri: &Uri, proxy: Option<Proxy>) -> Result<Tunnel> {
             443
         });
     // The destination's TLS remains opaque to the proxy tunnel.
-    Ok(Tunnel(socket::connect_blocking(host, port, proxy)?))
-}
-
-pub(crate) struct Tunnel(socket::Stream);
-
-impl Read for Tunnel {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buffer).map_err(|error| {
-            // Unix reports an expired SO_RCVTIMEO as WouldBlock. Keep the FDR
-            // idle-read contract the same across host operating systems.
-            if error.kind() == io::ErrorKind::WouldBlock {
-                io::Error::new(io::ErrorKind::TimedOut, error)
-            } else {
-                error
-            }
-        })
-    }
-}
-
-impl Write for Tunnel {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0.write(buffer)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
-    }
+    socket::connect_blocking(host, port, proxy)
 }
 
 /// Windows proxy lists distinguish the destination scheme (https=) from the

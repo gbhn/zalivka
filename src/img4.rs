@@ -264,16 +264,12 @@ pub fn personalize_with_metadata(
     tss: &plist::Value,
     identity: &plist::Value,
 ) -> Result<Vec<u8>> {
-    let manifest = crate::wire::dictionary(identity)?
-        .get("Manifest")
-        .map(crate::wire::dictionary)
-        .transpose()?;
-    let tag = component_tag(
-        component,
-        manifest.and_then(|manifest| manifest.get(component)),
-    )?
-    .or_else(|| payload_type(payload))
-    .with_context(|| format!("cannot resolve IMG4 payload type for {component}: no manifest override or valid IM4P header"))?;
+    let entry = crate::wire::optional(identity, &["Manifest", component])?;
+    let tag = component_tag(component, entry)?
+        .or_else(|| payload_type(payload))
+        .with_context(|| {
+            format!("cannot resolve IMG4 payload type for {component}: no manifest override or valid IM4P header")
+        })?;
     let info = restore_info(tss, component, identity, Some(tag))?;
     personalized_image(
         Some(tag),
@@ -288,13 +284,10 @@ pub(crate) fn component_tag(
     component: &str,
     entry: Option<&plist::Value>,
 ) -> Result<Option<[u8; 4]>> {
-    let info = entry
-        .map(crate::wire::dictionary)
-        .transpose()?
-        .and_then(|entry| entry.get("Info"))
-        .map(crate::wire::dictionary)
-        .transpose()?;
-    let Some(tag) = info.and_then(|info| info.get("Img4PayloadType")) else {
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let Some(tag) = crate::wire::optional(entry, &["Info", "Img4PayloadType"])? else {
         return Ok(None);
     };
     let tag = tag

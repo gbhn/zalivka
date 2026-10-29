@@ -1,6 +1,6 @@
 //! Apply background events and finish jobs only after their logs are drained.
 use super::theme::Tone;
-use super::worker::{Job, Output};
+use super::worker::Output;
 use super::{App, Event, Notice, Picker, SCAN_INTERVAL, UI_REFRESH_INTERVAL, worker};
 use eframe::egui;
 use std::time::Instant;
@@ -136,9 +136,8 @@ impl App {
         if !self.collect_job_logs() {
             return;
         }
-        let success = match self.job.as_ref().and_then(Job::finished) {
-            Some(success) => success,
-            _ => return,
+        let Some(success) = self.job.as_ref().and_then(|job| job.success) else {
+            return;
         };
         let job = self.job.take().unwrap();
         let notice = job.completion_notice(success, self.windows_reboot_required);

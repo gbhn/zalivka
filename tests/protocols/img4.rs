@@ -184,24 +184,10 @@ fn nonce_slots_use_positive_der_integers_and_apple_private_tags() {
             ("SepStage1", b"\xff\x87\x9b\xb9\xd2\x64", b"snid"),
             ("LLB", b"\xff\x86\x8b\xb9\xd2\x64", b"anid"),
         ] {
-            let mut identity = base_identity.clone();
-            identity.as_dictionary_mut().unwrap().insert(
-                "Manifest".into(),
-                wire::dict([(
-                    component,
-                    wire::dict([(
-                        "Info",
-                        wire::dict([(
-                            "Img4PayloadType",
-                            if component == "LLB" { "illb" } else { "sepi" }.into(),
-                        )]),
-                    )]),
-                )]),
-            );
             let info = img4::restore_info(
                 &wire::dict([] as [(&str, Value); 0]),
                 component,
-                &identity,
+                &base_identity,
                 Some(if component == "LLB" {
                     *b"illb"
                 } else {
