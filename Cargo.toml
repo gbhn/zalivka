@@ -1,6 +1,6 @@
 [package]
 name = "zalivka"
-version = "0.1.8"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
 description = "Experimental native Rust DFU restore client for Apple Silicon and T2 Macs"
