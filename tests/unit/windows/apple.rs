@@ -2,6 +2,30 @@ use super::*;
 use std::ffi::c_void;
 use windows_sys::Win32::Foundation::HANDLE;
 
+#[test]
+fn kis_driver_info_decodes_its_own_layout_and_checks_the_device() {
+    let mut bytes = vec![0; 1028];
+    bytes[..4].copy_from_slice(&[0xac, 5, 0x27, 0x12]);
+    for (offset, text) in [
+        (8, "NONC:01020304 SNON:05060708"),
+        (263, "ECID:2A CPID:8142 BDID:22 CPFM:03"),
+    ] {
+        bytes[offset..offset + text.len()].copy_from_slice(text.as_bytes());
+    }
+    let info = kis_info(&bytes).unwrap();
+    assert_eq!(info.ecid, 42);
+    assert_eq!(info.chip_id, 0x8142);
+    assert_eq!(info.ap_nonce, [1, 2, 3, 4]);
+    for length in 0..bytes.len() {
+        assert!(kis_info(&bytes[..length]).is_err());
+    }
+    for offset in [0, 2, 8, 263] {
+        let mut malformed = bytes.clone();
+        malformed[offset] = 0xff;
+        assert!(kis_info(&malformed).is_err());
+    }
+}
+
 unsafe extern "system" fn read_pipe(
     handle: HANDLE,
     _code: u32,

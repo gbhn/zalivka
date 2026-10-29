@@ -114,7 +114,7 @@ pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
         }
         let mode = Mode::from_pid(info.product_id());
         // Preparing a Mac must not probe an unrelated iPhone in normal mode.
-        if restore_only && mode.is_none() && info.product_id() != 0x12ac {
+        if restore_only && mode.is_none() && ![0x12ac, 0x1881].contains(&info.product_id()) {
             continue;
         }
         let mux: Vec<u8> = info
@@ -122,7 +122,7 @@ pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
             .filter(|i| (i.class(), i.subclass(), i.protocol()) == crate::usb::MUX_INTERFACE)
             .map(|i| i.interface_number())
             .collect();
-        if mode.is_none() && mux.is_empty() {
+        if mode.is_none() && mux.is_empty() && info.product_id() != 0x1881 {
             continue;
         }
         let mut interfaces = if mux.is_empty() { vec![0] } else { mux };
@@ -130,6 +130,12 @@ pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
         #[cfg(windows)]
         let mut reset_error = None;
         let probe = (|| -> Result<String> {
+            if info.product_id() == 0x1881 {
+                let device = info.open().wait()?;
+                let mut kis = crate::usb::Kis::open(&device, &info)?;
+                kis.info()?;
+                return Ok("kis".into());
+            }
             let device = info
                 .open()
                 .wait()
@@ -137,7 +143,7 @@ pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
             // Use the same descriptors as the actual transport, including a
             // recovery interface whose number is not zero.
             let number = match mode {
-                Some(Mode::Dfu) => 0,
+                Some(Mode::Dfu | Mode::PortDfu) => 0,
                 Some(Mode::Recovery) => {
                     crate::usb::recovery_interface(device.active_configuration()?)?.0
                 }
@@ -145,7 +151,7 @@ pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
             };
             interfaces = vec![number];
             let interface = crate::usb::UsbInterface::claim(&device, &info, number)?;
-            if mode == Some(Mode::Dfu) {
+            if matches!(mode, Some(Mode::Dfu | Mode::PortDfu)) {
                 let state = interface
                     .control_in(
                         nusb::transfer::ControlIn {

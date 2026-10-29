@@ -58,7 +58,7 @@ enum Command {
         #[arg(long)]
         checksum: Option<String>,
     },
-    /// Validate restore components without writing to USB or contacting Apple.
+    /// Validate restore components without uploading firmware or contacting Apple.
     Plan {
         ipsw: PathBuf,
         /// Hexadecimal ECID of a connected DFU device.
@@ -71,7 +71,7 @@ enum Command {
         #[arg(long)]
         revive: bool,
     },
-    /// Write an Apple TSS request plist for the connected DFU device; no USB writes.
+    /// Write an Apple TSS request plist for the connected DFU device; no firmware upload.
     TssRequest {
         ipsw: PathBuf,
         #[arg(long, value_parser = parse_ecid)]

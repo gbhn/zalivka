@@ -1,0 +1,1296 @@
+{
+  "description": "Public metadata projection. Component manifests and unrelated fields are omitted. USB serials and nonces used by tests are synthetic; no device measurements or signed tickets are included.",
+  "captured_at": "2026-10-30",
+  "catalog_url": "https://mesu.apple.com/assets/macos/com_apple_macOSIPSW/com_apple_macOSIPSW.xml",
+  "catalog_sha256": "4b9fa1c38979e9dd585d24ee7047524b4f9044bf188a8d7f316e1dda77713087",
+  "ipsw_url": "https://updates.cdn-apple.com/2026FallFCS/c9671975-52db-4fb5-9af2-00217169ba8d/UniversalMac_27.2_26B123_Restore.ipsw",
+  "manifest_sha256": "0fbfae04175cde81ef36d273aa280d39ffe5a54eacba8494b45a59daca462510",
+  "product_version": "27.2",
+  "product_build_version": "26B123",
+  "models": [
+    {
+      "product_type": "Mac16,1",
+      "catalog_key": "570458418",
+      "catalog_product_type": "Mac16,1",
+      "identities": [
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x22",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,1",
+          "Info": {
+            "DeviceClass": "j604ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 578892288,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x22",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,1",
+          "Info": {
+            "DeviceClass": "j604ap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 578892288,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x22",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,1",
+          "Info": {
+            "DeviceClass": "j604ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 578892288,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac16,2",
+      "catalog_key": "604012850",
+      "catalog_product_type": "Mac16,2",
+      "identities": [
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x24",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,2",
+          "Info": {
+            "DeviceClass": "j623ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 612446720,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x24",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,2",
+          "Info": {
+            "DeviceClass": "j623ap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 612446720,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x24",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,2",
+          "Info": {
+            "DeviceClass": "j623ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 612446720,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac16,3",
+      "catalog_key": "637567282",
+      "catalog_product_type": "Mac16,3",
+      "identities": [
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x26",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,3",
+          "Info": {
+            "DeviceClass": "j624ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 646001152,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x26",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,3",
+          "Info": {
+            "DeviceClass": "j624ap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 646001152,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x26",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,3",
+          "Info": {
+            "DeviceClass": "j624ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 646001152,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac16,5",
+      "catalog_key": "100687937",
+      "catalog_product_type": "Mac16,5",
+      "identities": [
+        {
+          "ApChipID": "0x6041",
+          "ApBoardID": "0x06",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,5",
+          "Info": {
+            "DeviceClass": "j616cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 106971392,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6041",
+          "ApBoardID": "0x06",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,5",
+          "Info": {
+            "DeviceClass": "j616cap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 106971392,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6041",
+          "ApBoardID": "0x06",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,5",
+          "Info": {
+            "DeviceClass": "j616cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 106971392,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac16,6",
+      "catalog_key": "67133505",
+      "catalog_product_type": "Mac16,6",
+      "identities": [
+        {
+          "ApChipID": "0x6041",
+          "ApBoardID": "0x04",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,6",
+          "Info": {
+            "DeviceClass": "j614cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 73416960,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6041",
+          "ApBoardID": "0x04",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,6",
+          "Info": {
+            "DeviceClass": "j614cap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 73416960,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6041",
+          "ApBoardID": "0x04",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,6",
+          "Info": {
+            "DeviceClass": "j614cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 73416960,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac16,7",
+      "catalog_key": "100687936",
+      "catalog_product_type": "Mac16,7",
+      "identities": [
+        {
+          "ApChipID": "0x6040",
+          "ApBoardID": "0x06",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,7",
+          "Info": {
+            "DeviceClass": "j616sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 106971136,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6040",
+          "ApBoardID": "0x06",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,7",
+          "Info": {
+            "DeviceClass": "j616sap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 106971136,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6040",
+          "ApBoardID": "0x06",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,7",
+          "Info": {
+            "DeviceClass": "j616sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 106971136,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac16,8",
+      "catalog_key": "67133504",
+      "catalog_product_type": "Mac16,8",
+      "identities": [
+        {
+          "ApChipID": "0x6040",
+          "ApBoardID": "0x04",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,8",
+          "Info": {
+            "DeviceClass": "j614sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 73416704,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6040",
+          "ApBoardID": "0x04",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,8",
+          "Info": {
+            "DeviceClass": "j614sap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 73416704,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6040",
+          "ApBoardID": "0x04",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,8",
+          "Info": {
+            "DeviceClass": "j614sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 73416704,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac16,9",
+      "catalog_key": "33579073",
+      "catalog_product_type": "Mac16,9",
+      "identities": [
+        {
+          "ApChipID": "0x6041",
+          "ApBoardID": "0x02",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,9",
+          "Info": {
+            "DeviceClass": "j575cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 39862528,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6041",
+          "ApBoardID": "0x02",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,9",
+          "Info": {
+            "DeviceClass": "j575cap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 39862528,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6041",
+          "ApBoardID": "0x02",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,9",
+          "Info": {
+            "DeviceClass": "j575cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 39862528,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac16,10",
+      "catalog_key": "704676146",
+      "catalog_product_type": "Mac16,11",
+      "identities": [
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x2A",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,10",
+          "Info": {
+            "DeviceClass": "j773gap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 713110016,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x2A",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,10",
+          "Info": {
+            "DeviceClass": "j773gap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 713110016,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x2A",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,10",
+          "Info": {
+            "DeviceClass": "j773gap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 713110016,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac16,11",
+      "catalog_key": "33579072",
+      "catalog_product_type": "Mac16,10",
+      "identities": [
+        {
+          "ApChipID": "0x6040",
+          "ApBoardID": "0x02",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,11",
+          "Info": {
+            "DeviceClass": "j773sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 39862272,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6040",
+          "ApBoardID": "0x02",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,11",
+          "Info": {
+            "DeviceClass": "j773sap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 39862272,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6040",
+          "ApBoardID": "0x02",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,11",
+          "Info": {
+            "DeviceClass": "j773sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 39862272,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac16,12",
+      "catalog_key": "738230578",
+      "catalog_product_type": "Mac16,12",
+      "identities": [
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x2C",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,12",
+          "Info": {
+            "DeviceClass": "j713ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 746664448,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x2C",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,12",
+          "Info": {
+            "DeviceClass": "j713ap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 746664448,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x2C",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,12",
+          "Info": {
+            "DeviceClass": "j713ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 746664448,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac16,13",
+      "catalog_key": "771785010",
+      "catalog_product_type": "Mac16,13",
+      "identities": [
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x2E",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,13",
+          "Info": {
+            "DeviceClass": "j715ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 780218880,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x2E",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,13",
+          "Info": {
+            "DeviceClass": "j715ap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 780218880,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8132",
+          "ApBoardID": "0x2E",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac16,13",
+          "Info": {
+            "DeviceClass": "j715ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 780218880,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac17,2",
+      "catalog_key": "570458434",
+      "catalog_product_type": "Mac17,2",
+      "identities": [
+        {
+          "ApChipID": "0x8142",
+          "ApBoardID": "0x22",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,2",
+          "Info": {
+            "DeviceClass": "j704ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 578896384,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8142",
+          "ApBoardID": "0x22",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,2",
+          "Info": {
+            "DeviceClass": "j704ap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 578896384,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8142",
+          "ApBoardID": "0x22",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,2",
+          "Info": {
+            "DeviceClass": "j704ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 578896384,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac17,3",
+      "catalog_key": "604012866",
+      "catalog_product_type": "Mac17,3",
+      "identities": [
+        {
+          "ApChipID": "0x8142",
+          "ApBoardID": "0x24",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,3",
+          "Info": {
+            "DeviceClass": "j813ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 612450816,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8142",
+          "ApBoardID": "0x24",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,3",
+          "Info": {
+            "DeviceClass": "j813ap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 612450816,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8142",
+          "ApBoardID": "0x24",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,3",
+          "Info": {
+            "DeviceClass": "j813ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 612450816,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac17,4",
+      "catalog_key": "637567298",
+      "catalog_product_type": "Mac17,4",
+      "identities": [
+        {
+          "ApChipID": "0x8142",
+          "ApBoardID": "0x26",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,4",
+          "Info": {
+            "DeviceClass": "j815ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 646005248,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8142",
+          "ApBoardID": "0x26",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,4",
+          "Info": {
+            "DeviceClass": "j815ap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 646005248,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x8142",
+          "ApBoardID": "0x26",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,4",
+          "Info": {
+            "DeviceClass": "j815ap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 646005248,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac17,6",
+      "catalog_key": "234905680",
+      "catalog_product_type": "Mac17,6",
+      "identities": [
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x0E",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,6",
+          "Info": {
+            "DeviceClass": "j716cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 241192960,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x0E",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,6",
+          "Info": {
+            "DeviceClass": "j716cap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 241192960,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x0E",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,6",
+          "Info": {
+            "DeviceClass": "j716cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 241192960,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac17,7",
+      "catalog_key": "167796816",
+      "catalog_product_type": "Mac17,7",
+      "identities": [
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x0A",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,7",
+          "Info": {
+            "DeviceClass": "j714cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 174084096,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x0A",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,7",
+          "Info": {
+            "DeviceClass": "j714cap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 174084096,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x0A",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,7",
+          "Info": {
+            "DeviceClass": "j714cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 174084096,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac17,8",
+      "catalog_key": "201351248",
+      "catalog_product_type": "Mac17,8",
+      "identities": [
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x0C",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,8",
+          "Info": {
+            "DeviceClass": "j716sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 207638528,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x0C",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,8",
+          "Info": {
+            "DeviceClass": "j716sap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 207638528,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x0C",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,8",
+          "Info": {
+            "DeviceClass": "j716sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 207638528,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac17,9",
+      "catalog_key": "134242384",
+      "catalog_product_type": "Mac17,9",
+      "identities": [
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x08",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,9",
+          "Info": {
+            "DeviceClass": "j714sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 140529664,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x08",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,9",
+          "Info": {
+            "DeviceClass": "j714sap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 140529664,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x08",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,9",
+          "Info": {
+            "DeviceClass": "j714sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 140529664,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac17,14",
+      "catalog_key": "268460112",
+      "catalog_product_type": "Mac17,14",
+      "identities": [
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x10",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,14",
+          "Info": {
+            "DeviceClass": "j775cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 274747392,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x10",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,14",
+          "Info": {
+            "DeviceClass": "j775cap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 274747392,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x10",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,14",
+          "Info": {
+            "DeviceClass": "j775cap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 274747392,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac17,15",
+      "catalog_key": "302014544",
+      "catalog_product_type": "Mac17,15",
+      "identities": [
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x12",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,15",
+          "Info": {
+            "DeviceClass": "j775dap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 308301824,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x12",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,15",
+          "Info": {
+            "DeviceClass": "j775dap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 308301824,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x12",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,15",
+          "Info": {
+            "DeviceClass": "j775dap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 308301824,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    },
+    {
+      "product_type": "Mac17,16",
+      "catalog_key": "33579088",
+      "catalog_product_type": "Mac17,16",
+      "identities": [
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x02",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,16",
+          "Info": {
+            "DeviceClass": "j873sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "Customer Erase Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 39866368,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x02",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,16",
+          "Info": {
+            "DeviceClass": "j873sap",
+            "RestoreBehavior": "Update",
+            "Variant": "Customer Upgrade Install (IPSW)",
+            "MacOSVariant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 39866368,
+          "USBPortController1,SecurityDomain": 1
+        },
+        {
+          "ApChipID": "0x6050",
+          "ApBoardID": "0x02",
+          "ApSecurityDomain": "0x01",
+          "Ap,ProductType": "Mac17,16",
+          "Info": {
+            "DeviceClass": "j873sap",
+            "RestoreBehavior": "Erase",
+            "Variant": "macOS Customer",
+            "RequiresUIDMode": true,
+            "RequiresNonceSlot": true
+          },
+          "Manifest": {},
+          "USBPortController1,ChipID": 34,
+          "USBPortController1,BoardID": 39866368,
+          "USBPortController1,SecurityDomain": 1
+        }
+      ]
+    }
+  ]
+}

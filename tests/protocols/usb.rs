@@ -51,6 +51,21 @@ fn driver_configuration_is_targeted_and_never_overwrites_existing_sources() {
 }
 
 #[test]
+fn m3_pro_soc_identifiers_parse_without_a_model_whitelist() {
+    // Synthetic serials using the 14/16-inch M3 Pro hardware identifiers.
+    for board_id in [4, 6] {
+        let device = DeviceInfo::parse(
+            &format!("CPID:6030 BDID:{board_id:02X} ECID:123456789ABCD CPFM:03 SDOM:01"),
+            Mode::Dfu,
+        )
+        .unwrap();
+        assert_eq!(device.chip_id, 0x6030);
+        assert_eq!(device.board_id, board_id);
+        assert_eq!(device.mode, Mode::Dfu);
+    }
+}
+
+#[test]
 fn parse_dfu_serial_and_nonces() {
     let d = device_info();
     assert_eq!(d.chip_id, 0x8103);
@@ -235,6 +250,63 @@ fn dfu_upload_checks_states_and_finishes() {
     assert_eq!(usb.controls[1], (0x21, 1, 1, vec![]));
     assert_eq!(usb.resets, 1);
     assert!(usb.reads.is_empty());
+}
+
+#[test]
+fn port_dfu_uses_small_packets_without_a_soc_suffix() {
+    for size in [1usize, 63, 64, 65, 128] {
+        let blocks = size.div_ceil(64);
+        let mut reads = VecDeque::from([vec![2]]);
+        reads.extend((0..blocks).map(|_| vec![0, 0, 0, 0, 5, 0]));
+        reads.extend([vec![0, 0, 0, 0, 6, 0], vec![0, 0, 0, 0, 7, 0]]);
+        let mut usb = MockUsb {
+            reads,
+            ..Default::default()
+        };
+        let data = vec![0xaa; size];
+        dfu::upload(&mut usb, Mode::PortDfu, &data, true).unwrap();
+        assert_eq!(usb.controls.len(), blocks + 1);
+        let mut received = Vec::new();
+        for (i, (kind, request, block, bytes)) in usb.controls[..blocks].iter().enumerate() {
+            assert_eq!((*kind, *request, *block), (0x21, 1, i as u16));
+            assert!(bytes.len() <= 64);
+            received.extend_from_slice(bytes);
+        }
+        assert_eq!(received, data);
+        assert_eq!(usb.controls[blocks], (0x21, 1, blocks as u16, vec![]));
+        assert_eq!(usb.resets, 1);
+        assert!(usb.reads.is_empty());
+    }
+}
+
+#[test]
+fn kis_upload_dispatch_bypasses_dfu_control_requests() {
+    struct KisUpload {
+        sent: bool,
+    }
+    impl RecoveryTransport for KisUpload {
+        fn upload_dfu(&mut self, data: &[u8], finish: bool) -> Result<bool> {
+            assert_eq!(data, b"signed ibss");
+            assert!(finish);
+            self.sent = true;
+            Ok(true)
+        }
+        fn control_in(&mut self, _: u8, _: u8, _: u16, _: u16, _: u16) -> Result<Vec<u8>> {
+            panic!("KIS must not use DFU control IN")
+        }
+        fn control_out(&mut self, _: u8, _: u8, _: u16, _: u16, _: &[u8]) -> Result<()> {
+            panic!("KIS must not use DFU control OUT")
+        }
+        fn bulk_out(&mut self, _: &[u8]) -> Result<()> {
+            panic!("KIS must use its upload portal")
+        }
+        fn reset(&mut self) -> Result<()> {
+            panic!("KIS boot uses the portal")
+        }
+    }
+    let mut transport = KisUpload { sent: false };
+    dfu::upload(&mut transport, Mode::Dfu, b"signed ibss", true).unwrap();
+    assert!(transport.sent);
 }
 
 #[test]

@@ -214,17 +214,19 @@ pub(crate) fn nonce_slot(
 ) -> Result<Option<([u8; 4], u64)>> {
     use crate::wire;
     if wire::optional_boolean(identity, &["Info", "RequiresNonceSlot"])?.unwrap_or(false)
-        && matches!(payload_type, Some(tag) if tag == *b"illb" || tag == *b"sepi")
+        && matches!(payload_type, Some(tag) if tag == *b"illb" || tag == *b"sepi" || tag == *b"stg1")
     {
-        let (tag, key) = if payload_type == Some(*b"illb") {
-            (b"anid", "ApNonceSlotID")
+        let (tag, key, default) = if payload_type == Some(*b"illb") {
+            (b"anid", "ApNonceSlotID", 0)
         } else {
-            (b"snid", "SepNonceSlotID")
+            (b"snid", "SepNonceSlotID", 2)
         };
-        let slot = wire::number(
-            wire::get(identity, &["Info", key])
-                .with_context(|| format!("strict restore requires explicit {key}"))?,
-        )?;
+        // DFU's AP/SEP slots are 0/2; normal-mode slots 1/3 are not used by
+        // this boot chain. An explicit slot still takes precedence.
+        let slot = wire::optional(identity, &["Info", key])?
+            .map(wire::number)
+            .transpose()?
+            .unwrap_or(default);
         return Ok(Some((*tag, slot)));
     }
     Ok(None)

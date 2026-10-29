@@ -152,6 +152,7 @@ pub(crate) fn status() -> Result<HostStatus> {
     let compatible_usb_driver = nusb::list_devices().wait()?.any(|d| {
         d.vendor_id() == APPLE_VENDOR
             && (Mode::from_pid(d.product_id()).is_some()
+                || d.product_id() == 0x1881
                 || d.interfaces()
                     .any(|i| (i.class(), i.subclass(), i.protocol()) == crate::usb::MUX_INTERFACE))
             && d.driver()

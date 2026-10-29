@@ -36,6 +36,8 @@ mod firmware_tests;
 mod img4_tests;
 #[path = "protocols/ipsw.rs"]
 mod ipsw_tests;
+#[path = "protocols/m_series.rs"]
+mod m_series_tests;
 #[path = "protocols/mux.rs"]
 mod mux_tests;
 #[path = "protocols/network.rs"]

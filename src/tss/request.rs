@@ -51,13 +51,8 @@ fn device_fields(device: &DeviceInfo) -> Result<Dictionary> {
 }
 
 fn base(device: &DeviceInfo, id: &Identity) -> Result<Dictionary> {
-    let mut d = device_fields(device)?;
-    for name in ["ApChipID", "ApBoardID", "ApSecurityDomain"] {
-        ensure!(
-            wire::number(wire::get(&id.value, &[name])?)? == wire::number(&d[name])?,
-            "signing identity {name} disagrees with connected device"
-        );
-    }
+    let device = id.device_parameters(device)?;
+    let mut d = device_fields(&device)?;
     wire::copy_keys(
         &mut d,
         wire::dictionary(&id.value)?,
@@ -78,17 +73,17 @@ fn base(device: &DeviceInfo, id: &Identity) -> Result<Dictionary> {
         ],
     );
     if wire::optional_boolean(&id.value, &["Info", "RequiresUIDMode"])?.unwrap_or(false) {
-        let uid = wire::get(&id.value, &["UID_MODE"])
-            .context("strict restore requires explicit UID_MODE")?;
-        ensure!(uid.as_boolean().is_some(), "invalid UID_MODE");
-        d.insert("UID_MODE".into(), uid.clone());
+        // Use upstream's retail DFU compatibility defaults: UID mode off,
+        // Sika fuse zero. These are not measurements from the BuildManifest.
+        let uid = wire::optional_boolean(&id.value, &["UID_MODE"])?.unwrap_or(false);
+        d.insert("UID_MODE".into(), uid.into());
         d.insert(
             "Ap,SikaFuse".into(),
-            wire::number(
-                wire::get(&id.value, &["Ap,SikaFuse"])
-                    .context("strict restore requires explicit Ap,SikaFuse")?,
-            )?
-            .into(),
+            wire::optional(&id.value, &["Ap,SikaFuse"])?
+                .map(wire::number)
+                .transpose()?
+                .unwrap_or(0)
+                .into(),
         );
     }
     if !device.sep_nonce.is_empty() {

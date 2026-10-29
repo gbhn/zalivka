@@ -1,8 +1,6 @@
 //! Native operations shared by the terminal and desktop interface.
 use crate::{
-    catalog,
-    device::Mode,
-    drivers,
+    catalog, drivers,
     ipsw::{Behavior, Ipsw, Verification},
     net, progress, restore, usb,
 };
@@ -45,7 +43,7 @@ impl Restore {
             Ipsw::open(&path)?
         } else {
             let device = usb::RecoveryUsb::open(self.ecid)?.info;
-            ensure!(device.mode == Mode::Dfu, "enter DFU before restoring");
+            ensure!(device.mode.can_restore(), "enter DFU before restoring");
             let directory = self
                 .firmware_dir
                 .map_or_else(catalog::cache_directory, Ok)?;

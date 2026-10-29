@@ -34,7 +34,9 @@ impl App {
                             trf("Mac (CPID {:04x})", &[&format!("{:04x}", device.chip_id)])
                         })
                         .unwrap_or_else(|| {
-                            if self.devices.is_empty() {
+                            if self.scan_error.is_some() {
+                                "Could not check USB"
+                            } else if self.devices.is_empty() {
                                 "No Mac connected"
                             } else {
                                 "Select a Mac"
@@ -49,7 +51,7 @@ impl App {
                                 .size(12.0)
                                 .color(ui.visuals().weak_text_color()),
                         );
-                    } else {
+                    } else if self.scan_error.is_none() {
                         ui.label(
                             RichText::new(tr("Connect your Mac with a USB-C cable"))
                                 .color(ui.visuals().weak_text_color()),
@@ -60,12 +62,12 @@ impl App {
             if let Some(d) = self.target() {
                 pill(
                     ui,
-                    if d.mode == Mode::Dfu {
-                        "DFU"
-                    } else {
-                        "Recovery"
+                    match d.mode {
+                        Mode::Dfu => "DFU",
+                        Mode::PortDfu => "Port DFU",
+                        Mode::Recovery => "Recovery",
                     },
-                    if d.mode == Mode::Dfu {
+                    if d.mode.can_restore() {
                         Tone::Success.color(ui.visuals())
                     } else {
                         ui.visuals().weak_text_color()
@@ -89,11 +91,13 @@ impl App {
                     }
                 });
         }
-        if self.scan_error.is_some() {
+        if let Some(error) = self.scan_error.clone() {
+            ui.label(
+                RichText::new(error)
+                    .small()
+                    .color(ui.visuals().error_fg_color),
+            );
             ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(tr("Could not check USB")).color(ui.visuals().error_fg_color),
-                );
                 if ui.link(tr("Diagnostics")).clicked() {
                     self.start(Action::Doctor, ctx);
                 }

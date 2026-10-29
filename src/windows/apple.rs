@@ -40,6 +40,8 @@ use windows_sys::{
 
 const DFU: GUID = GUID::from_u128(0xb8085869_feb9_404b_8cb1_1e5c14fa8c54);
 const IBOOT: GUID = GUID::from_u128(0xed82a167_d61a_4af6_9ab6_11e52236c576);
+const PORT_DFU: GUID = GUID::from_u128(0xaf633ff1_1170_4ca6_ae9e_08d001421eaa);
+const KIS: GUID = GUID::from_u128(0xb36f4137_f4ef_4bfc_a25a_c2410768ee37);
 const MUX: GUID = GUID::from_u128(0xf0b32be3_6678_4879_9230_e43845d805ee);
 const RESET: u32 = 0x22000c;
 const CONTROL: u32 = 0x2200a0;
@@ -408,9 +410,19 @@ impl AppleUsb {
     pub(crate) fn open(info: &nusb::DeviceInfo, number: u8) -> Result<Option<Self>> {
         let guid = match crate::device::Mode::from_pid(info.product_id()) {
             Some(crate::device::Mode::Dfu) => &DFU,
+            Some(crate::device::Mode::PortDfu) => &PORT_DFU,
             Some(crate::device::Mode::Recovery) => &IBOOT,
             None => &MUX,
         };
+        Self::open_interface(info, number, guid)
+    }
+
+    pub(crate) fn open_kis(info: &nusb::DeviceInfo) -> Result<Option<Self>> {
+        ensure!(info.product_id() == 0x1881, "expected Apple Debug USB");
+        Self::open_interface(info, 0, &KIS)
+    }
+
+    fn open_interface(info: &nusb::DeviceInfo, number: u8, guid: &GUID) -> Result<Option<Self>> {
         let wanted = info.instance_id().to_string_lossy();
         for path in super::interface_paths(guid, None, 1024 * 1024)? {
             let instance = path_instance(&path)?;
@@ -438,6 +450,12 @@ impl AppleUsb {
             let device = Self {
                 handle: Arc::new(unsafe { OwnedHandle::from_raw_handle(handle) }),
             };
+            if info.product_id() == 0x1881 {
+                // KIS's driver exposes device info through its own IOCTL;
+                // AppleUsbFilter's CONTROL IOCTL is a different protocol.
+                device.kis_info()?;
+                return Ok(Some(device));
+            }
             // Verify the handle with a read-only USB request, not just a cached PnP name.
             let descriptor = device.control_in(
                 ControlIn {
@@ -472,6 +490,29 @@ impl AppleUsb {
         timeout: Duration,
     ) -> Result<Vec<u8>> {
         self.ioctl_using(code, input, output_len, timeout, DeviceIoControl)
+    }
+
+    pub(crate) fn kis_info(&self) -> Result<crate::device::DeviceInfo> {
+        let bytes = self.ioctl(0x220004, &[], 1028, TIMEOUT)?;
+        kis_info(&bytes)
+    }
+
+    pub(crate) fn kis_upload_chunk(&self, address: u64, data: &[u8]) -> Result<()> {
+        ensure!(
+            !data.is_empty() && data.len() <= 0x4000,
+            "invalid Apple KIS upload chunk"
+        );
+        let mut bytes = vec![0; 0x4010];
+        bytes[..data.len()].copy_from_slice(data);
+        bytes[0x4000..0x4004].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes[0x4008..].copy_from_slice(&address.to_le_bytes());
+        self.ioctl(0x220008, &bytes, 0, TIMEOUT)?;
+        Ok(())
+    }
+
+    pub(crate) fn kis_boot(&self, length: u32) -> Result<()> {
+        self.ioctl(0x22000c, &length.to_le_bytes(), 0, TIMEOUT)?;
+        Ok(())
     }
 
     fn ioctl_using(
@@ -575,6 +616,30 @@ fn control_packet(
     packet[6..8].copy_from_slice(&length.to_le_bytes());
     packet[8..8 + data.len()].copy_from_slice(data);
     packet
+}
+
+fn kis_info(bytes: &[u8]) -> Result<crate::device::DeviceInfo> {
+    use crate::device::{DeviceInfo, Mode};
+    ensure!(
+        bytes.len() == 1028 && bytes[..2] == [0xac, 5],
+        "invalid Apple KIS device info"
+    );
+    let pid = u16::from_le_bytes([bytes[2], bytes[3]]);
+    ensure!(
+        Mode::from_pid(pid) == Some(Mode::Dfu),
+        "Apple KIS firmware upload requires ROM DFU mode"
+    );
+    let string = |offset: usize| -> Result<&str> {
+        let bytes = &bytes[offset..offset + 255];
+        let end = bytes
+            .iter()
+            .position(|b| *b == 0)
+            .context("unterminated Apple KIS string")?;
+        std::str::from_utf8(&bytes[..end]).context("invalid Apple KIS string")
+    };
+    let mut info = DeviceInfo::parse(string(263)?, Mode::Dfu)?;
+    info.set_nonces(string(8)?)?;
+    Ok(info)
 }
 
 fn pipe_address(info: &[u8]) -> Result<Option<u8>> {

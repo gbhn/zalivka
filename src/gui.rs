@@ -23,7 +23,7 @@ use std::{
 };
 use zalivka::{
     catalog,
-    device::{DeviceInfo, Mode, parse_ecid},
+    device::{DeviceInfo, parse_ecid},
     drivers,
     logging::{Level, Record},
     progress, usb,
@@ -83,8 +83,8 @@ enum Picker {
 enum Event {
     Scan {
         devices: std::result::Result<Vec<DeviceInfo>, String>,
-        host: std::result::Result<Option<drivers::HostStatus>, String>,
     },
+    Host(std::result::Result<Option<drivers::HostStatus>, String>),
     Worker(u64, Output),
     Firmware(u64, std::result::Result<catalog::Release, String>),
     Picked(Picker, Option<PathBuf>),
@@ -127,6 +127,7 @@ struct App {
     firmware: Option<FirmwareSelection>,
     next_firmware_request: u64,
     scanning: bool,
+    checking_host: bool,
     scan_error: Option<String>,
     host: std::result::Result<Option<drivers::HostStatus>, String>,
     windows_reboot_required: bool,
@@ -156,6 +157,7 @@ impl App {
             firmware: None,
             next_firmware_request: 0,
             scanning: false,
+            checking_host: false,
             scan_error: None,
             host: Ok(None),
             windows_reboot_required: false,
@@ -200,7 +202,7 @@ impl App {
                     "Select a Mac"
                 });
             }
-            Some(d) if d.mode != Mode::Dfu => return Some("Put the Mac in DFU mode"),
+            Some(d) if !d.mode.can_restore() => return Some("Put the Mac in DFU mode"),
             _ => {}
         }
         if !self.setup.automatic && self.setup.local_file().is_err() {
@@ -264,11 +266,21 @@ impl App {
         self.scanning = true;
         self.last_scan = Instant::now();
         if let Err(e) = self.background(ctx, "detect", || Event::Scan {
-            host: drivers::host_status().map_err(|e| format!("{e:#}")),
             devices: usb::detect().map_err(|e| format!("{e:#}")),
         }) {
             self.scanning = false;
             self.scan_error = Some(e.to_string());
+        }
+        // DriverStore enumeration can be slow. Publish USB results independently
+        // and keep at most one readiness check in flight across repeated scans.
+        if cfg!(windows) && !self.checking_host {
+            self.checking_host = true;
+            if let Err(error) = self.background(ctx, "host", || {
+                Event::Host(drivers::host_status().map_err(|e| format!("{e:#}")))
+            }) {
+                self.checking_host = false;
+                self.host = Err(error.to_string());
+            }
         }
     }
     fn refresh_firmware(&mut self, ctx: &egui::Context, retry: bool) {

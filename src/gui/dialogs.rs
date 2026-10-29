@@ -3,12 +3,12 @@ use super::theme::{BLUE, RED};
 use super::widgets::{caption, card, path_picker};
 use super::{App, Confirmation, Picker, setup::Action, theme};
 use eframe::egui::{self, Color32, RichText};
-use zalivka::device::{DeviceInfo, Mode};
+use zalivka::device::DeviceInfo;
 use zalivka::localization::{format as trf, text as tr};
 
 impl Confirmation {
     pub(super) fn ready(&self, target: Option<&DeviceInfo>) -> bool {
-        self.accepted && target.is_some_and(|d| d.ecid == self.ecid && d.mode == Mode::Dfu)
+        self.accepted && target.is_some_and(|d| d.ecid == self.ecid && d.mode.can_restore())
     }
 }
 
@@ -61,7 +61,7 @@ impl App {
                                 "I agree to update firmware and recoveryOS"
                             }),
                         );
-                        if target.is_none_or(|d| d.ecid != pending.ecid || d.mode != Mode::Dfu) {
+                        if target.is_none_or(|d| d.ecid != pending.ecid || !d.mode.can_restore()) {
                             ui.label(
                                 RichText::new(tr("The selected Mac is unavailable in DFU mode"))
                                     .color(ui.visuals().error_fg_color),

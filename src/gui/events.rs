@@ -32,9 +32,12 @@ impl App {
                 ctx.request_repaint_after(UI_REFRESH_INTERVAL);
             }
             match event {
-                Event::Scan { devices, host } => {
-                    self.scanning = false;
+                Event::Host(host) => {
+                    self.checking_host = false;
                     self.host = host;
+                }
+                Event::Scan { devices } => {
+                    self.scanning = false;
                     match devices {
                         Ok(devices) => {
                             if self.setup.ecid.is_empty() && devices.len() == 1 {

@@ -88,6 +88,10 @@ pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>>
 pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde_json::Value> {
     let mut usb = RecoveryUsb::open(ecid)?;
     let original_mode = usb.info.mode;
+    ensure!(
+        original_mode != Mode::PortDfu,
+        "Port DFU requires controller recovery before an iBoot RAM probe; use restore or revive to prepare the controller"
+    );
     if original_mode == Mode::Dfu {
         ensure!(
             load_ibss,
@@ -96,6 +100,7 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         usb.check_reset_access()?;
         let mut ipsw = Ipsw::open(path)?;
         let mut identity = ipsw.select_behavior(&usb.info, None, Behavior::Update)?;
+        usb.info = identity.device_parameters(&usb.info)?;
         ensure!(
             identity.is_macos()?,
             "RAM boot-state probe supports Apple silicon Macs only"
@@ -238,6 +243,7 @@ impl SignedIdentity {
         }
         drop(usb);
         let mut usb = wait_recovery(device.ecid, Some(Mode::Recovery))?;
+        usb.info = self.identity.device_parameters(&usb.info)?;
         validate_reconnected_device(&device, &usb.info)
             .context("hardware identity changed after iBEC")?;
         self.send_iboot_firmware(ipsw, &mut usb, false, &stages[1])?;
@@ -288,9 +294,10 @@ fn boot_ibss(mut usb: RecoveryUsb, bytes: &[u8], mode: Option<Mode>) -> Result<R
     let expected = usb.info.clone();
     let upload = dfu::upload(&mut usb, Mode::Dfu, bytes, true).context("uploading iBSS");
     drop(usb);
-    let usb = reconnect_after_ibss(upload, mode, |mode| wait_recovery(expected.ecid, mode))?;
+    let mut usb = reconnect_after_ibss(upload, mode, |mode| wait_recovery(expected.ecid, mode))?;
     validate_reconnected_device(&expected, &usb.info)
         .context("hardware identity changed after iBSS")?;
+    usb.info.security_domain = usb.info.security_domain.or(expected.security_domain);
     Ok(usb)
 }
 
@@ -305,7 +312,10 @@ pub(super) fn validate_reconnected_device(
         "USB hardware identifiers do not match"
     );
     ensure!(
-        expected.security_domain == actual.security_domain
+        expected
+            .security_domain
+            .zip(actual.security_domain)
+            .is_none_or(|(expected, actual)| expected == actual)
             && expected.chip_fuse_mode == actual.chip_fuse_mode,
         "USB security domain or fuse mode changed"
     );

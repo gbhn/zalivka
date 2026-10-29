@@ -1,5 +1,6 @@
 use super::*;
 use std::{fs::File, path::Path};
+use zalivka::device::Mode;
 
 fn english_app() -> App {
     let mut app = App::new();
@@ -337,6 +338,7 @@ fn erase_confirmation_is_bound_to_target_and_explicit_consent() {
     };
     assert!(!p.ready(Some(&device(42, Mode::Dfu))));
     p.accepted = true;
+    assert!(p.ready(Some(&device(42, Mode::PortDfu))));
     assert!(p.ready(Some(&device(42, Mode::Dfu))));
     assert!(!p.ready(Some(&device(43, Mode::Dfu))));
     assert!(!p.ready(Some(&device(42, Mode::Recovery))));
@@ -568,24 +570,38 @@ fn scan_results_keep_host_and_usb_failures_independent() {
     let mut app = english_app();
     let ctx = egui::Context::default();
     app.scanning = true;
+    app.checking_host = true;
     app.tx
         .send(Event::Scan {
             devices: Ok(vec![device(42, Mode::Dfu)]),
-            host: Err("service access denied".into()),
         })
         .unwrap();
     app.poll(&ctx);
     assert!(!app.scanning);
     assert_eq!(app.target().unwrap().ecid, 42);
     assert!(app.scan_error.is_none());
+    assert!(
+        app.checking_host,
+        "USB discovery must not wait for DriverStore"
+    );
+    app.tx
+        .send(Event::Host(Err("service access denied".into())))
+        .unwrap();
+    app.poll(&ctx);
+    assert!(!app.checking_host);
+    assert_eq!(app.target().unwrap().ecid, 42);
     assert_eq!(app.host.as_ref().unwrap_err(), "service access denied");
     assert!(app.blocked_reason().is_some());
 
     app.scanning = true;
+    app.checking_host = true;
+    app.tx.send(Event::Host(Ok(None))).unwrap();
+    app.poll(&ctx);
+    assert!(app.scanning, "readiness must not finish the USB scan");
+    assert!(!app.checking_host);
     app.tx
         .send(Event::Scan {
             devices: Err("USB access denied".into()),
-            host: Ok(None),
         })
         .unwrap();
     app.poll(&ctx);
@@ -593,6 +609,35 @@ fn scan_results_keep_host_and_usb_failures_independent() {
     assert!(app.devices.is_empty());
     assert_eq!(app.scan_error.as_deref(), Some("USB access denied"));
     assert!(matches!(app.host, Ok(None)));
+}
+
+#[test]
+fn unsupported_dfu_modes_show_the_actual_reason_in_the_device_card() {
+    for (mode, pid) in [("Port DFU", "05ac:f014"), ("KIS", "05ac:1881")] {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        let mut app = english_app();
+        app.scanning = true;
+        app.tx
+            .send(Event::Scan {
+                devices: Err(format!("{mode} ({pid}) detected; transport not supported")),
+            })
+            .unwrap();
+        app.poll(&ctx);
+        let output = render_pass(&ctx, egui::RawInput::default(), |ctx| {
+            ctx.root_ui(|ui| {
+                app.prepare_device_card(ui, ctx).end(ui);
+            });
+        });
+        assert!(output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains(pid))
+        }));
+        assert!(!output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "No Mac connected")
+        }));
+        assert!(app.blocked_reason().is_some());
+        assert!(app.devices.is_empty());
+    }
 }
 
 #[test]
@@ -2320,7 +2365,6 @@ fn automatic_firmware_shows_selection_and_clears_it_after_disconnect() {
     app.tx
         .send(Event::Scan {
             devices: Ok(app.devices.clone()),
-            host: Ok(None),
         })
         .unwrap();
     app.poll(&ctx);
@@ -2330,7 +2374,6 @@ fn automatic_firmware_shows_selection_and_clears_it_after_disconnect() {
     app.tx
         .send(Event::Scan {
             devices: Ok(vec![]),
-            host: Ok(None),
         })
         .unwrap();
     app.poll(&ctx);

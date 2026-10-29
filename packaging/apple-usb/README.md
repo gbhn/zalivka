@@ -17,7 +17,9 @@ Official sources:
 
 Each CAB contains `AppleUsb.inf`, `appleusb.cat`, `AppleUsbFilter.dll`,
 `AppleKmdfFilter.sys`, and `AppleLowerFilter.sys`. The INF covers DFU PID `1227`,
-Recovery PID `1281`, and Restore PID `12AC`, including `RESTORE_MODE&MI_00`.
+Port DFU PID `F014`, Recovery PID `1281`, and Restore PID `12AC`, including
+`RESTORE_MODE&MI_00`. It does not include Debug USB / KIS PID `1881`; KIS needs
+an appropriate installed Apple KIS driver or a compatible WinUSB binding.
 
 Both CAB files are embedded in the Windows executable with `include_bytes!`.
 Installation selects the host Windows architecture, including when an x64

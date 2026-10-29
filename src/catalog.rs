@@ -31,17 +31,18 @@ pub struct Release {
 }
 
 fn model_key(device: &DeviceInfo) -> Result<String> {
+    let (chip, board) = device.hardware_ids();
     ensure!(
-        device.chip_id <= 0xffff && device.board_id <= 0xff,
+        chip <= 0xffff && board <= 0xff,
         "hardware identifiers exceed the Apple catalog lookup format"
     );
-    Ok(((u64::from(device.board_id) << 24) | u64::from(device.chip_id)).to_string())
+    Ok(((u64::from(board) << 24) | u64::from(chip)).to_string())
 }
 
 fn product_type<'a>(catalog: &'a Value, device: &DeviceInfo) -> Result<Option<&'a str>> {
     let key = model_key(device)?;
     let mode = match device.mode {
-        Mode::Dfu => "DFU",
+        Mode::Dfu | Mode::PortDfu => "DFU",
         Mode::Recovery => "Recovery",
     };
     let types = wire::dictionary(wire::get(catalog, &["MobileDeviceProductTypes"])?)?;

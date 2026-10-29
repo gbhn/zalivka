@@ -67,8 +67,17 @@ fn wait_download(usb: &mut impl RecoveryTransport) -> Result<()> {
 /// Match Apple's last-packet convention: a suffix-only packet can reuse the last block index.
 /// Full blocks borrow the input. Only the final block and suffix need storage.
 pub fn packets(data: &[u8]) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>> {
+    image_packets(data, Mode::Dfu)
+}
+
+fn image_packets(data: &[u8], mode: Mode) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>> {
     ensure!(!data.is_empty(), "cannot send an empty DFU image");
-    let blocks = data.len().div_ceil(BLOCK_SIZE);
+    let block_size = if mode == Mode::PortDfu {
+        64
+    } else {
+        BLOCK_SIZE
+    };
+    let blocks = data.len().div_ceil(block_size);
     ensure!(
         blocks <= u16::MAX as usize,
         "DFU image exceeds block index range"
@@ -80,8 +89,10 @@ pub fn packets(data: &[u8]) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>
     checksum.update(&SUFFIX);
     suffix[SUFFIX.len()..].copy_from_slice(&(!checksum.finalize()).to_le_bytes());
     let index = (blocks - 1) as u16;
-    let (prefix, last) = data.split_at(usize::from(index) * BLOCK_SIZE);
-    let (last, continuation) = if last.len() + suffix.len() <= BLOCK_SIZE {
+    let (prefix, last) = data.split_at(usize::from(index) * block_size);
+    let (last, continuation) = if mode == Mode::PortDfu {
+        (Cow::Borrowed(last), None)
+    } else if last.len() + suffix.len() <= block_size {
         let mut bytes = Vec::with_capacity(last.len() + suffix.len());
         bytes.extend_from_slice(last);
         bytes.extend_from_slice(&suffix);
@@ -93,7 +104,7 @@ pub fn packets(data: &[u8]) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>
         )
     };
     Ok(prefix
-        .chunks(BLOCK_SIZE)
+        .chunks(block_size)
         .enumerate()
         .map(|(i, chunk)| (i as u16, Cow::Borrowed(chunk)))
         .chain(std::iter::once((index, last)))
@@ -108,6 +119,9 @@ pub fn upload(
 ) -> Result<()> {
     let _trace = crate::logging::firmware_transfer();
     ensure!(!data.is_empty(), "cannot send an empty firmware image");
+    if mode == Mode::Dfu && usb.upload_dfu(data, finish)? {
+        return Ok(());
+    }
     let mut progress = crate::progress::Progress::new(
         if mode == Mode::Recovery {
             "USB Recovery transfer"
@@ -139,7 +153,7 @@ pub fn upload(
         }
         state => bail!("expected DFU idle state 2, got {state}; re-enter DFU"),
     }
-    let mut packets = packets(data)?.peekable();
+    let mut packets = image_packets(data, mode)?.peekable();
     let mut remaining = data.len();
     while let Some((block, bytes)) = packets.next() {
         usb.control_out(0x21, 1, block, 0, &bytes)?;
@@ -154,7 +168,12 @@ pub fn upload(
     }
     progress.finish();
     if finish {
-        usb.control_out(0x21, 1, data.len().div_ceil(BLOCK_SIZE) as u16, 0, &[])?;
+        let block_size = if mode == Mode::PortDfu {
+            64
+        } else {
+            BLOCK_SIZE
+        };
+        usb.control_out(0x21, 1, data.len().div_ceil(block_size) as u16, 0, &[])?;
         for _ in 0..2 {
             status(usb)?;
         }

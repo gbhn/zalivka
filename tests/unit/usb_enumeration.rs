@@ -38,9 +38,22 @@ fn scans_keep_healthy_devices_but_report_failure_when_none_can_be_read() {
         collect_devices([Err(anyhow::anyhow!("gone")), Ok(info.clone())].into_iter()).unwrap();
     assert_eq!(devices, [info]);
     assert!(
-        collect_devices([Err(anyhow::anyhow!("permission denied"))].into_iter())
+        collect_devices::<DeviceInfo>([Err(anyhow::anyhow!("permission denied"))].into_iter())
             .unwrap_err()
             .to_string()
             .contains("permission denied")
     );
+}
+
+#[test]
+fn port_dfu_has_its_own_mode_and_hardware_identity() {
+    assert_eq!(Mode::from_pid(0xf014), Some(Mode::PortDfu));
+    let controller =
+        DeviceInfo::parse("ECID:2a CPID:0022 BDID:22813200 PREV:20", Mode::PortDfu).unwrap();
+    assert_eq!(controller.hardware_ids(), (0x8132, 0x22));
+    assert_eq!(controller.serial_hex("PREV").unwrap(), 0x20);
+    assert!(controller.mode.can_restore());
+    assert!(!Mode::Recovery.can_restore());
+    assert_eq!(controller.chip_id, 0x22);
+    assert_eq!(controller.board_id, 0x22813200);
 }

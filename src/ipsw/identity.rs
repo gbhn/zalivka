@@ -59,6 +59,32 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// ROM DFU can omit SDOM. Signing obtains it from the matching firmware
+    /// identity, as Apple's request format specifies, and checks any USB value.
+    pub fn device_parameters(&self, device: &DeviceInfo) -> Result<DeviceInfo> {
+        ensure!(
+            device.mode != crate::device::Mode::PortDfu,
+            "SoC signing requires SoC DFU, not Port DFU"
+        );
+        for (name, actual) in [("ApChipID", device.chip_id), ("ApBoardID", device.board_id)] {
+            ensure!(
+                wire::number(wire::get(&self.value, &[name])?)? == u64::from(actual),
+                "signing identity {name} disagrees with connected device"
+            );
+        }
+        let domain = u32::try_from(wire::number(wire::get(
+            &self.value,
+            &["ApSecurityDomain"],
+        )?)?)?;
+        ensure!(
+            device.security_domain.is_none_or(|actual| actual == domain),
+            "signing identity ApSecurityDomain disagrees with connected device"
+        );
+        let mut device = device.clone();
+        device.security_domain = Some(domain);
+        Ok(device)
+    }
+
     pub fn new(index: usize, value: Value) -> Self {
         Self {
             index,
@@ -229,11 +255,10 @@ impl Ipsw {
         behavior: Behavior,
     ) -> Result<Option<Identity>> {
         let mut matches = Vec::new();
+        let (chip, board) = device.hardware_ids();
         for (i, value) in self.identity_values() {
             let summary = IdentitySummary::from_value(i, value)?;
-            if summary.chip_id != u64::from(device.chip_id)
-                || summary.board_id != u64::from(device.board_id)
-            {
+            if summary.chip_id != u64::from(chip) || summary.board_id != u64::from(board) {
                 continue;
             }
             if index.is_some_and(|index| summary.index != index) {

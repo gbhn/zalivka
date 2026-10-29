@@ -81,7 +81,7 @@ fn embedded_packages_match_windows_expansion_byte_for_byte() {
             String::from_utf8(bytes).unwrap()
         };
         assert!(text.contains("538.0.0.0"));
-        for pid in ["PID_1227", "PID_1281", "PID_12AC"] {
+        for pid in ["PID_1227", "PID_1281", "PID_12AC", "PID_F014"] {
             assert!(
                 text.to_ascii_uppercase().contains(pid),
                 "missing {pid} for {arch}"

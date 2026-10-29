@@ -254,7 +254,7 @@ fn im4p_headers_resolve_boot_roles_and_stage_firmware_without_changing_the_manif
 }
 
 #[test]
-fn header_derived_nonce_slots_still_require_explicit_slot_ids() {
+fn header_derived_nonce_slots_accept_dfu_defaults_and_validate_overrides() {
     for (tag, key) in [(*b"illb", "ApNonceSlotID"), (*b"sepi", "SepNonceSlotID")] {
         let bytes = im4p(&tag);
         let mut id = identity();
@@ -270,8 +270,12 @@ fn header_derived_nonce_slots_still_require_explicit_slot_ids() {
             .insert("RequiresNonceSlot".into(), true.into());
         let file = fixture_files(Some(id.clone()), false, &[("Firmware/opaque-slot", &bytes)]);
         let mut ipsw = Ipsw::open(file.path()).unwrap();
-        let error = ipsw.validate_identity(&mut id).unwrap_err();
-        assert!(error.to_string().contains(key), "{error:#}");
+        ipsw.validate_identity(&mut id).unwrap();
+        id.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(key.into(), false.into());
+        assert!(ipsw.validate_identity(&mut id).is_err());
         id.value.as_dictionary_mut().unwrap()["Info"]
             .as_dictionary_mut()
             .unwrap()
@@ -566,8 +570,12 @@ fn recovery_nonce_slot_metadata_is_checked_before_boot_by_declared_role() {
             .as_dictionary_mut()
             .unwrap()
             .insert("RequiresNonceSlot".into(), true.into());
-        let error = ipsw.validate_identity(&mut id).unwrap_err();
-        assert!(error.to_string().contains(slot), "{error:#}");
+        ipsw.validate_identity(&mut id).unwrap();
+        id.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(slot.into(), false.into());
+        assert!(ipsw.validate_identity(&mut id).is_err());
         id.value.as_dictionary_mut().unwrap()["Info"]
             .as_dictionary_mut()
             .unwrap()
