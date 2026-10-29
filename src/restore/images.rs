@@ -1,5 +1,4 @@
 //! Filesystem transfer, boot objects and manifest-selected image collections.
-use super::ContextState;
 use crate::{
     asr,
     ipsw::{Identity, Ipsw},
@@ -21,49 +20,47 @@ pub(super) fn serve_asr(ipsw: &mut Ipsw, id: &Identity, stream: &mut MuxStream) 
     }
 }
 
-impl ContextState {
-    pub(super) fn bootability(&mut self, out: &mut impl Write) -> Result<()> {
-        let _trace = crate::logging::firmware_transfer();
-        let mut entries = Vec::new();
-        let mut names = std::collections::HashSet::new();
-        for path in self.ipsw.files()? {
-            let Some(relative) = path
-                .strip_prefix("BootabilityBundle/")
-                .or_else(|| path.strip_prefix("BootabilityBundleV2/"))
-            else {
-                continue;
-            };
-            let name = if let Some(name) = relative.strip_prefix("Restore/Bootability/") {
-                name
-            } else if relative == "Restore/Firmware/Bootability.dmg.trustcache" {
-                "Bootability.trustcache"
-            } else {
-                continue;
-            };
-            if name.is_empty() {
-                continue;
-            }
-            ensure!(
-                name.trim_end_matches('/') != "TRAILER!!!"
-                    && names.insert(name.trim_end_matches('/').to_owned()),
-                "duplicate or reserved Bootability entry {name}"
-            );
-            let mode = self.ipsw.unix_mode(&path)?;
-            let size = self.ipsw.size(&path)?;
-            let mut header = Vec::new();
-            cpio_header(&mut header, name, mode, size)?;
-            entries.push((header, path, size));
+pub(super) fn bootability(ipsw: &mut Ipsw, out: &mut impl Write) -> Result<()> {
+    let _trace = crate::logging::firmware_transfer();
+    let mut entries = Vec::new();
+    let mut names = std::collections::HashSet::new();
+    for path in ipsw.files()? {
+        let Some(relative) = path
+            .strip_prefix("BootabilityBundle/")
+            .or_else(|| path.strip_prefix("BootabilityBundleV2/"))
+        else {
+            continue;
+        };
+        let name = if let Some(name) = relative.strip_prefix("Restore/Bootability/") {
+            name
+        } else if relative == "Restore/Firmware/Bootability.dmg.trustcache" {
+            "Bootability.trustcache"
+        } else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
         }
-        ensure!(!entries.is_empty(), "IPSW has no BootabilityBundle");
-        for (header, path, size) in entries {
-            out.write_all(&header)?;
-            ensure!(
-                self.ipsw.stream(&path, out)? == size,
-                "truncated Bootability entry"
-            );
-        }
-        cpio_header(out, "TRAILER!!!", 0, 0)
+        ensure!(
+            name.trim_end_matches('/') != "TRAILER!!!"
+                && names.insert(name.trim_end_matches('/').to_owned()),
+            "duplicate or reserved Bootability entry {name}"
+        );
+        let mode = ipsw.unix_mode(&path)?;
+        let size = ipsw.size(&path)?;
+        let mut header = Vec::new();
+        cpio_header(&mut header, name, mode, size)?;
+        entries.push((header, path, size));
     }
+    ensure!(!entries.is_empty(), "IPSW has no BootabilityBundle");
+    for (header, path, size) in entries {
+        out.write_all(&header)?;
+        ensure!(
+            ipsw.stream(&path, out)? == size,
+            "truncated Bootability entry"
+        );
+    }
+    cpio_header(out, "TRAILER!!!", 0, 0)
 }
 
 pub fn cpio_header(out: &mut impl Write, name: &str, mode: u32, size: u64) -> Result<()> {

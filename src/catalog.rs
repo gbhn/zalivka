@@ -186,7 +186,7 @@ pub fn obtain(
     identity: Option<usize>,
     behavior: Behavior,
     release: Option<&Release>,
-) -> Result<PathBuf> {
+) -> Result<Ipsw> {
     crate::log!(
         Info,
         "firmware",
@@ -212,7 +212,7 @@ pub fn ensure_cached(
     directory: &Path,
     identity: Option<usize>,
     behavior: Behavior,
-) -> Result<PathBuf> {
+) -> Result<Ipsw> {
     net::validate_apple_url(&release.url)?;
     ensure!(
         valid_build_identifier(&release.build),
@@ -253,7 +253,7 @@ pub fn ensure_cached(
             && wire::string(&ipsw.manifest, &["ProductBuildVersion"])? == release.build,
         "downloaded IPSW version/build differs from Apple's catalog"
     );
-    Ok(path)
+    Ok(ipsw)
 }
 
 #[cfg(test)]

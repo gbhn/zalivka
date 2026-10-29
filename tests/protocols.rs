@@ -336,17 +336,24 @@ fn component_entry(path: &str, bytes: &[u8]) -> Value {
     ])
 }
 
-fn restore_state(file: &std::path::Path) -> restore::ContextState {
-    restore::ContextState {
+fn restore_state(file: &std::path::Path) -> restore::RestoreSession {
+    restore::RestoreSession {
         ipsw: Ipsw::open(file).unwrap(),
-        restore: restore::SignedIdentity {
-            identity: identity(),
-            ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
-        },
-        recovery: None,
-        device: device_info(),
-        assets: net::AssetClient::default(),
+        context: Arc::new(restore::RestoreContext {
+            restore: restore::SignedIdentity {
+                identity: identity(),
+                ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
+            },
+            recovery: None,
+            device: device_info(),
+            assets: net::AssetClient::default(),
+        }),
     }
+}
+
+fn context_mut(state: &mut restore::RestoreSession) -> &mut restore::RestoreContext {
+    Arc::get_mut(&mut state.context)
+        .expect("restore context must be unique before starting requests")
 }
 
 fn declare_type(id: &mut Identity, name: &str, tag: &str) {

@@ -135,6 +135,10 @@ impl Ipsw {
         })
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn contains(&self, path: &str) -> bool {
         self.archive.index_for_name(path).is_some()
     }

@@ -1,5 +1,5 @@
 //! Asynchronous restored requests, isolated archives and worker lifetime.
-use super::{ContextState, data::serve_asset, data_type::DataType};
+use super::{RestoreSession, data::serve_asset, data_type::DataType};
 use crate::{mux::Session, wire};
 use anyhow::{Context, Result, ensure};
 use plist::Value;
@@ -33,7 +33,7 @@ impl AsyncRequests {
         }
     }
 
-    pub fn spawn(&mut self, state: &ContextState, request: Value) -> Result<()> {
+    pub fn spawn(&mut self, state: &RestoreSession, request: Value) -> Result<()> {
         let kind = wire::data_type(&request)?;
         let data_type =
             DataType::parse(kind).with_context(|| format!("unsupported async data type {kind}"))?;
@@ -49,11 +49,11 @@ impl AsyncRequests {
         );
         // HTTP assets do not read the IPSW. Other handlers receive their own
         // archive so ZIP seeks cannot race with another image/component reader.
-        let assets = state.assets.clone();
-        let mut state = if data_type == DataType::Asset {
+        let context = state.context.clone();
+        let mut ipsw = if data_type == DataType::Asset {
             None
         } else {
-            Some(state.reopen()?)
+            Some(state.ipsw.reopen()?)
         };
         let session = self.session.clone();
         let sender = self.sender.clone();
@@ -64,10 +64,10 @@ impl AsyncRequests {
             .spawn(crate::progress::inherit(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut stream = session.connect_retry(port, Duration::from_secs(60))?;
-                    if let Some(state) = &mut state {
-                        state.serve_on(&session, &mut stream, &request, data_type)
+                    if let Some(ipsw) = &mut ipsw {
+                        context.serve_on(ipsw, &session, &mut stream, &request, data_type)
                     } else {
-                        serve_asset(&assets, &mut stream, &request)
+                        serve_asset(&context.assets, &mut stream, &request)
                     }
                 }))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("async worker panicked")))

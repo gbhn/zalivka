@@ -1,10 +1,10 @@
 //! Responses to restored data requests and recovery assets.
-use super::ContextState;
 use super::data_type::DataType;
 use super::file_data::{FileDataWriter, send_file_data};
-use super::images::{boot_object_path, image_data, nor_data, serve_asr};
+use super::images::{boot_object_path, bootability, image_data, nor_data, serve_asr};
+use super::{RestoreContext, RestoreSession};
 use crate::{
-    ipsw::Identity,
+    ipsw::{Identity, Ipsw},
     mux::{MuxStream, Session},
     net, tss, wire,
 };
@@ -12,7 +12,7 @@ use anyhow::{Context, Result, ensure};
 use plist::{Dictionary, Value};
 use std::time::Duration;
 
-impl ContextState {
+impl RestoreSession {
     pub fn serve(
         &mut self,
         session: &Session,
@@ -39,14 +39,19 @@ impl ContextState {
         let port = data_type.data_port(message, false)?;
         if port != 0 {
             let mut service = session.connect_retry(port, Duration::from_secs(60))?;
-            self.serve_on(session, &mut service, message, data_type)
+            self.context
+                .serve_on(&mut self.ipsw, session, &mut service, message, data_type)
         } else {
-            self.serve_on(session, main, message, data_type)
+            self.context
+                .serve_on(&mut self.ipsw, session, main, message, data_type)
         }
     }
+}
 
+impl RestoreContext {
     pub(super) fn serve_on(
-        &mut self,
+        &self,
+        ipsw: &mut Ipsw,
         session: &Session,
         out: &mut MuxStream,
         message: &Value,
@@ -72,7 +77,7 @@ impl ContextState {
         // paths. Dedicated RecoveryOS* requests use the recovery signature instead.
         let response = match data_type {
             DataType::Asr | DataType::RecoveryAsr => {
-                return serve_asr(&mut self.ipsw, identity()?, out);
+                return serve_asr(ipsw, identity()?, out);
             }
             DataType::BuildIdentity => wire::dict([
                 ("BuildIdentityDict", identity()?.value.clone()),
@@ -109,9 +114,7 @@ impl ContextState {
             DataType::Empty => Value::Dictionary(Dictionary::new()),
             DataType::Component(tag) => {
                 let component = identity()?.require_component_type(tag)?;
-                let bytes = self
-                    .ipsw
-                    .personalized(identity()?, component, &self.restore.ticket)?;
+                let bytes = ipsw.personalized(identity()?, component, &self.restore.ticket)?;
                 wire::dict([(format!("{kind}File"), Value::Data(bytes))])
             }
             DataType::PersonalizedBootObject | DataType::SourceBootObject => {
@@ -126,7 +129,7 @@ impl ContextState {
                 let path = boot_object_path(id, name, message)?;
                 if data_type == DataType::SourceBootObject
                     && name == "__GlobalManifest__"
-                    && !self.ipsw.contains(&path)
+                    && !ipsw.contains(&path)
                 {
                     ensure!(
                         wire::optional(&id.value, &["Info", "VariantSupportsGlobalSigning"])?
@@ -139,10 +142,10 @@ impl ContextState {
                     return Ok(());
                 }
                 if data_type == DataType::PersonalizedBootObject && !name.starts_with("__") {
-                    let bytes = self.ipsw.personalized(id, name, &self.restore.ticket)?;
+                    let bytes = ipsw.personalized(id, name, &self.restore.ticket)?;
                     send_file_data(out, session, &self.assets, name, &bytes)?;
                 } else {
-                    self.stream_file(out, session, name, &path)?;
+                    self.stream_file(ipsw, out, session, name, &path)?;
                 }
                 return Ok(());
             }
@@ -152,31 +155,24 @@ impl ContextState {
                     .as_ref()
                     .context("missing recovery identity")?
                     .identity
-                    .path("OS")?
-                    .to_owned();
-                return self.stream_file(out, session, "RecoveryOS", &path);
+                    .path("OS")?;
+                return self.stream_file(ipsw, out, session, "RecoveryOS", path);
             }
             DataType::RecoveryVersion => self.recovery_version()?,
             DataType::RecoveryAsset => {
                 let key = wire::string(message, &["Arguments", "FWOverrideKey"])?;
                 if let Some(name) = key.strip_prefix("RecoveryOS") {
-                    self.recovery_assets(Some(name))?
+                    self.recovery_assets(ipsw, Some(name))?
                 } else {
                     wire::dict([("RecoveryOSNoAssetFound", true.into())])
                 }
             }
-            DataType::RecoveryFirmware => self.recovery_assets(None)?,
+            DataType::RecoveryFirmware => self.recovery_assets(ipsw, None)?,
             DataType::RecoveryLocalPolicy => self.recovery_local_policy(message)?,
-            DataType::Images => image_data(
-                &mut self.ipsw,
-                identity()?,
-                &self.restore.ticket,
-                kind,
-                message,
-            )?,
-            DataType::Nor => nor_data(&mut self.ipsw, identity()?, &self.restore.ticket, message)?,
+            DataType::Images => image_data(ipsw, identity()?, &self.restore.ticket, kind, message)?,
+            DataType::Nor => nor_data(ipsw, identity()?, &self.restore.ticket, message)?,
             DataType::Bootability => {
-                self.bootability(out)?;
+                bootability(ipsw, out)?;
                 return Ok(());
             }
             DataType::Asset => return serve_asset(&self.assets, out, message),
@@ -185,8 +181,7 @@ impl ContextState {
                 let response = if let Some(response) = crate::firmware::canary_response(args)? {
                     response
                 } else {
-                    let update =
-                        crate::firmware::prepare(&mut self.ipsw, identity()?, &self.device, args)?;
+                    let update = crate::firmware::prepare(ipsw, identity()?, &self.device, args)?;
                     let response = tss::send_raw(&update.request)?;
                     update.finish(response)?
                 };
@@ -209,15 +204,16 @@ impl ContextState {
     }
 
     fn stream_file(
-        &mut self,
+        &self,
+        ipsw: &mut Ipsw,
         out: &mut MuxStream,
         session: &Session,
         name: &str,
         path: &str,
     ) -> Result<()> {
-        let size = self.ipsw.size(path)?;
+        let size = ipsw.size(path)?;
         let mut writer = FileDataWriter::new(out, session, &self.assets, name, Some(size));
-        self.ipsw.stream(path, &mut writer)?;
+        ipsw.stream(path, &mut writer)?;
         writer.finish()
     }
 }

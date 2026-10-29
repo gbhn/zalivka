@@ -29,35 +29,30 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use plist::Value;
-use std::{fs::File, path::Path};
+use std::{fs::File, path::Path, sync::Arc};
 
 pub const RESTORED_PORT: u16 = 62078;
 
 /// An identity and the signing response used to personalize its components.
-#[derive(Clone)]
 pub struct SignedIdentity {
     pub identity: Identity,
     pub ticket: Value,
 }
 
-pub struct ContextState {
-    pub ipsw: Ipsw,
+/// Final signing responses and device metadata. Created after iBoot has
+/// refreshed its nonces, then shared without cloning identities per request.
+pub struct RestoreContext {
     pub restore: SignedIdentity,
     pub recovery: Option<SignedIdentity>,
     pub device: DeviceInfo,
     pub assets: net::AssetClient,
 }
 
-impl ContextState {
-    fn reopen(&self) -> Result<Self> {
-        Ok(Self {
-            ipsw: self.ipsw.reopen()?,
-            restore: self.restore.clone(),
-            recovery: self.recovery.clone(),
-            device: self.device.clone(),
-            assets: self.assets.clone(),
-        })
-    }
+/// The main restored channel owns a ZIP cursor. Concurrent requests open
+/// independent readers and share the same immutable restore context.
+pub struct RestoreSession {
+    pub ipsw: Ipsw,
+    pub context: Arc<RestoreContext>,
 }
 
 /// Validate the available IPSW metadata and build the exact iBoot firmware stages.
@@ -87,20 +82,25 @@ pub fn preflight(ipsw: &mut Ipsw, identity: &mut Identity) -> Result<[Vec<IBootS
     Ok(stages)
 }
 
-pub fn run(
-    path: &Path,
+pub(crate) fn run(
+    mut ipsw: Ipsw,
     ecid: u64,
     identity_index: Option<usize>,
     transcript: Option<&Path>,
     behavior: Behavior,
     assets: net::AssetClient,
 ) -> Result<()> {
+    // The catalog/download phase can outlive a change in host driver/service state.
     crate::drivers::check_host()?;
     let usb = RecoveryUsb::open(ecid)?;
     ensure!(usb.info.mode == Mode::Dfu, "enter DFU before restoring");
     usb.check_reset_access()?;
-    crate::log!(Info, "ipsw", "Preparing firmware: {}", path.display());
-    let mut ipsw = Ipsw::open(path)?;
+    crate::log!(
+        Info,
+        "ipsw",
+        "Preparing firmware: {}",
+        ipsw.path().display()
+    );
     let mut identity = ipsw.select_behavior(&usb.info, identity_index, behavior)?;
     let stages = preflight(&mut ipsw, &mut identity)?;
     let mut recovery = ipsw.recovery_identity(&usb.info, &identity)?;
@@ -136,23 +136,28 @@ pub fn run(
     let log = transcript
         .map(|p| File::options().write(true).create_new(true).open(p))
         .transpose()?;
-    let mut state = ContextState {
+    let mut restore = SignedIdentity { identity, ticket };
+    let (device, bootx_error) = restore.boot(&mut ipsw, usb, &stages)?;
+    let recovery = recovery
+        .map(|identity| -> Result<SignedIdentity> {
+            let request = if restore.identity.is_macos()? {
+                tss::recovery_request(&device, &identity)?
+            } else {
+                tss::request(&device, &identity)?
+            };
+            let ticket = tss::send(&request).context("personalizing RecoveryOS root ticket")?;
+            Ok(SignedIdentity { identity, ticket })
+        })
+        .transpose()?;
+    let mut state = RestoreSession {
         ipsw,
-        restore: SignedIdentity { identity, ticket },
-        recovery: None,
-        device: usb.info.clone(),
-        assets,
+        context: Arc::new(RestoreContext {
+            restore,
+            recovery,
+            device,
+            assets,
+        }),
     };
-    let bootx_error = state.boot(usb, &stages)?;
-    if let Some(identity) = recovery {
-        let request = if state.restore.identity.is_macos()? {
-            tss::recovery_request(&state.device, &identity)?
-        } else {
-            tss::request(&state.device, &identity)?
-        };
-        let ticket = tss::send(&request).context("personalizing RecoveryOS root ticket")?;
-        state.recovery = Some(SignedIdentity { identity, ticket });
-    }
     session::run(&mut state, bootx_error, log, attestation)
 }
 

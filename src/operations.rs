@@ -29,7 +29,7 @@ impl Restore {
             self.apple_connect_data.as_deref(),
         )?;
         let ipsw = if let Some(path) = self.ipsw {
-            path
+            Ipsw::open(&path)?
         } else {
             let device = usb::RecoveryUsb::open(self.ecid)?.info;
             ensure!(device.mode == Mode::Dfu, "enter DFU before restoring");
@@ -45,7 +45,7 @@ impl Restore {
             )?
         };
         restore::run(
-            &ipsw,
+            ipsw,
             self.ecid,
             self.identity,
             self.transcript.as_deref(),
@@ -92,7 +92,8 @@ pub fn fetch(
     let directory = directory
         .map(Path::to_path_buf)
         .map_or_else(catalog::cache_directory, Ok)?;
-    let path = catalog::obtain(&device, &directory, None, Behavior::Erase, release)?;
+    let ipsw = catalog::obtain(&device, &directory, None, Behavior::Erase, release)?;
+    let path = ipsw.path().to_path_buf();
     crate::log!(Info, "firmware", "Saved: {}", path.display());
     Ok(path)
 }

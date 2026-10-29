@@ -239,7 +239,7 @@ fn automatic_download_reuses_a_verified_compatible_cached_ipsw() {
         device::encode_hex(&release.sha1)
     ));
     std::fs::copy(file.path(), &expected).unwrap();
-    let path = catalog::ensure_cached(
+    let cached = catalog::ensure_cached(
         &release,
         &device_info(),
         directory.path(),
@@ -247,9 +247,9 @@ fn automatic_download_reuses_a_verified_compatible_cached_ipsw() {
         Behavior::Erase,
     )
     .unwrap();
-    assert_eq!(path, expected);
+    assert_eq!(cached.path(), expected);
     assert_eq!(
-        std::fs::read(&path).unwrap(),
+        std::fs::read(cached.path()).unwrap(),
         std::fs::read(file.path()).unwrap()
     );
     let mut wrong_device = device_info();
@@ -291,6 +291,34 @@ fn automatic_download_reuses_a_verified_compatible_cached_ipsw() {
 }
 
 #[test]
+fn cached_firmware_handoff_retains_the_open_archive() {
+    let file = fixture(None, false);
+    let release = fixture_release(file.path());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(format!(
+        "{}-{}.ipsw",
+        release.build,
+        device::encode_hex(&release.sha1)
+    ));
+    std::fs::copy(file.path(), &path).unwrap();
+    let mut ipsw = catalog::ensure_cached(
+        &release,
+        &device_info(),
+        directory.path(),
+        None,
+        Behavior::Erase,
+    )
+    .unwrap();
+    assert_eq!(ipsw.path(), path);
+    // A consumer uses the archive that the catalog actually validated; it
+    // does not reopen a pathname that could now refer to another file.
+    std::fs::rename(&path, directory.path().join("moved.ipsw")).unwrap();
+    assert!(!path.exists());
+    assert_eq!(ipsw.component(&identity(), "iBSS").unwrap(), im4p(b"test"));
+    ipsw.preflight(&mut identity()).unwrap();
+}
+
+#[test]
 fn cached_revive_selects_update_and_preserves_the_explicit_identity() {
     let mut upgrade = identity();
     upgrade
@@ -317,7 +345,8 @@ fn cached_revive_selects_update_and_preserves_the_explicit_identity() {
     for index in [None, Some(1)] {
         assert_eq!(
             catalog::ensure_cached(&release, &device, directory.path(), index, Behavior::Update)
-                .unwrap(),
+                .unwrap()
+                .path(),
             path
         );
     }

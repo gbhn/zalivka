@@ -1,6 +1,6 @@
 //! Restored message loop, reconnect policy and final status acknowledgement.
 use super::{
-    AsyncRequests, ContextState,
+    AsyncRequests, RestoreSession,
     attestation::Attestation,
     connection::{confirm_restore_service, wait_restored},
     options,
@@ -250,19 +250,19 @@ pub(super) fn record_message(log: &mut Option<impl Write>, message: &Value) -> O
 }
 
 pub(super) fn run(
-    state: &mut ContextState,
+    state: &mut RestoreSession,
     mut bootx_error: Option<anyhow::Error>,
     mut log: Option<File>,
     mut attestation: Attestation,
 ) -> Result<()> {
-    let ecid = state.device.ecid;
+    let ecid = state.context.device.ecid;
     let mut started = false;
     let mut final_received = false;
     let mut provisioning_error = false;
     let mut protocol = None;
     for attempt in 0..=3 {
         let (session, mut main, version) =
-            confirm_restore_service(bootx_error.take(), || wait_restored(&state.device))?;
+            confirm_restore_service(bootx_error.take(), || wait_restored(&state.context.device))?;
         if let Some(previous) = protocol {
             ensure!(
                 version == previous,
@@ -282,7 +282,7 @@ pub(super) fn run(
                         ("Request", "StartRestore".into()),
                         ("Label", "zalivka".into()),
                         ("RestoreProtocolVersion", version.into()),
-                        ("RestoreOptions", options(&state.restore.identity)?),
+                        ("RestoreOptions", options(&state.context.restore.identity)?),
                     ]),
                 )?;
             }

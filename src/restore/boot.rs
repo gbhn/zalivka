@@ -1,5 +1,5 @@
 //! iBoot preparation and the explicitly requested RAM-only boot-state probe.
-use super::{ContextState, options::boot_arguments};
+use super::{SignedIdentity, options::boot_arguments};
 use crate::{
     device::{DeviceInfo, Mode},
     dfu, img4,
@@ -172,96 +172,94 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
     }))
 }
 
-impl ContextState {
+impl SignedIdentity {
     pub(super) fn send_component(
-        &mut self,
+        &self,
+        ipsw: &mut Ipsw,
         usb: &mut RecoveryUsb,
         name: &str,
         ticket: Option<&Value>,
     ) -> Result<()> {
-        let bytes = self.ipsw.personalized(
-            &self.restore.identity,
-            name,
-            ticket.unwrap_or(&self.restore.ticket),
-        )?;
+        let bytes = ipsw.personalized(&self.identity, name, ticket.unwrap_or(&self.ticket))?;
         crate::log!(Debug, "boot", "Sending {name}: {} B", bytes.len());
         dfu::upload(usb, usb.info.mode, &bytes, true).with_context(|| format!("uploading {name}"))
     }
 
-    fn send_boot_object(&mut self, usb: &mut RecoveryUsb, tag: &[u8; 4]) -> Result<()> {
-        let name = self
-            .restore
-            .identity
-            .require_component_type(tag)?
-            .to_owned();
-        self.send_component(usb, &name, None)
+    fn send_boot_object(
+        &self,
+        ipsw: &mut Ipsw,
+        usb: &mut RecoveryUsb,
+        tag: &[u8; 4],
+    ) -> Result<()> {
+        let name = self.identity.require_component_type(tag)?;
+        self.send_component(ipsw, usb, name, None)
     }
 
     // Errors before bootx stop immediately. A bootx USB error must be resolved
     // by checking the restore service's identity after closing iBoot USB.
     pub(super) fn boot(
         &mut self,
+        ipsw: &mut Ipsw,
         mut usb: RecoveryUsb,
         stages: &[Vec<IBootStep>; 2],
-    ) -> Result<Option<anyhow::Error>> {
+    ) -> Result<(DeviceInfo, Option<anyhow::Error>)> {
+        let mut device = usb.info.clone();
         ensure!(
             usb.info.mode == Mode::Dfu,
             "restore must start in ROM DFU mode"
         );
-        let upload = self.send_boot_object(&mut usb, b"ibss");
+        let upload = self.send_boot_object(ipsw, &mut usb, b"ibss");
         drop(usb);
-        let mode = self.restore.identity.is_macos()?.then_some(Mode::Recovery);
-        let mut usb =
-            reconnect_after_ibss(upload, mode, |mode| wait_recovery(self.device.ecid, mode))?;
-        validate_reconnected_device(&self.device, &usb.info)
+        let mode = self.identity.is_macos()?.then_some(Mode::Recovery);
+        let mut usb = reconnect_after_ibss(upload, mode, |mode| wait_recovery(device.ecid, mode))?;
+        validate_reconnected_device(&device, &usb.info)
             .context("hardware identity changed after iBSS")?;
-        if usb.info.ap_nonce != self.device.ap_nonce || usb.info.sep_nonce != self.device.sep_nonce
-        {
+        if usb.info.ap_nonce != device.ap_nonce || usb.info.sep_nonce != device.sep_nonce {
             crate::log!(Info, "boot", "Refreshing signatures after iBSS");
-            self.device = usb.info.clone();
-            self.restore.ticket =
-                tss::send(&tss::request(&self.device, &self.restore.identity)?)
-                    .context("personalizing restore firmware after iBSS nonce change")?;
+            device = usb.info.clone();
+            self.ticket = tss::send(&tss::request(&device, &self.identity)?)
+                .context("personalizing restore firmware after iBSS nonce change")?;
         }
-        if self.restore.identity.is_macos()? {
+        if self.identity.is_macos()? {
             ensure!(
                 usb.info.mode == Mode::Recovery,
                 "Apple Silicon iBSS did not expose the iBoot recovery transport"
             );
             let local = tss::send(&tss::local_policy_request(
-                &self.device,
-                tss::ticket(&self.restore.ticket)?,
+                &device,
+                tss::ticket(&self.ticket)?,
                 None,
             )?)
             .context("personalizing initial Ap,LocalPolicy for iBoot")?;
-            self.send_component(&mut usb, "Ap,LocalPolicy", Some(&local))?;
+            self.send_component(ipsw, &mut usb, "Ap,LocalPolicy", Some(&local))?;
             dfu::command(&mut usb, "lpolrestore", false)?;
-            self.send_iboot_firmware(&mut usb, true, &stages[0])?;
+            self.send_iboot_firmware(ipsw, &mut usb, true, &stages[0])?;
         }
-        self.send_boot_object(&mut usb, b"ibec")?;
+        self.send_boot_object(ipsw, &mut usb, b"ibec")?;
         if usb.info.mode == Mode::Recovery {
             dfu::command(&mut usb, "go", true)?;
         }
         drop(usb);
-        let mut usb = wait_recovery(self.device.ecid, Some(Mode::Recovery))?;
-        validate_reconnected_device(&self.device, &usb.info)
+        let mut usb = wait_recovery(device.ecid, Some(Mode::Recovery))?;
+        validate_reconnected_device(&device, &usb.info)
             .context("hardware identity changed after iBEC")?;
-        self.send_iboot_firmware(&mut usb, false, &stages[1])?;
-        self.send_boot_object(&mut usb, b"rdsk")?;
+        self.send_iboot_firmware(ipsw, &mut usb, false, &stages[1])?;
+        self.send_boot_object(ipsw, &mut usb, b"rdsk")?;
         dfu::command(&mut usb, "ramdisk", false)?;
         std::thread::sleep(Duration::from_secs(2));
-        self.send_boot_object(&mut usb, b"rdtr")?;
+        self.send_boot_object(ipsw, &mut usb, b"rdtr")?;
         dfu::command(&mut usb, "devicetree", false)?;
-        if self.restore.identity.component_by_type(b"rsep")?.is_some() {
-            self.send_boot_object(&mut usb, b"rsep")?;
+        if self.identity.component_by_type(b"rsep")?.is_some() {
+            self.send_boot_object(ipsw, &mut usb, b"rsep")?;
             dfu::command(&mut usb, "rsepfirmware", false)?;
         }
-        self.send_boot_object(&mut usb, b"rkrn")?;
-        Ok(dfu::boot_kernel(&mut usb).err())
+        self.send_boot_object(ipsw, &mut usb, b"rkrn")?;
+        Ok((device, dfu::boot_kernel(&mut usb).err()))
     }
 
     pub(super) fn send_iboot_firmware(
-        &mut self,
+        &self,
+        ipsw: &mut Ipsw,
         usb: &mut RecoveryUsb,
         stage1: bool,
         steps: &[IBootStep],
@@ -275,7 +273,7 @@ impl ContextState {
         for step in steps {
             match step {
                 IBootStep::Component(name) => {
-                    self.send_component(usb, name, None)?;
+                    self.send_component(ipsw, usb, name, None)?;
                 }
                 IBootStep::Command(command) => {
                     crate::log!(Debug, "boot:cmd", "{command}");

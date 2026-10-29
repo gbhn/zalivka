@@ -28,7 +28,7 @@ fn deflated_boot_objects_only_send_done_after_successful_zip_crc_validation() {
                 std::fs::write(file.path(), bytes).unwrap();
             }
             let mut state = restore_state(file.path());
-            manifest_mut(&mut state.restore.identity).insert(
+            manifest_mut(&mut context_mut(&mut state).restore.identity).insert(
                 "Cryptex1,RosettaOS".into(),
                 component_entry("rosetta.dmg", &image),
             );
@@ -311,7 +311,7 @@ fn personalized_data_enables_early_iboot_dcp_and_keeps_ean_separate() {
         ],
     );
     let mut state = restore_state(file.path());
-    let manifest = manifest_mut(&mut state.restore.identity);
+    let manifest = manifest_mut(&mut context_mut(&mut state).restore.identity);
     for (name, path, bytes, early, fud, stage1) in [
         ("DCP", "Firmware/dcp.im4p", &dcp, true, false, false),
         ("Ap,DCP2", "Firmware/dcp.im4p", &dcp, false, true, false),
@@ -419,7 +419,7 @@ fn untrusted_input_device_uses_img4_for_fud_and_personalized_boot_objects() {
     let bytes = im4p(b"ipdf");
     let file = fixture_files(None, false, &[("Firmware/InputDevice.im4p", &bytes)]);
     let mut state = restore_state(file.path());
-    manifest_mut(&mut state.restore.identity).insert(
+    manifest_mut(&mut context_mut(&mut state).restore.identity).insert(
         "InputDevice".into(),
         wire::dict([
             ("Trusted", false.into()),
@@ -439,7 +439,7 @@ fn untrusted_input_device_uses_img4_for_fud_and_personalized_boot_objects() {
     // Preserve Trusted=false in signing metadata while wrapping the payload.
     assert_eq!(
         wire::get(
-            &tss::request(&device_info(), &state.restore.identity).unwrap(),
+            &tss::request(&device_info(), &state.context.restore.identity).unwrap(),
             &["InputDevice", "Trusted"]
         )
         .unwrap()
@@ -604,18 +604,20 @@ fn ticket_selection_uses_request_type_with_distinct_macos_identity() {
     fields.extend(img4::element(4, b"recovery-ticket"));
     let recovery = img4::element(0x30, &fields);
     let file = fixture(Some(recovery_identity()), false);
-    let mut state = restore::ContextState {
+    let mut state = restore::RestoreSession {
         ipsw: Ipsw::open(file.path()).unwrap(),
-        restore: restore::SignedIdentity {
-            identity: identity(),
-            ticket: wire::dict([("ApImg4Ticket", Value::Data(normal.clone()))]),
-        },
-        recovery: Some(restore::SignedIdentity {
-            identity: recovery_identity(),
-            ticket: wire::dict([("ApImg4Ticket", Value::Data(recovery.clone()))]),
+        context: Arc::new(restore::RestoreContext {
+            restore: restore::SignedIdentity {
+                identity: identity(),
+                ticket: wire::dict([("ApImg4Ticket", Value::Data(normal.clone()))]),
+            },
+            recovery: Some(restore::SignedIdentity {
+                identity: recovery_identity(),
+                ticket: wire::dict([("ApImg4Ticket", Value::Data(recovery.clone()))]),
+            }),
+            device: device_info(),
+            assets: net::AssetClient::default(),
         }),
-        device: device_info(),
-        assets: net::AssetClient::default(),
     };
     let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
     let session = Session::new(usb).unwrap();
@@ -668,7 +670,7 @@ fn ticket_selection_uses_request_type_with_distinct_macos_identity() {
         ("KernelCache", "IsLoadedByiBoot"),
         ("iBSS", "IsLoadedByiBootStage1"),
     ] {
-        manifest_mut(&mut state.recovery.as_mut().unwrap().identity)[name]
+        manifest_mut(&mut context_mut(&mut state).recovery.as_mut().unwrap().identity)[name]
             .as_dictionary_mut()
             .unwrap()["Info"]
             .as_dictionary_mut()
@@ -682,7 +684,7 @@ fn ticket_selection_uses_request_type_with_distinct_macos_identity() {
             &request("RecoveryOSIBootFWFilesImages", true),
         )
         .unwrap();
-    state.recovery = None;
+    context_mut(&mut state).recovery = None;
     assert!(
         state
             .serve(
@@ -811,7 +813,7 @@ fn malformed_manifest_image_selector_is_not_treated_as_false() {
             wire::dict([("ImageType", "FutureFlag".into())]),
         ),
     ] {
-        manifest_mut(&mut state.restore.identity)["iBSS"]
+        manifest_mut(&mut context_mut(&mut state).restore.identity)["iBSS"]
             .as_dictionary_mut()
             .unwrap()["Info"]
             .as_dictionary_mut()
@@ -858,7 +860,7 @@ fn malformed_global_manifest_metadata_does_not_take_the_optional_path() {
 fn malformed_present_recovery_assets_are_errors_instead_of_no_asset_replies() {
     let file = fixture(None, false);
     let mut state = restore_state(file.path());
-    state.recovery = Some(restore::SignedIdentity {
+    context_mut(&mut state).recovery = Some(restore::SignedIdentity {
         identity: recovery_identity(),
         ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
     });
@@ -873,7 +875,7 @@ fn malformed_present_recovery_assets_are_errors_instead_of_no_asset_replies() {
         )]),
         wire::dict([("Info", wire::dict([("IsLoadedByiBoot", "false".into())]))]),
     ] {
-        manifest_mut(&mut state.recovery.as_mut().unwrap().identity)
+        manifest_mut(&mut context_mut(&mut state).recovery.as_mut().unwrap().identity)
             .insert("FutureAsset".into(), entry);
         for kind in ["RecoveryOSFileAssetImage", "RecoveryOSIBootFWFilesImages"] {
             let message = wire::dict([
@@ -896,7 +898,12 @@ fn malformed_present_recovery_assets_are_errors_instead_of_no_asset_replies() {
 fn captured_optional_global_manifest_request_completes_and_keeps_the_channel_usable() {
     let file = fixture(None, false);
     let mut state = restore_state(file.path());
-    state.restore.identity.value.as_dictionary_mut().unwrap()["Info"]
+    context_mut(&mut state)
+        .restore
+        .identity
+        .value
+        .as_dictionary_mut()
+        .unwrap()["Info"]
         .as_dictionary_mut()
         .unwrap()
         .insert("VariantSupportsGlobalSigning".into(), true.into());
@@ -968,7 +975,7 @@ fn global_manifests_use_request_variant_prefix_and_suffix_with_protocol_defaults
         ],
     );
     let mut state = restore_state(file.path());
-    state.recovery = Some(restore::SignedIdentity {
+    context_mut(&mut state).recovery = Some(restore::SignedIdentity {
         identity: recovery_identity(),
         ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
     });
@@ -1054,7 +1061,7 @@ fn optional_global_manifest_completes_without_data_but_required_manifest_must_ex
     state
         .serve(&session, &mut main, &request(false, ""))
         .unwrap();
-    state
+    context_mut(&mut state)
         .restore
         .identity
         .value
@@ -1115,13 +1122,11 @@ fn optional_global_manifest_completes_without_data_but_required_manifest_must_ex
 fn missing_optional_recovery_assets_are_reported_for_absent_or_unmatched_identities() {
     for recovery in [None, Some(recovery_identity())] {
         let file = fixture(None, false);
-        let mut state = restore::ContextState {
-            recovery: recovery.map(|identity| restore::SignedIdentity {
-                identity,
-                ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
-            }),
-            ..restore_state(file.path())
-        };
+        let mut state = restore_state(file.path());
+        context_mut(&mut state).recovery = recovery.map(|identity| restore::SignedIdentity {
+            identity,
+            ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
+        });
         let (usb, output) = mock_mux(vec![version_packet(), tcp(62078, 1, 0, 1, 0x12, &[])]);
         let session = Session::new(usb).unwrap();
         let mut main = session.connect(62078).unwrap();
@@ -1244,7 +1249,7 @@ fn system_image_metadata_requests_use_manifest_components_and_exact_file_keys() 
             metadata.as_slice(),
         ),
     ] {
-        manifest_mut(&mut state.restore.identity).insert(
+        manifest_mut(&mut context_mut(&mut state).restore.identity).insert(
             component.into(),
             wire::dict([
                 ("Trusted", false.into()),
@@ -1271,7 +1276,7 @@ fn system_image_metadata_requests_use_manifest_components_and_exact_file_keys() 
         ("SystemVolume", "FutureSystemPayload"),
         ("Ap,SystemVolumeCanonicalMetadata", "FutureCanonicalPayload"),
     ] {
-        let entries = manifest_mut(&mut state.restore.identity);
+        let entries = manifest_mut(&mut context_mut(&mut state).restore.identity);
         let entry = entries.remove(old).unwrap();
         entries.insert(new.into(), entry);
     }
@@ -1525,7 +1530,7 @@ fn async_asr_keeps_control_and_component_channels_responsive_with_independent_zi
         let mut state = restore_state(file.path());
         state
             .ipsw
-            .prepare_filesystem(&state.restore.identity)
+            .prepare_filesystem(&state.context.restore.identity)
             .unwrap();
         let (input, incoming) = mpsc::channel();
         let (output, outgoing) = mpsc::channel();
@@ -1543,6 +1548,10 @@ fn async_asr_keeps_control_and_component_channels_responsive_with_independent_zi
             ("DataPort", 12345u64.into()),
         ]);
         requests.spawn(&state, asr_request.clone()).unwrap();
+        assert!(
+            Arc::get_mut(&mut state.context).is_none(),
+            "active requests must share the immutable signing context"
+        );
         // Reserve the port until the first transfer completes.
         assert!(
             requests
@@ -1629,7 +1638,7 @@ fn async_asr_keeps_control_and_component_channels_responsive_with_independent_zi
         }
         let expected = state
             .ipsw
-            .personalized(&identity(), "iBSS", &state.restore.ticket)
+            .personalized(&identity(), "iBSS", &state.context.restore.ticket)
             .unwrap();
         let mut expected_frames = vec![];
         wire::send_binary(
@@ -1655,6 +1664,10 @@ fn async_asr_keeps_control_and_component_channels_responsive_with_independent_zi
         let expected = [image.as_slice(), sha1::Sha1::digest(&image).as_slice()].concat();
         assert_eq!(receive_mux_data(&outgoing, 12345, expected.len()), expected);
         requests.finish().unwrap();
+        assert!(
+            Arc::get_mut(&mut state.context).is_some(),
+            "completed requests must release their signing context"
+        );
     }
 }
 
@@ -1663,7 +1676,7 @@ fn async_ticket_requests_keep_restore_and_recovery_signatures_distinct() {
     let file = fixture(Some(recovery_identity()), false);
     let mut state = restore_state(file.path());
     let recovery_ticket = b"separate recoveryOS signature";
-    state.recovery = Some(restore::SignedIdentity {
+    context_mut(&mut state).recovery = Some(restore::SignedIdentity {
         identity: recovery_identity(),
         ticket: wire::dict([("ApImg4Ticket", Value::Data(recovery_ticket.to_vec()))]),
     });
@@ -1683,7 +1696,7 @@ fn async_ticket_requests_keep_restore_and_recovery_signatures_distinct() {
         (
             "RootTicket",
             34567,
-            tss::ticket(&state.restore.ticket).unwrap(),
+            tss::ticket(&state.context.restore.ticket).unwrap(),
         ),
     ] {
         requests
@@ -1712,7 +1725,7 @@ fn async_recovery_asr_selects_recovery_image_and_uses_its_explicit_port() {
     manifest_mut(&mut recovery).insert("OS".into(), component_entry("recovery.dmg", image));
     let file = fixture_files(Some(recovery.clone()), false, &[("recovery.dmg", image)]);
     let mut state = restore_state(file.path());
-    state.recovery = Some(restore::SignedIdentity {
+    context_mut(&mut state).recovery = Some(restore::SignedIdentity {
         identity: recovery,
         ticket: wire::dict([("ApImg4Ticket", Value::Data(ticket()))]),
     });
@@ -1851,7 +1864,7 @@ fn async_completion_releases_ports_and_leaves_the_control_channel_available() {
                 .unwrap()
                 .as_data()
                 .unwrap(),
-            tss::ticket(&state.restore.ticket).unwrap()
+            tss::ticket(&state.context.restore.ticket).unwrap()
         );
     }
     assert_eq!(replies.position(), replies.get_ref().len() as u64);
@@ -1871,7 +1884,7 @@ fn nor_formats_preserve_firmware_order_and_separate_llb_and_sep_images() {
         .collect();
     let file = fixture_files(None, false, &files);
     let mut state = restore_state(file.path());
-    let manifest = manifest_mut(&mut state.restore.identity);
+    let manifest = manifest_mut(&mut context_mut(&mut state).restore.identity);
     for (name, path) in names.into_iter().zip(&paths) {
         let mut entry = component_entry(path, &bytes);
         entry
@@ -1898,7 +1911,7 @@ fn nor_formats_preserve_firmware_order_and_separate_llb_and_sep_images() {
             .insert("IsFirmwarePayload".into(), (name != "SEP").into());
         manifest.insert(name.into(), entry);
     }
-    let id = state.restore.identity.clone();
+    let id = state.context.restore.identity.clone();
     let mut expected = plist::Dictionary::new();
     for name in names {
         expected.insert(
@@ -1906,7 +1919,7 @@ fn nor_formats_preserve_firmware_order_and_separate_llb_and_sep_images() {
             Value::Data(
                 state
                     .ipsw
-                    .personalized(&id, name, &state.restore.ticket)
+                    .personalized(&id, name, &state.context.restore.ticket)
                     .unwrap(),
             ),
         );
@@ -1999,9 +2012,9 @@ fn large_nor_reply_crosses_mux_windows_and_allows_the_next_checkpoint() {
             .as_dictionary_mut()
             .unwrap()
             .insert("IsFirmwarePayload".into(), (name != "SEP").into());
-        manifest_mut(&mut state.restore.identity).insert(name.into(), entry);
+        manifest_mut(&mut context_mut(&mut state).restore.identity).insert(name.into(), entry);
     }
-    let id = state.restore.identity.clone();
+    let id = state.context.restore.identity.clone();
     let mut expected = plist::Dictionary::new();
     for name in names {
         expected.insert(
@@ -2009,7 +2022,7 @@ fn large_nor_reply_crosses_mux_windows_and_allows_the_next_checkpoint() {
             Value::Data(
                 state
                     .ipsw
-                    .personalized(&id, name, &state.restore.ticket)
+                    .personalized(&id, name, &state.context.restore.ticket)
                     .unwrap(),
             ),
         );
