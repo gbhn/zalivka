@@ -97,7 +97,7 @@ enum Command {
         #[arg(long)]
         firmware_dir: Option<PathBuf>,
     },
-    /// Experimental erase restore. See README.md and docs/validation.md for tested scenarios.
+    /// Experimental erase restore.
     Restore {
         #[command(flatten)]
         args: RestoreArgs,
@@ -332,7 +332,6 @@ pub(super) fn run() -> Result<()> {
                     "identity": summary, "filesystem_bytes": ipsw.size(identity.path("OS")?)?,
                     "boot_components_verified": true, "hardware_restore_validated": false,
                     "validation_scope": "this plan checks boot components; it does not perform a hardware restore",
-                    "hardware_validation_report": "docs/validation.md",
                     "limitations": ["firmware updaters require explicit device requests or an unambiguous namespace with a verified plist payload bundle", "reconnection requires restored to continue and issue fresh data requests; no byte-offset replay"],
                     "iboot_firmware_stages": stages,
                     "runtime_operations_known": false

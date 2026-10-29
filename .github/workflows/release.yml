@@ -1,0 +1,134 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: python
+        run: |
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          version = os.environ['GITHUB_REF_NAME'].removeprefix('v')
+          number = r'(?:0|[1-9][0-9]*)'
+          identifier = rf'(?:{number}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver = rf'{number}\.{number}\.{number}(?:-{identifier}(?:\.{identifier})*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?'
+          if not re.fullmatch(semver, version):
+              raise SystemExit(f'Invalid release tag: {os.environ["GITHUB_REF_NAME"]}. Use vMAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH (optionally with SemVer prerelease/build metadata).')
+
+          manifest = Path('Cargo.toml')
+          package = tomllib.loads(manifest.read_text(encoding='utf-8'))['package']
+          text, count = re.subn(r'(?m)^version = "[^"]+"$', f'version = "{version}"', manifest.read_text(encoding='utf-8'), count=1)
+          if count != 1 or tomllib.loads(text)['package']['version'] != version:
+              raise SystemExit('Could not set package version in Cargo.toml')
+          lock = Path('Cargo.lock')
+          pattern = rf'(\[\[package\]\]\nname = "{re.escape(package["name"])}"\nversion = ")[^"]+("\n)'
+          lock_text, count = re.subn(pattern, rf'\g<1>{version}\g<2>', lock.read_text(encoding='utf-8'))
+          if count != 1:
+              raise SystemExit('Could not set package version in Cargo.lock')
+          manifest.write_text(text, encoding='utf-8')
+          lock.write_text(lock_text, encoding='utf-8')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'ZALIVKA_RELEASE_VERSION={version}\n')
+          print(f'Release version: {version}')
+      - name: Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - name: Rust tools
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target ${{ matrix.target }}
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --locked --all-features
+      - name: Build and package
+        shell: pwsh
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          BUILD_PLATFORM: ${{ matrix.platform }}
+        run: |
+          $executable = & ./scripts/build.ps1 -Target $env:BUILD_TARGET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $info = Get-Content -LiteralPath ($executable + '.json') -Raw | ConvertFrom-Json
+          Copy-Item README.md, LICENSE -Destination artifacts
+          New-Item -ItemType Directory -Path dist | Out-Null
+          $name = 'zalivka-' + $info.version + '-' + $env:BUILD_PLATFORM
+          if ($IsWindows) {
+              $archive = $name + '.zip'
+              Compress-Archive -Path artifacts/* -DestinationPath (Join-Path dist $archive)
+          } else {
+              Copy-Item packaging/70-zalivka.rules -Destination artifacts
+              $archive = $name + '.tar.gz'
+              tar -czf (Join-Path dist $archive) -C artifacts .
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $hash = (Get-FileHash -LiteralPath (Join-Path dist $archive) -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content -LiteralPath (Join-Path dist ($archive + '.sha256')) -Encoding utf8NoBOM
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zalivka-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: zalivka-*
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          flags=()
+          if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
+            flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" dist/* \
+            --verify-tag --generate-notes --title "Zalivka $RELEASE_TAG" "${flags[@]}"

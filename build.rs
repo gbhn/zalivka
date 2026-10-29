@@ -13,6 +13,15 @@ fn git(arguments: &[&str]) -> Option<String> {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=ZALIVKA_RELEASE_VERSION");
+    let package_version = env::var("CARGO_PKG_VERSION").expect("package version");
+    let release_version = env::var("ZALIVKA_RELEASE_VERSION").ok();
+    if let Some(version) = &release_version {
+        assert_eq!(
+            version, &package_version,
+            "release and package versions differ"
+        );
+    }
     #[cfg(feature = "gui")]
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         winresource::WindowsResource::new()
@@ -71,8 +80,13 @@ fn main() {
         .as_nanos();
     let id = format!("{revision}{}.{built_at}", if dirty { ".dirty" } else { "" });
     println!("cargo:rustc-env=ZALIVKA_BUILT_AT={built_at}");
-    println!(
-        "cargo:rustc-env=ZALIVKA_VERSION={}+{id}",
-        env::var("CARGO_PKG_VERSION").expect("package version")
-    );
+    let version = release_version.unwrap_or_else(|| {
+        let separator = if package_version.contains('+') {
+            '.'
+        } else {
+            '+'
+        };
+        format!("{package_version}{separator}{id}")
+    });
+    println!("cargo:rustc-env=ZALIVKA_VERSION={version}");
 }

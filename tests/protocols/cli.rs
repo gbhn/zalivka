@@ -32,7 +32,6 @@ fn cli_inspection_and_offline_plan_run_without_usb() {
     assert_eq!(output["boot_components_verified"], true);
     assert_eq!(output["runtime_operations_known"], false);
     assert_eq!(output["hardware_restore_validated"], false);
-    assert_eq!(output["hardware_validation_report"], "docs/validation.md");
     assert!(
         !output["limitations"]
             .to_string()
@@ -52,7 +51,18 @@ fn executable_version_identifies_the_exact_build() {
         String::from_utf8(result.stdout).unwrap().trim(),
         format!("zalivka {}", zalivka::VERSION)
     );
-    assert!(zalivka::VERSION.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")));
+    let package_version = env!("CARGO_PKG_VERSION");
+    if let Some(version) = option_env!("ZALIVKA_RELEASE_VERSION") {
+        assert_eq!(zalivka::VERSION, version);
+        assert_eq!(version, package_version);
+        return;
+    }
+    let separator = if package_version.contains('+') {
+        '.'
+    } else {
+        '+'
+    };
+    assert!(zalivka::VERSION.starts_with(&format!("{package_version}{separator}")));
     let mut parts = zalivka::VERSION.rsplit('.');
     let built_at = parts.next().unwrap().parse::<u128>().unwrap();
     assert!(built_at > 0);
