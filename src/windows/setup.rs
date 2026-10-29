@@ -1,6 +1,6 @@
 //! Windows host preparation. The embedded Apple CABs are unmodified signed packages.
 use super::{wide, windows_directory};
-pub(crate) mod cleanup;
+mod cleanup;
 mod log;
 mod token;
 use crate::{device::Mode, drivers::HostStatus, usb::APPLE_VENDOR};
@@ -36,6 +36,74 @@ use windows_sys::Win32::{
 };
 
 const SERVICE: &str = "Apple Mobile Device Service";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Action {
+    Prepare,
+    Reset,
+}
+
+impl Action {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Prepare => "prepare",
+            Self::Reset => "reset",
+        }
+    }
+
+    fn elevated(self) -> Outcome {
+        let mut reboot = false;
+        let result = match self {
+            Self::Prepare => prepare_elevated(&mut reboot),
+            Self::Reset => cleanup::reset_elevated(&mut reboot),
+        };
+        Outcome { result, reboot }
+    }
+}
+
+/// A later failure cannot undo an earlier request to restart Windows.
+struct Outcome {
+    result: Result<()>,
+    reboot: bool,
+}
+
+impl Outcome {
+    fn from_exit_code(action: Action, code: u32) -> Self {
+        Self {
+            result: if matches!(code, 0 | 3010) {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "Windows driver {} exited with code {code}. See the installer journal above.",
+                    action.name()
+                ))
+            },
+            reboot: matches!(code, 3010 | 3017),
+        }
+    }
+
+    fn exit_code(&self) -> u32 {
+        match (self.result.is_ok(), self.reboot) {
+            (true, false) => 0,
+            (false, false) => 1,
+            (true, true) => 3010,
+            (false, true) => 3017,
+        }
+    }
+
+    fn finish(self) -> Result<bool> {
+        if self.reboot {
+            crate::progress::Event::RebootRequired.emit();
+            crate::log!(
+                Warning,
+                "drivers",
+                "Restart Windows before restoring the Mac."
+            );
+        }
+        self.result?;
+        Ok(self.reboot)
+    }
+}
 
 fn architecture() -> Result<&'static str> {
     let mut process = 0;
@@ -133,7 +201,7 @@ fn stop_service() -> Result<()> {
     }
 }
 
-pub(crate) fn prepare_elevated() -> Result<bool> {
+fn prepare_elevated(reboot: &mut bool) -> Result<()> {
     let started = Instant::now();
     let admin = unsafe { IsUserAnAdmin() } != 0;
     crate::log!(
@@ -165,7 +233,6 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
     );
     // Check the service first; don't replace the driver if stopping the conflict fails.
     stop_service().context("Windows setup: stopping Apple service")?;
-    let mut reboot = false;
     if !super::package::installed()? {
         let directory = tempfile::Builder::new()
             .prefix("zalivka-apple-usb-")
@@ -180,7 +247,8 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
         let inf = super::package::unpack(directory.path(), arch)
             .context("Windows setup: extracting Apple package")?;
         // Windows verifies the original CAT. No forced ranking or signing bypass.
-        reboot = crate::drivers::install(&inf).context("Windows setup: installing Apple driver")?;
+        *reboot |=
+            super::package::install(&inf).context("Windows setup: installing Apple driver")?;
     } else {
         crate::log!(Info, "drivers", "Apple package already installed");
     }
@@ -206,54 +274,58 @@ pub(crate) fn prepare_elevated() -> Result<bool> {
         "Completed in {:.3} s; reboot={reboot}",
         started.elapsed().as_secs_f64()
     );
-    Ok(reboot)
+    Ok(())
 }
 
-pub(crate) fn prepare() -> Result<bool> {
+pub(crate) fn run(action: Action) -> Result<bool> {
+    let admin = unsafe { IsUserAnAdmin() } != 0;
     crate::log!(
         Debug,
         "drivers:auth",
         "PID={}; IsUserAnAdmin={}",
         std::process::id(),
-        unsafe { IsUserAnAdmin() } != 0
+        admin
     );
-    let host = status()?;
-    crate::log!(
-        Debug,
-        "drivers:status",
-        "Before installation: {}",
-        serde_json::to_string(&host)?
-    );
-    if !host.needs_preparation() {
-        crate::log!(Info, "drivers", "Driver already installed");
-        verify_connected_devices(false)?;
-        return Ok(false);
+    if action == Action::Prepare {
+        let host = status()?;
+        crate::log!(
+            Debug,
+            "drivers:status",
+            "Before installation: {}",
+            serde_json::to_string(&host)?
+        );
+        if !host.needs_preparation() {
+            crate::log!(Info, "drivers", "Driver already installed");
+            verify_connected_devices(false)?;
+            return Ok(false);
+        }
     }
-    if unsafe { IsUserAnAdmin() } != 0 {
-        let reboot = prepare_elevated()?;
+
+    let outcome = if admin {
+        action.elevated()
+    } else {
+        crate::log!(Info, "drivers:uac", "Approve the administrator prompt");
+        Outcome::from_exit_code(action, run_elevated(action)?)
+    };
+    // Publish the restart requirement before any error or caller-side checks.
+    // The elevated account may differ from the account that owns this process.
+    let reboot = outcome.finish()?;
+    if action == Action::Prepare {
+        if !admin {
+            let host = status()?;
+            crate::log!(
+                Debug,
+                "drivers:status",
+                "After UAC: {}",
+                serde_json::to_string(&host)?
+            );
+            ensure!(
+                !host.needs_preparation(),
+                "Windows setup could not be confirmed. Open USB diagnostics."
+            );
+        }
         verify_connected_devices(reboot)?;
-        return Ok(reboot);
     }
-    crate::log!(Info, "drivers:uac", "Approve the administrator prompt");
-    let code = run_elevated("prepare")?;
-    ensure!(
-        code == 0 || code == 3010,
-        "Windows setup exited with code {code}. See the installer messages above."
-    );
-    // Elevated credentials can belong to another account; recheck this user's view too.
-    let host = status()?;
-    crate::log!(
-        Debug,
-        "drivers:status",
-        "After UAC: {}",
-        serde_json::to_string(&host)?
-    );
-    ensure!(
-        !host.needs_preparation(),
-        "Windows setup could not be confirmed. Open USB diagnostics."
-    );
-    let reboot = code == 3010;
-    verify_connected_devices(reboot)?;
     Ok(reboot)
 }
 
@@ -324,9 +396,10 @@ pub(crate) fn open_installed_apps() -> Result<()> {
 }
 
 /// Run a specific Zalivka helper through Windows UAC.
-pub(crate) fn run_elevated(action: &str) -> Result<u32> {
+fn run_elevated(action: Action) -> Result<u32> {
     let started = Instant::now();
     let pipe = log::LogPipe::new()?;
+    let action = action.name();
     let parameters = format!("--driver-helper {action} {}", pipe.id);
     let mut pipe = Some(pipe);
     crate::log!(
@@ -413,10 +486,11 @@ pub(crate) fn run_helper() -> Option<u32> {
     }
     let result = (|| -> Result<u32> {
         let action = args.next().context("missing driver helper action")?;
-        ensure!(
-            action == "prepare" || action == "reset",
-            "invalid driver helper action"
-        );
+        let action = match action.to_str() {
+            Some("prepare") => Action::Prepare,
+            Some("reset") => Action::Reset,
+            _ => bail!("invalid driver helper action"),
+        };
         let id = args
             .next()
             .and_then(|id| id.into_string().ok())
@@ -424,16 +498,11 @@ pub(crate) fn run_helper() -> Option<u32> {
             .parse::<uuid::Uuid>()?;
         ensure!(args.next().is_none(), "unexpected driver helper arguments");
         crate::logging::connect_elevated(id)?;
-        if action == "prepare" {
-            Ok(if prepare_elevated()? { 3010 } else { 0 })
-        } else {
-            let mut reboot = false;
-            if let Err(error) = cleanup::reset_elevated(&mut reboot) {
-                crate::log!(Error, "drivers:reset", "{error:#}");
-                return Ok(if reboot { 3017 } else { 1 });
-            }
-            Ok(if reboot { 3010 } else { 0 })
+        let outcome = action.elevated();
+        if let Err(error) = &outcome.result {
+            crate::log!(Error, "drivers:uac", "{error:#}");
         }
+        Ok(outcome.exit_code())
     })();
     Some(result.unwrap_or_else(|error| {
         crate::log!(Error, "drivers:uac", "{error:#}");

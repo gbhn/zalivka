@@ -1,5 +1,6 @@
 //! Remove only Apple restore devnodes; leave driver packages in DriverStore intact.
-use super::{architecture, run_elevated, stop_service, wide};
+use super::{architecture, stop_service, wide};
+use crate::windows::DeviceInfoSet;
 use anyhow::{Context, Result, ensure};
 use std::{
     io,
@@ -35,13 +36,6 @@ fn is_restore_device(instance: &str) -> bool {
     pid.len() == 4
         && u16::from_str_radix(pid, 16)
             .is_ok_and(|pid| crate::device::Mode::from_pid(pid).is_some() || pid == 0x12ac)
-}
-
-struct Set(HDEVINFO);
-impl Drop for Set {
-    fn drop(&mut self) {
-        unsafe { SetupDiDestroyDeviceInfoList(self.0) };
-    }
 }
 
 struct DriverPrivilege {
@@ -122,7 +116,7 @@ impl Drop for DriverPrivilege {
     }
 }
 
-fn devices() -> Result<(Set, Vec<(String, SP_DEVINFO_DATA)>)> {
+fn devices() -> Result<(DeviceInfoSet, Vec<(String, SP_DEVINFO_DATA)>)> {
     // Deliberately omit DIGCF_PRESENT: stale, disconnected records matter here.
     let raw = unsafe {
         SetupDiGetClassDevsW(
@@ -137,7 +131,7 @@ fn devices() -> Result<(Set, Vec<(String, SP_DEVINFO_DATA)>)> {
         "USB device list: {}",
         io::Error::last_os_error()
     );
-    let set = Set(raw);
+    let set = DeviceInfoSet(raw);
     let mut devices = Vec::new();
     for index in 0.. {
         let mut data: SP_DEVINFO_DATA = unsafe { std::mem::zeroed() };
@@ -206,7 +200,7 @@ fn with_rescan(
     }
 }
 
-pub(crate) fn reset_elevated(reboot: &mut bool) -> Result<()> {
+pub(super) fn reset_elevated(reboot: &mut bool) -> Result<()> {
     crate::log!(
         Debug,
         "drivers:reset",
@@ -246,40 +240,14 @@ pub(crate) fn reset_elevated(reboot: &mut bool) -> Result<()> {
                 );
             }
             // Keep all DriverStore packages: reinstall the original signed package with normal ranking.
-            *reboot |= crate::drivers::install(&inf).context("Reinstalling Apple USB driver")?;
+            *reboot |=
+                crate::windows::package::install(&inf).context("Reinstalling Apple USB driver")?;
             Ok(())
         },
         rescan,
     )?;
     crate::log!(Info, "drivers:reset", "Complete; reboot={reboot}");
     Ok(())
-}
-
-pub(crate) fn reset() -> Result<bool> {
-    let mut reboot = false;
-    let result = if unsafe { IsUserAnAdmin() } != 0 {
-        reset_elevated(&mut reboot)
-    } else {
-        let code = run_elevated("reset")?;
-        reboot = matches!(code, 3010 | 3017);
-        if code == 0 || code == 3010 {
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!(
-                "USB driver reset exited with code {code}. See the journal above."
-            ))
-        }
-    };
-    if reboot {
-        crate::progress::Event::RebootRequired.emit();
-        crate::log!(
-            Warning,
-            "drivers",
-            "Restart Windows before restoring the Mac."
-        );
-    }
-    result?;
-    Ok(reboot)
 }
 
 #[cfg(test)]

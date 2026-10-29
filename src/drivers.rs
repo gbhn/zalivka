@@ -49,7 +49,7 @@ pub fn check_host() -> Result<()> {
 
 pub fn prepare_windows() -> Result<bool> {
     #[cfg(windows)]
-    return crate::windows::setup::prepare();
+    return crate::windows::setup::run(crate::windows::setup::Action::Prepare);
     #[cfg(not(windows))]
     anyhow::bail!("Driver setup is only available on Windows")
 }
@@ -62,7 +62,7 @@ pub fn run_elevated_helper() -> Option<u32> {
 /// Remove Apple restore device records and reinstall the signed USB package.
 pub fn reset_windows() -> Result<bool> {
     #[cfg(windows)]
-    return crate::windows::setup::cleanup::reset();
+    return crate::windows::setup::run(crate::windows::setup::Action::Reset);
     #[cfg(not(windows))]
     anyhow::bail!("USB driver reset is only available on Windows")
 }
@@ -248,110 +248,8 @@ pub fn export(directory: &Path, pid: u16, interface: Option<u8>) -> Result<()> {
 }
 
 #[cfg(windows)]
-#[allow(unsafe_code)]
 pub fn install(inf: &Path) -> Result<bool> {
-    use std::{
-        io::{Read, Seek, SeekFrom},
-        time::Instant,
-    };
-    let inf = inf
-        .canonicalize()
-        .with_context(|| format!("Opening INF: {}", inf.display()))?;
-    ensure!(
-        inf.extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("inf")),
-        "expected a signed driver package's .inf file"
-    );
-    let setupapi = crate::windows::windows_directory()?.join(r"INF\setupapi.dev.log");
-    let offset = std::fs::metadata(&setupapi).map(|m| m.len()).unwrap_or(0);
-    crate::log!(Info, "drivers", "Installing driver: {}", inf.display());
-    crate::log!(
-        Trace,
-        "drivers:install",
-        "DiInstallDriverW; flags=0; journal={}; offset={offset}",
-        setupapi.display()
-    );
-    let path = crate::windows::wide(&inf);
-    let started = Instant::now();
-    let mut reboot = 0;
-    // Use Windows' normal signature and driver ranking enforcement. No FORCE flag.
-    let ok = unsafe {
-        windows_sys::Win32::Devices::DeviceAndDriverInstallation::DiInstallDriverW(
-            std::ptr::null_mut(),
-            path.as_ptr(),
-            0,
-            &mut reboot,
-        )
-    };
-    if ok == 0 {
-        let error = std::io::Error::last_os_error();
-        let code = error.raw_os_error().unwrap_or(0) as u32;
-        crate::log!(
-            Error,
-            "drivers:install",
-            "DiInstallDriverW: 0x{code:08X}; {error}"
-        );
-        let read_log = (|| -> Result<()> {
-            let mut file = File::open(&setupapi)?;
-            let end = file.metadata()?.len();
-            // Include only this attempt; bound memory if Windows logs heavily.
-            let start = if offset <= end { offset } else { 0 };
-            let bounded = start.max(end.saturating_sub(65536));
-            file.seek(SeekFrom::Start(bounded))?;
-            let mut bytes = Vec::new();
-            file.take(65536).read_to_end(&mut bytes)?;
-            if bytes.is_empty() {
-                crate::log!(
-                    Debug,
-                    "drivers:log",
-                    "No new records: {}",
-                    setupapi.display()
-                );
-            } else {
-                crate::log!(
-                    Trace,
-                    "drivers:log",
-                    "{bounded}..{end}: {}",
-                    setupapi.display()
-                );
-                // SetupAPI logs can be UTF-16LE; detect its BOM or ASCII NULs.
-                let text = if bytes.starts_with(&[0xff, 0xfe]) || bytes.get(1) == Some(&0) {
-                    let bytes = bytes.strip_prefix(&[0xff, 0xfe]).unwrap_or(&bytes);
-                    String::from_utf16_lossy(
-                        &bytes
-                            .as_chunks::<2>()
-                            .0
-                            .iter()
-                            .map(|b| u16::from_le_bytes(*b))
-                            .collect::<Vec<_>>(),
-                    )
-                } else {
-                    String::from_utf8_lossy(&bytes).into_owned()
-                };
-                for line in text.lines().filter(|line| !line.trim().is_empty()) {
-                    crate::log!(Debug, "drivers:log", "{line}");
-                }
-            }
-            Ok(())
-        })();
-        if let Err(log_error) = read_log {
-            crate::log!(
-                Warning,
-                "drivers:log",
-                "Could not read {}: {log_error:#}",
-                setupapi.display()
-            );
-        }
-        return Err(error).with_context(|| format!("driver installation failed: DiInstallDriverW, Win32 {code} (0x{code:08X}), INF={} (requires administrator rights and a signed package)", inf.display()));
-    }
-    crate::log!(
-        Info,
-        "drivers:install",
-        "Installed in {:.3} s; reboot={}",
-        started.elapsed().as_secs_f64(),
-        reboot != 0
-    );
-    Ok(reboot != 0)
+    crate::windows::package::install(inf)
 }
 
 #[cfg(not(windows))]

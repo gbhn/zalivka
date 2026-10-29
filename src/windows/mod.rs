@@ -28,9 +28,23 @@ type Ioctl = unsafe extern "system" fn(
     *mut OVERLAPPED,
 ) -> i32;
 
+/// Own a SetupAPI set, including its associated device and driver information.
+struct DeviceInfoSet(windows_sys::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO);
+
+impl Drop for DeviceInfoSet {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper owns the set returned by SetupAPI.
+        unsafe {
+            windows_sys::Win32::Devices::DeviceAndDriverInstallation::SetupDiDestroyDeviceInfoList(
+                self.0,
+            )
+        };
+    }
+}
+
 pub(crate) mod apple;
 pub(crate) mod negotiate;
-mod package;
+pub(crate) mod package;
 pub(crate) mod proxy;
 pub(crate) mod reset;
 pub(crate) mod setup;

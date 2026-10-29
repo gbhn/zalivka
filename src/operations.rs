@@ -135,9 +135,6 @@ pub fn doctor() -> Result<Vec<drivers::UsbDiagnostic>> {
 pub fn prepare_windows() -> Result<()> {
     let reboot = drivers::prepare_windows()?;
     crate::log!(Info, "drivers", "Setup complete; reboot={reboot}");
-    if reboot {
-        progress::Event::RebootRequired.emit();
-    }
     Ok(())
 }
 
