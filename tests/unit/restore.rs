@@ -1,11 +1,12 @@
 use super::boot::{IBootStep, iboot_stage, reconnect_after_ibss};
 use super::connection::confirm_restore_service;
+use super::events::{log_checkpoint, log_progress, operation_weights, record_message};
 use super::file_data::{FILE_DATA_BATCH, FileDataWriter, send_file_data};
 use super::keys::{ImagePrefix, key_exchange};
-use super::session::{
-    acknowledge_final_status, finish_final_status, log_checkpoint, log_progress, operation_weights,
-    provisioning_failed, record_message, wait_for_restore_close,
-};
+use super::session::{acknowledge_final_status, finish_final_status, wait_for_restore_close};
+
+#[path = "restore/session.rs"]
+mod session_tests;
 use super::*;
 
 #[test]
@@ -740,7 +741,7 @@ fn checkpoint_results_do_not_replace_final_restore_status() {
                 ("CHECKPOINT_COMPLETE", complete.into()),
             ]);
             let mut output = Vec::new();
-            let event = log_checkpoint(&checkpoint, |record| output.push(record)).unwrap();
+            let (event, _) = log_checkpoint(&checkpoint, |record| output.push(record)).unwrap();
             assert_eq!(
                 event,
                 crate::progress::Event::Checkpoint {
@@ -865,8 +866,7 @@ fn offline_ucrt_warns_even_when_checkpoints_and_final_status_report_success() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     for checkpoint in &messages[..2] {
-        log_checkpoint(checkpoint, |_| {}).unwrap();
-        assert!(provisioning_failed(checkpoint));
+        assert!(log_checkpoint(checkpoint, |_| {}).unwrap().1);
         assert_eq!(
             wire::get(checkpoint, &["CHECKPOINT_RESULT"])
                 .unwrap()
@@ -898,20 +898,25 @@ fn offline_ucrt_warns_even_when_checkpoints_and_final_status_report_success() {
             .as_dictionary_mut()
             .unwrap()
             .insert(key.into(), value);
-        assert_eq!(provisioning_failed(&checkpoint), expected, "{checkpoint:?}");
+        assert_eq!(
+            log_checkpoint(&checkpoint, |_| {}).unwrap().1,
+            expected,
+            "{checkpoint:?}"
+        );
     }
     let healthy = wire::dict([
+        ("CHECKPOINT_ID", 1u64.into()),
         ("CHECKPOINT_NAME", "create_production_dcrt".into()),
         ("CHECKPOINT_COMPLETE", true.into()),
         ("CHECKPOINT_RESULT", 0i64.into()),
     ]);
-    assert!(!provisioning_failed(&healthy));
+    assert!(!log_checkpoint(&healthy, |_| {}).unwrap().1);
     let mut failed = healthy;
     failed
         .as_dictionary_mut()
         .unwrap()
         .insert("CHECKPOINT_RESULT".into(), (-1i64).into());
-    assert!(provisioning_failed(&failed));
+    assert!(log_checkpoint(&failed, |_| {}).unwrap().1);
 }
 
 #[test]

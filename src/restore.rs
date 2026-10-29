@@ -4,6 +4,7 @@ mod boot;
 mod connection;
 mod data;
 mod data_type;
+mod events;
 mod file_data;
 mod images;
 mod keys;
@@ -158,7 +159,13 @@ pub(crate) fn run(
             assets,
         }),
     };
-    session::run(&mut state, bootx_error, log, attestation)
+    session::run(
+        &mut state,
+        bootx_error,
+        log,
+        attestation,
+        connection::wait_restored,
+    )
 }
 
 #[cfg(test)]
