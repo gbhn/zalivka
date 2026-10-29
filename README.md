@@ -50,7 +50,13 @@ Reset temporarily disconnects Apple DFU, Recovery, and Restore devices.
 
 ### Linux USB setup
 
-Install the bundled udev rule from the directory containing the renamed binary:
+In the GUI, open **Settings → USB access → Install USB access rules**.
+Zalivka requests administrator authentication through Polkit (`pkexec`), then
+installs the bundled rule and reloads udev. A desktop Polkit authentication agent
+must be running; the GUI itself stays under your normal user account.
+
+For a terminal session, or if Polkit is unavailable, install the same rule from
+the directory containing the renamed binary:
 
 ```sh
 sudo ./zalivka drivers install-udev
@@ -58,6 +64,15 @@ sudo ./zalivka drivers install-udev
 
 Reconnect the USB cable after installation. The rule grants access to the active
 local session. Use `zalivka doctor` to diagnose access or interface claim errors.
+
+For Mac restore mode (`05ac:12ac`), the rule also clears usbmuxd's udev activation
+and assigns USB access to root/the active local user instead of the usbmux
+account. It runs after `39-usbmuxd.rules` and before the seat ACL rule, preventing
+usbmuxd from claiming the restore interface while leaving normal iPhone/iPad
+IDs alone. Reinstall the rule after updating Zalivka; the installer can upgrade
+the previous bundled version and preserves custom administrator rules. If
+usbmuxd already has the Mac open, stop it once and reconnect/re-enter DFU before
+retrying. A root-run usbmuxd can bypass device permissions and must be stopped.
 
 ## Command-line usage
 
@@ -105,9 +120,53 @@ options.
 ## Network access and activation
 
 The host needs access to Apple services for firmware downloads and restoration.
-On Windows, Zalivka uses the current user's proxy settings, including PAC/WPAD,
-and supports Negotiate/NTLM proxy authentication through Windows SSPI. HTTPS
-validation uses the Windows trust store, including corporate roots.
+Proxy selection is shared by firmware/asset downloads, TSS signing requests,
+and FDR tunnels. No proxy configuration inside Zalivka is required.
+
+| Capability | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| System proxy settings and exclusions | libproxy: GNOME, KDE, sysconfig | CFNetwork: active system settings | Current-user Windows settings |
+| Automatic proxy configuration (PAC) | Native libproxy PAC engine | Native CFNetwork PAC engine | WinHTTP |
+| WPAD | DNS discovery through libproxy | System referrals, cached DHCP option 252, then DNS | WinHTTP discovery |
+| Current-user Kerberos / Negotiate | System GSSAPI credential cache | Apple GSS.framework / SSO | SSPI |
+| NTLM | GSS NTLM provider, if installed | Requires an available GSS NTLM provider | SSPI |
+| Corporate certificate authorities | System certificate store | System certificate store | Windows certificate store |
+
+HTTP CONNECT, TLS to an HTTPS proxy, SOCKS4/4a and SOCKS5/5h are supported.
+On macOS, the **Secure Web Proxy (HTTPS)** system setting specifies an HTTP
+CONNECT proxy for HTTPS destinations; `https://` in an environment proxy URL
+specifies TLS to the proxy itself. Explicit proxy URL credentials support HTTP
+Basic and SOCKS authentication.
+
+On Linux and macOS, a nonempty `HTTP_PROXY`/`HTTPS_PROXY` (or lowercase equivalent)
+overrides desktop settings for that destination scheme; `ALL_PROXY` is the
+fallback. `NO_PROXY`/`no_proxy` supplies exclusions for that environment proxy.
+For example:
+
+```sh
+HTTPS_PROXY=http://proxy.example:3128 zalivka fetch --ecid 0x123456789ABC
+HTTPS_PROXY=socks5h://proxy.example:1080 zalivka fetch --ecid 0x123456789ABC
+```
+
+Windows keeps its system-settings-first policy, with environment settings used
+when no system policy is configured. PAC route lists on Linux and macOS are
+tried in order. A route can fall back to a direct connection only if the native
+resolver explicitly returns `DIRECT`. A failed connection can try the next
+configured route; a POST already sent to the destination is never replayed by
+proxy failover. PAC loading/evaluation and discovery behavior follow the native
+resolver, including the installed libproxy version's policy on PAC errors.
+
+Kerberos requires a valid ticket for the current user (domain login/SSO, or
+`kinit` on Linux), working realm/DNS configuration, and a registered
+`HTTP/proxy-host` service principal. Zalivka uses the existing credential cache;
+it does not prompt for a domain password or delegate user credentials. HTTP 407
+Negotiate challenges and the server's final mutual-authentication token are
+processed before the tunnel becomes usable. Linux NTLM additionally needs a
+provider such as `gss-ntlmssp` and credentials available to that provider.
+
+On Debian/Ubuntu, Linux runtime dependencies are `libproxy1v5` and
+`libgssapi-krb5-2`, including the distribution's desktop/PAC libproxy modules.
+macOS uses built-in CFNetwork, SystemConfiguration and GSS frameworks.
 
 For FDR, the target Mac establishes TLS through Zalivka's tunnel. The network
 must allow CONNECT to `tbsc.apple.com:443` without TLS interception; the host's
@@ -120,10 +179,10 @@ an activation screen. A successful restore does not confirm activation.
 
 Requirements: Rust 1.99 or newer and native compiler/linker tools for the chosen
 target. Windows MSVC builds need the matching Visual C++ build tools. On Ubuntu,
-install the GUI dependencies used by CI:
+install the network and GUI development dependencies used by CI:
 
 ```sh
-sudo apt-get install libxkbcommon-dev libwayland-dev
+sudo apt-get install libxkbcommon-dev libwayland-dev libproxy-dev libkrb5-dev libclang-dev
 ```
 
 Build a release executable with both interfaces:
@@ -164,10 +223,30 @@ JSON records the version, SHA-256, timestamp, compiler, target, profile, and
 enabled features. An existing executable with the same version is reused only
 if its SHA-256 matches; a different binary is not overwritten.
 
+The Linux desktop proxy tests require `gsettings-desktop-schemas` and
+`libglib2.0-bin`. They use temporary GNOME/KDE configurations and leave the
+user's settings untouched. Two optional integration tests also use disposable
+configuration and credentials:
+
+```sh
+# Needs krb5-kdc, krb5-admin-server, krb5-user and Python 3.
+cargo test --all-features --lib kerberos_authenticates_http_and_fdr_tunnels -- --ignored
+# Needs libnss-wrapper and free local TCP port 80.
+ZALIVKA_NSS_WRAPPER=/usr/lib/x86_64-linux-gnu/libnss_wrapper.so \
+  cargo test --all-features --lib wpad_discovers -- --ignored
+```
+
+The Kerberos fixture starts a temporary KDC on a loopback high port and checks
+HTTP and FDR authentication with actual tickets. The WPAD fixture maps `wpad`
+to loopback only in its child process. Neither changes system DNS, network
+settings, Kerberos configuration, or the user's credential cache.
+
 ## GitHub Actions and releases
 
 The [Check workflow](.github/workflows/check.yml) runs formatting, Clippy, and
-tests on Windows and Linux for pushes and pull requests.
+tests on Windows, Linux, and macOS for pushes and pull requests. Linux checks
+also exercise a disposable local Kerberos realm. macOS checks compile against
+the Apple SDK and exercise native CFNetwork PAC resolution.
 
 The [Build and release workflow](.github/workflows/release.yml) builds Windows
 x64 and Linux x64 packages after the same checks. Push a version tag on a commit

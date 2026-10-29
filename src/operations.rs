@@ -143,3 +143,14 @@ pub fn reset_drivers() -> Result<()> {
     crate::log!(Info, "drivers", "Reset complete; reboot={reboot}");
     Ok(())
 }
+
+/// Configure Linux USB access through a desktop administrator prompt.
+pub fn prepare_linux() -> Result<()> {
+    drivers::prepare_linux()?;
+    crate::log!(
+        Info,
+        "udev",
+        "USB access configured. Reconnect the USB cable."
+    );
+    Ok(())
+}

@@ -179,15 +179,8 @@ fn run(attempts: Vec<Attempt>, attestation_mode: u64, log: Option<File>) -> Run 
         Value::Data(b"synthetic restore ticket".to_vec()),
     )]);
     let attestation = Attestation::new(&identity, &device, &ticket).unwrap();
-    let mut archive = tempfile::NamedTempFile::new().unwrap();
-    {
-        let mut zip = zip::ZipWriter::new(archive.as_file_mut());
-        zip.start_file(
-            "BuildManifest.plist",
-            zip::write::SimpleFileOptions::default(),
-        )
-        .unwrap();
-        wire::dict([
+    let archive = crate::test_support::ipsw(
+        &wire::dict([
             (
                 "BuildIdentities",
                 Value::Array(vec![identity.value.clone()]),
@@ -196,11 +189,10 @@ fn run(attempts: Vec<Attempt>, attestation_mode: u64, log: Option<File>) -> Run 
                 "SupportedProductTypes",
                 Value::Array(vec!["MacBookAir10,1".into()]),
             ),
-        ])
-        .to_writer_xml(&mut zip)
-        .unwrap();
-        zip.finish().unwrap();
-    }
+        ]),
+        &[],
+        zip::CompressionMethod::Stored,
+    );
     let mut state = RestoreSession {
         ipsw: Ipsw::open(archive.path()).unwrap(),
         context: Arc::new(RestoreContext {

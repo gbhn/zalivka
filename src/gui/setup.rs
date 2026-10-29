@@ -12,6 +12,7 @@ pub(super) enum Action {
     Verify,
     Doctor,
     PrepareWindows,
+    InstallUdev,
     ResetDrivers,
 }
 
@@ -24,6 +25,7 @@ impl Action {
             Self::Verify => "IPSW verification",
             Self::Doctor => "USB diagnostics",
             Self::PrepareWindows => "Windows setup",
+            Self::InstallUdev => "Linux USB setup",
             Self::ResetDrivers => "Reset Apple USB drivers",
         }
     }
@@ -35,6 +37,7 @@ impl Action {
             Self::Verify => "verify",
             Self::Doctor => "doctor",
             Self::PrepareWindows | Self::ResetDrivers => "drivers",
+            Self::InstallUdev => "udev",
         }
     }
     pub(super) fn completed_title(self) -> &'static str {
@@ -45,8 +48,15 @@ impl Action {
             Self::Verify => "IPSW verified",
             Self::Doctor => "Diagnostics complete",
             Self::PrepareWindows => "Windows setup complete",
+            Self::InstallUdev => "USB access configured",
             Self::ResetDrivers => "USB driver reset complete",
         }
+    }
+    pub(super) fn requires_admin(self) -> bool {
+        matches!(
+            self,
+            Self::PrepareWindows | Self::ResetDrivers | Self::InstallUdev
+        )
     }
     pub(super) fn writes_device(self) -> bool {
         matches!(self, Self::Revive | Self::Restore)
@@ -151,6 +161,7 @@ impl Setup {
                 );
             }
             Action::PrepareWindows => operations::prepare_windows()?,
+            Action::InstallUdev => operations::prepare_linux()?,
             Action::ResetDrivers => operations::reset_drivers()?,
         }
         Ok(())

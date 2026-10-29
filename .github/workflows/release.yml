@@ -66,9 +66,9 @@ jobs:
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
               output.write(f'ZALIVKA_RELEASE_VERSION={version}\n')
           print(f'Release version: {version}')
-      - name: Linux GUI dependencies
+      - name: Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libproxy-dev libkrb5-dev libclang-dev gsettings-desktop-schemas libglib2.0-bin
       - name: Rust tools
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target ${{ matrix.target }}
       - name: Format

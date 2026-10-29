@@ -207,3 +207,115 @@ fn proxy_environment_trims_addresses_and_falls_back_from_empty_uppercase_bypass(
         "proxy.invalid"
     );
 }
+
+#[test]
+fn system_routes_preserve_order_explicit_direct_and_unspecified_socks_fallback() {
+    let routes = routes_from_strings(vec![
+        "http://one.example:3128".into(),
+        "socks://two.example:1080".into(),
+        "direct://".into(),
+    ])
+    .unwrap();
+    assert_eq!(routes.len(), 4);
+    assert_eq!(routes[0].as_ref().unwrap().host(), "one.example");
+    assert_eq!(
+        routes[1].as_ref().unwrap().protocol(),
+        ureq::ProxyProtocol::Socks5h
+    );
+    assert_eq!(
+        routes[2].as_ref().unwrap().protocol(),
+        ureq::ProxyProtocol::Socks4A
+    );
+    assert!(routes[3].is_none());
+    let socks = routes_from_strings(vec!["socks5://remote.example:1080".into()]).unwrap();
+    assert_eq!(
+        socks[0].as_ref().unwrap().protocol(),
+        ureq::ProxyProtocol::Socks5h
+    );
+    assert!(routes_from_strings(vec![]).is_err());
+    assert!(routes_from_strings(vec!["bad proxy address".into()]).is_err());
+}
+
+#[test]
+fn pac_failover_only_retries_connection_failures_and_never_invents_direct() {
+    let proxies = || {
+        vec![
+            Some(Proxy::new("http://one.example:1").unwrap()),
+            Some(Proxy::new("http://two.example:2").unwrap()),
+        ]
+    };
+    let mut calls = Vec::new();
+    let result = try_routes(proxies(), |proxy| {
+        let proxy = proxy.unwrap();
+        calls.push(proxy.host().to_owned());
+        if proxy.port() == 1 {
+            Err(ConnectFailure(anyhow::anyhow!("connection refused")).into())
+        } else {
+            Ok(7)
+        }
+    })
+    .unwrap();
+    assert_eq!(result, 7);
+    assert_eq!(calls, ["one.example", "two.example"]);
+    calls.clear();
+    let error = try_routes(proxies(), |proxy| {
+        calls.push(proxy.unwrap().host().to_owned());
+        Err::<(), _>(anyhow::anyhow!("POST already sent; response lost"))
+    })
+    .unwrap_err();
+    assert_eq!(calls, ["one.example"]);
+    assert!(error.to_string().contains("POST already sent"));
+    let mut count = 0;
+    assert!(
+        try_routes(proxies(), |proxy| {
+            assert!(proxy.is_some());
+            count += 1;
+            Err::<(), _>(ConnectFailure(anyhow::anyhow!("offline")).into())
+        })
+        .is_err()
+    );
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn fdr_uses_the_next_pac_proxy_without_resolving_or_inspecting_the_target() {
+    use std::{net::TcpListener, thread, time::Duration};
+    let offline = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = offline.local_addr().unwrap();
+    drop(offline);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let available = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+            assert!(header.len() < 4096);
+        }
+        assert!(header.starts_with(b"CONNECT fdr.does-not-resolve.invalid:443 "));
+        stream
+            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            .unwrap();
+        let mut bytes = [0; 4];
+        stream.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"PING");
+        stream.write_all(b"PONG").unwrap();
+    });
+    let routes = routes_from_strings(vec![
+        format!("http://{address}"),
+        format!("http://{available}"),
+    ])
+    .unwrap();
+    let uri = target_uri("fdr.does-not-resolve.invalid", 443).unwrap();
+    let mut stream = try_routes(routes, |proxy| connect_via(&uri, proxy)).unwrap();
+    stream.write_all(b"PING").unwrap();
+    let mut bytes = [0; 4];
+    stream.read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"PONG");
+    server.join().unwrap();
+}

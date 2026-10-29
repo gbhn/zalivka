@@ -20,6 +20,8 @@ pub(super) fn connect<S: Connection>(
 ) -> Result<()> {
     #[cfg(windows)]
     let mut auth: Option<crate::windows::negotiate::Negotiate> = None;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let mut auth: Option<super::negotiate::Negotiate> = None;
     handshake(
         stream,
         target,
@@ -37,13 +39,25 @@ pub(super) fn connect<S: Connection>(
                 }
                 auth.as_mut().unwrap().step(challenge)
             }
-            #[cfg(not(windows))]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                if auth.is_none() {
+                    auth = Some(super::negotiate::Negotiate::new(scheme, proxy.host())?);
+                }
+                auth.as_mut().unwrap().step(challenge)
+            }
+            #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
             {
                 let _ = challenge;
-                bail!("HTTP 407: {scheme} proxy authentication requires Windows SSPI")
+                bail!("integrated proxy authentication is unavailable on this platform")
             }
         },
-    )
+    )?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(auth) = auth {
+        auth.finish()?;
+    }
+    Ok(())
 }
 
 fn remaining(deadline: Instant) -> Result<Duration> {
@@ -346,7 +360,7 @@ fn handshake<S: Connection>(
                 && token
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)),
-            "invalid SSPI output token"
+            "invalid proxy authentication output token"
         );
         authorization = Some(format!("{scheme} {token}"));
         selected = Some(scheme);

@@ -1,9 +1,9 @@
 //! Blocking TCP tunnels for FDR, including HTTP, HTTPS and SOCKS proxies.
 use anyhow::{Context, Result, bail, ensure};
-#[cfg(any(not(windows), test))]
+#[cfg(any(test, not(any(windows, target_os = "linux", target_os = "macos"))))]
 use rustls::RootCertStore;
 use rustls::{ClientConfig, ClientConnection, StreamOwned, pki_types::ServerName};
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 use std::sync::OnceLock;
 use std::{
     io::{self, Read, Write},
@@ -65,7 +65,19 @@ fn tls_config() -> Result<Arc<ClientConfig>> {
     {
         crate::windows::tls::config(None)
     }
-    #[cfg(not(windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let provider = Arc::new(oxitls_rustcrypto_provider::provider());
+        let verifier = rustls_platform_verifier::Verifier::new(provider.clone())?;
+        Ok(Arc::new(
+            ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()?
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(verifier))
+                .with_no_client_auth(),
+        ))
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
         Ok(CONFIG
@@ -97,7 +109,7 @@ fn tcp_connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
     let host = socket_host(host);
     let addresses = (host, port)
         .to_socket_addrs()
-        .context("resolving upstream on the Windows host")?;
+        .context("resolving upstream proxy or destination")?;
     let mut error = None;
     for address in addresses {
         let remaining = deadline.saturating_duration_since(Instant::now());

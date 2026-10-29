@@ -97,6 +97,9 @@ impl App {
                 if ui.link(tr("Diagnostics")).clicked() {
                     self.start(Action::Doctor, ctx);
                 }
+                if cfg!(target_os = "linux") && ui.link(tr("Install USB access rules")).clicked() {
+                    self.start(Action::InstallUdev, ctx);
+                }
             });
         }
         frame

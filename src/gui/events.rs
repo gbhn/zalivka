@@ -1,7 +1,7 @@
 //! Apply background events and finish jobs only after their logs are drained.
 use super::theme::Tone;
 use super::worker::Output;
-use super::{App, Event, Notice, Picker, SCAN_INTERVAL, UI_REFRESH_INTERVAL, worker};
+use super::{App, Event, Notice, Picker, SCAN_INTERVAL, UI_REFRESH_INTERVAL, journal};
 use eframe::egui;
 use std::time::Instant;
 use zalivka::progress;
@@ -104,7 +104,7 @@ impl App {
                                     {
                                         return Event::Saved(Err(error.to_string()));
                                     }
-                                    let result = worker::save_log(
+                                    let result = journal::save_log(
                                         path,
                                         source.as_deref(),
                                         &text,

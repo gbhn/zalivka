@@ -174,44 +174,10 @@ impl Write for Duplex {
     }
 }
 
-struct MockMux {
-    input: VecDeque<Vec<u8>>,
-    output: Arc<Mutex<Vec<Vec<u8>>>>,
-}
-impl PacketTransport for MockMux {
-    fn write_packet(&mut self, b: &[u8]) -> Result<()> {
-        self.output.lock().unwrap().push(b.to_vec());
-        Ok(())
-    }
-    fn read_packet(&mut self) -> Result<Vec<u8>> {
-        self.input
-            .pop_front()
-            .ok_or_else(|| anyhow::anyhow!("unexpected mux read"))
-    }
-}
-fn mock_mux(packets: Vec<Vec<u8>>) -> (MockMux, Arc<Mutex<Vec<Vec<u8>>>>) {
-    let output = Arc::new(Mutex::new(vec![]));
-    (
-        MockMux {
-            input: packets.into(),
-            output: output.clone(),
-        },
-        output,
-    )
-}
+use test_support::{Scripted as MockMux, scripted as mock_mux};
 
 fn mux_output(output: &Arc<Mutex<Vec<Vec<u8>>>>, port: u16) -> Cursor<Vec<u8>> {
-    let mut data = vec![];
-    for bytes in output.lock().unwrap().iter().skip(2) {
-        let packet = mux::decode_packet(bytes, 2).unwrap();
-        if packet.protocol == 6
-            && packet.payload.len() >= 20
-            && u16::from_be_bytes(packet.payload[2..4].try_into().unwrap()) == port
-        {
-            data.extend_from_slice(&packet.payload[20..]);
-        }
-    }
-    Cursor::new(data)
+    Cursor::new(test_support::payloads(output, port))
 }
 struct LiveMux {
     input: mpsc::Receiver<Vec<u8>>,
@@ -249,8 +215,6 @@ fn fixture_compression(
     files: &[(&str, &[u8])],
     compression: zip::CompressionMethod,
 ) -> tempfile::NamedTempFile {
-    let file = tempfile::NamedTempFile::new().unwrap();
-    let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
     let mut ids = vec![identity().value];
     if let Some(extra) = extra {
         ids.push(extra.value);
@@ -264,29 +228,25 @@ fn fixture_compression(
         ("ProductVersion", "11.0".into()),
         ("ProductBuildVersion", "20A2411".into()),
     ]);
-    let options = zip::write::SimpleFileOptions::default().compression_method(compression);
-    zip.start_file("BuildManifest.plist", options).unwrap();
-    zip.write_all(&wire::xml(&manifest).unwrap()).unwrap();
-    for name in [
+    let paths: Vec<_> = [
         "iBSS",
         "iBEC",
         "RestoreRamDisk",
         "RestoreDeviceTree",
         "RestoreKernelCache",
         "OS",
-    ] {
-        if missing && name == "iBEC" {
-            continue;
-        }
-        zip.start_file(format!("Firmware/{name}"), options).unwrap();
-        zip.write_all(&im4p(b"test")).unwrap();
-    }
-    for (path, bytes) in files {
-        zip.start_file(*path, options).unwrap();
-        zip.write_all(bytes).unwrap();
-    }
-    zip.finish().unwrap();
-    file
+    ]
+    .into_iter()
+    .filter(|name| !missing || *name != "iBEC")
+    .map(|name| format!("Firmware/{name}"))
+    .collect();
+    let payload = im4p(b"test");
+    let mut entries: Vec<_> = paths
+        .iter()
+        .map(|path| (path.as_str(), payload.as_slice()))
+        .collect();
+    entries.extend_from_slice(files);
+    test_support::ipsw(&manifest, &entries, compression)
 }
 
 fn recovery_identity() -> Identity {

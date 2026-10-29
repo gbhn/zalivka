@@ -29,6 +29,7 @@ use crate::dfu;
 use crate::mux::Session;
 use crate::mux::{self, PacketTransport};
 use crate::test_mux::{self, version_packet};
+use crate::test_support::{Scripted as Usb, payloads as bytes_on};
 use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
@@ -174,12 +175,12 @@ fn inline_key_replies_follow_the_complete_pending_file_frame() {
         ]),
     )
     .unwrap();
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let session = Session::new(Usb {
-        input: vec![version_packet(), tcp(0, 0x12, &[]), tcp(1, 0x10, &frame)].into(),
-        output: output.clone(),
-    })
-    .unwrap();
+    let (usb, output) = crate::test_support::scripted(vec![
+        version_packet(),
+        tcp(0, 0x12, &[]),
+        tcp(1, 0x10, &frame),
+    ]);
+    let session = Session::new(usb).unwrap();
     let mut stream = session.connect(1234).unwrap();
     let mut data = Vec::new();
     wire::send_binary(
@@ -1069,38 +1070,11 @@ fn ibss_success_preserves_the_expected_mode_and_connection_error() {
     assert!(!error.is::<dfu::ResetFailure>());
 }
 
-struct Usb {
-    input: VecDeque<Vec<u8>>,
-    output: Arc<Mutex<Vec<Vec<u8>>>>,
-}
-impl PacketTransport for Usb {
-    fn write_packet(&mut self, bytes: &[u8]) -> Result<()> {
-        self.output.lock().unwrap().push(bytes.to_vec());
-        Ok(())
-    }
-    fn read_packet(&mut self) -> Result<Vec<u8>> {
-        self.input.pop_front().context("unexpected packet read")
-    }
-}
 fn tcp(seq: u32, flags: u8, data: &[u8]) -> Vec<u8> {
     tcp_on(1234, 1, seq, flags, data)
 }
 fn tcp_on(port: u16, local: u16, seq: u32, flags: u8, data: &[u8]) -> Vec<u8> {
     test_mux::tcp(port, local, seq, 1, flags, data)
-}
-
-fn bytes_on(output: &Arc<Mutex<Vec<Vec<u8>>>>, port: u16) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for packet in output.lock().unwrap().iter().skip(2) {
-        let packet = mux::decode_packet(packet, 2).unwrap();
-        if packet.protocol == 6
-            && packet.payload.len() > 20
-            && u16::from_be_bytes(packet.payload[2..4].try_into().unwrap()) == port
-        {
-            bytes.extend_from_slice(&packet.payload[20..]);
-        }
-    }
-    bytes
 }
 
 struct FileDataUsb {

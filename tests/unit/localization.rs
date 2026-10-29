@@ -8,6 +8,14 @@ fn bundled_languages_are_valid_and_select_by_system_language() {
         let _language = localizer.enter();
         assert_eq!(text("Settings"), "Настройки");
         assert_eq!(
+            text("Install USB access rules"),
+            "Установить правила доступа к USB"
+        );
+        assert_eq!(
+            text("Approve the Linux administrator prompt"),
+            "Подтвердите запрос прав администратора Linux"
+        );
+        assert_eq!(
             format("Version {}, build {}", &["15.0", "24A335"]),
             "Версия 15.0, сборка 24A335"
         );

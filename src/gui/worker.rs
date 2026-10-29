@@ -1,12 +1,12 @@
 //! Native background operations, typed progress and a complete disk journal.
+use super::journal::Journal;
 use super::{Action, Event, Level, Notice, Record, Setup, Tone, UI_REFRESH_INTERVAL, progress};
 use anyhow::{Context, Result};
 use eframe::egui;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     fs::File,
-    io::{BufWriter, Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex, mpsc::Sender},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -79,51 +79,6 @@ pub(super) struct Completion {
     pub(super) journal_error: Option<String>,
 }
 
-pub(super) struct Journal {
-    pub(super) log: BufWriter<File>,
-    error: Option<String>,
-    pending: VecDeque<Record>,
-}
-
-impl Journal {
-    fn new(log: File) -> Self {
-        Self {
-            log: BufWriter::with_capacity(256 * 1024, log),
-            error: None,
-            pending: VecDeque::new(),
-        }
-    }
-    pub(super) fn write(&mut self, mut record: Record) -> Record {
-        record.normalize();
-        if self.error.is_none()
-            && let Err(error) = record.write_to(&mut self.log)
-        {
-            self.error = Some(error.to_string());
-            record
-                .message
-                .push_str(&format!(" / Disk journal incomplete: {error}"));
-            if record.level != Level::Error {
-                record.level = Level::Warning;
-            }
-        }
-        record
-    }
-    pub(super) fn push(&mut self, record: Record) {
-        self.pending.push_back(record);
-        super::trim_logs(&mut self.pending);
-    }
-    pub(super) fn flush(&mut self) -> Option<String> {
-        if self.error.is_none()
-            && let Err(error) = self.log.flush()
-        {
-            let error = error.to_string();
-            self.error = Some(error.clone());
-            return Some(error);
-        }
-        None
-    }
-}
-
 impl Job {
     pub(super) fn new(id: u64, action: Action, context: progress::Context, log: File) -> Self {
         let now = Instant::now();
@@ -138,7 +93,9 @@ impl Job {
             transfers: BTreeMap::new(),
             overall_operations: BTreeMap::new(),
             overall_fraction: None,
-            phase: if matches!(action, Action::PrepareWindows | Action::ResetDrivers) {
+            phase: if action == Action::InstallUdev {
+                "Approve the Linux administrator prompt".into()
+            } else if action.requires_admin() {
                 "Approve the Windows administrator prompt".into()
             } else {
                 "Preparing".into()
@@ -148,8 +105,7 @@ impl Job {
     }
 
     pub(super) fn can_stop(&self) -> bool {
-        !self.action.writes_device()
-            && !matches!(self.action, Action::PrepareWindows | Action::ResetDrivers)
+        !self.action.writes_device() && !self.action.requires_admin()
     }
 
     pub(super) fn stop(&mut self) -> std::io::Result<()> {
@@ -162,21 +118,6 @@ impl Job {
         Ok(())
     }
 
-    pub(super) fn record(&mut self, mut record: Record) -> Record {
-        record.elapsed_ms = self.started.elapsed().as_millis() as u64;
-        let mut journal = self.journal.lock().unwrap_or_else(|e| e.into_inner());
-        let mut record = journal.write(record);
-        if let Some(error) = journal.flush() {
-            record
-                .message
-                .push_str(&format!(" / Disk journal incomplete: {error}"));
-            if record.level != Level::Error {
-                record.level = Level::Warning;
-            }
-        }
-        record
-    }
-
     pub(super) fn pending_logs(&mut self) -> Option<(Vec<Record>, Option<String>)> {
         // Rendering never waits for disk I/O in the journal thread.
         let mut journal = match self.journal.try_lock() {
@@ -184,7 +125,7 @@ impl Job {
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return None,
         };
-        Some((journal.pending.drain(..).collect(), journal.error.clone()))
+        Some(journal.drain())
     }
 
     pub(super) fn output(&mut self, output: Output) {
@@ -304,16 +245,12 @@ impl Job {
             ..Completion::default()
         }));
         let completion_events = completion.clone();
-        let log_started = zalivka::logging::elapsed_ms();
         let events = tx.clone();
         let repaint = ctx.clone();
         let context = progress::Context::new(move |event| match event {
-            progress::Event::Log(mut record) => {
-                record.elapsed_ms = record.elapsed_ms.saturating_sub(log_started);
+            progress::Event::Log(record) => {
                 let mut journal = journal.lock().unwrap_or_else(|e| e.into_inner());
-                let wake = journal.pending.is_empty();
-                let record = journal.write(record);
-                journal.push(record);
+                let wake = journal.record(record);
                 drop(journal);
                 if wake {
                     repaint.request_repaint_after(UI_REFRESH_INTERVAL);
@@ -333,12 +270,7 @@ impl Job {
         let context = context
             .with_async_logs(move || {
                 let mut journal = journal.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(error) = journal.flush() {
-                    journal.push(Record::new(
-                        Level::Warning,
-                        "journal",
-                        format!("Disk journal incomplete: {error}"),
-                    ));
+                if journal.flush() {
                     repaint.request_repaint_after(UI_REFRESH_INTERVAL);
                 }
             })
@@ -362,7 +294,7 @@ impl Job {
         setup.validate(action)?;
         let log = File::options().write(true).create_new(true).open(&path)?;
         let mut job = Self::new(id, action, progress::Context::new(|_| {}), log);
-        let record = job.record(Record::new(
+        let record = Record::new(
             Level::Info,
             "session",
             format!(
@@ -375,11 +307,15 @@ impl Job {
                     format!("; ECID: {}", setup.ecid)
                 }
             ),
-        ));
+        );
         job.journal
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(record);
+            .record(record);
+        job.journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .flush();
         let (context, completion) = job.worker_context(tx, ctx, reboot_required)?;
         job.context = context.clone();
         let setup = setup.clone();
@@ -461,7 +397,7 @@ impl Completion {
             self.journal_error.get_or_insert_with(|| error.to_string());
         }
         self.cancelled = context.cancelled();
-        if let Some(error) = &journal.lock().unwrap_or_else(|e| e.into_inner()).error {
+        if let Some(error) = journal.lock().unwrap_or_else(|e| e.into_inner()).error() {
             self.journal_error.get_or_insert_with(|| error.clone());
         }
     }
@@ -498,6 +434,8 @@ impl Completion {
                     progress::MAC_STARTUP_HINT.into()
                 } else if action == Action::ResetDrivers {
                     "Reconnect the Mac and enter DFU mode.".into()
+                } else if action == Action::InstallUdev {
+                    "Reconnect the USB cable to apply the new access rules.".into()
                 } else {
                     String::new()
                 },
@@ -549,54 +487,6 @@ impl Completion {
     }
 }
 
-pub(super) fn save_log(
-    path: PathBuf,
-    source: Option<&Path>,
-    text: &str,
-    journal: Option<&Mutex<Journal>>,
-) -> Result<PathBuf> {
-    let same = source
-        .and_then(|source| source.canonicalize().ok())
-        .zip(path.canonicalize().ok())
-        .is_some_and(|(source, destination)| source == destination);
-    let source = source
-        .map(File::open)
-        .transpose()?
-        .map(|file| -> Result<_> {
-            // Capture a complete record boundary, then release writers while the
-            // potentially large snapshot is copied in the background.
-            let mut journal =
-                journal.map(|journal| journal.lock().unwrap_or_else(|e| e.into_inner()));
-            if let Some(journal) = &mut journal {
-                let _ = journal.flush();
-                if let Some(error) = &journal.error {
-                    anyhow::bail!("Disk journal incomplete: {error}");
-                }
-            }
-            let length = file.metadata()?.len();
-            Ok((file, length))
-        })
-        .transpose()?;
-    if same {
-        return Ok(path);
-    }
-    // Write beside the destination, then replace it only after a complete copy.
-    // Distinct paths can be hard links to the active log; copying directly to
-    // such a destination would truncate the source before it can be read.
-    let directory = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut saved = tempfile::NamedTempFile::new_in(directory)?;
-    if let Some((file, length)) = source {
-        std::io::copy(&mut file.take(length), &mut saved)?;
-    } else {
-        saved.write_all(text.as_bytes())?;
-    }
-    saved.persist(&path).context("saving operation log")?;
-    Ok(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,41 +505,5 @@ mod tests {
         drop(locked);
         reader.join().unwrap();
         assert!(pending.expect("GUI waited for the disk journal").is_none());
-    }
-
-    #[test]
-    fn trace_history_is_bounded_while_the_disk_journal_remains_complete() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let mut journal = Journal::new(file.reopen().unwrap());
-        let record = journal.write(Record::new(Level::Info, "restore", "Starting stage"));
-        journal.push(record);
-        for index in 0..8000 {
-            let record = journal.write(Record::new(Level::Trace, "fdr:conn", index));
-            journal.push(record);
-        }
-        assert!(journal.flush().is_none());
-        assert_eq!(journal.pending.len(), 4000);
-        assert_eq!(journal.pending.front().unwrap().level, Level::Info);
-        let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("saved.log");
-        let journal = Mutex::new(journal);
-        save_log(
-            destination.clone(),
-            Some(file.path()),
-            "visible tail",
-            Some(&journal),
-        )
-        .unwrap();
-        assert_eq!(
-            std::fs::read(&destination).unwrap(),
-            std::fs::read(file.path()).unwrap()
-        );
-        assert_eq!(
-            std::fs::read_to_string(file.path())
-                .unwrap()
-                .lines()
-                .count(),
-            8001
-        );
     }
 }

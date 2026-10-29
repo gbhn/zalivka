@@ -106,15 +106,8 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         let ticket = tss::send(&tss::request(&usb.info, &identity)?)
             .context("personalizing diagnostic iBSS")?;
         let bytes = img4::personalize_with_metadata(name, &component, &ticket, &identity.value)?;
-        let original_device = usb.info.clone();
         crate::log!(Debug, "boot", "iBSS in RAM: {} B", bytes.len());
-        let upload = dfu::upload(&mut usb, Mode::Dfu, &bytes, true);
-        drop(usb);
-        usb = reconnect_after_ibss(upload, Some(Mode::Recovery), |mode| {
-            wait_recovery(ecid, mode)
-        })?;
-        validate_reconnected_device(&original_device, &usb.info)
-            .context("hardware identity changed after diagnostic iBSS")?;
+        usb = boot_ibss(usb, &bytes, Some(Mode::Recovery))?;
     }
     let mut variables = serde_json::Map::new();
     for name in [
@@ -200,7 +193,7 @@ impl SignedIdentity {
     pub(super) fn boot(
         &mut self,
         ipsw: &mut Ipsw,
-        mut usb: RecoveryUsb,
+        usb: RecoveryUsb,
         stages: &[Vec<IBootStep>; 2],
     ) -> Result<(DeviceInfo, Option<anyhow::Error>)> {
         let mut device = usb.info.clone();
@@ -208,12 +201,16 @@ impl SignedIdentity {
             usb.info.mode == Mode::Dfu,
             "restore must start in ROM DFU mode"
         );
-        let upload = self.send_boot_object(ipsw, &mut usb, b"ibss");
-        drop(usb);
-        let mode = self.identity.is_macos()?.then_some(Mode::Recovery);
-        let mut usb = reconnect_after_ibss(upload, mode, |mode| wait_recovery(device.ecid, mode))?;
-        validate_reconnected_device(&device, &usb.info)
-            .context("hardware identity changed after iBSS")?;
+        let mut usb = {
+            let name = self.identity.require_component_type(b"ibss")?;
+            let bytes = ipsw.personalized(&self.identity, name, &self.ticket)?;
+            crate::log!(Debug, "boot", "Sending {name}: {} B", bytes.len());
+            boot_ibss(
+                usb,
+                &bytes,
+                self.identity.is_macos()?.then_some(Mode::Recovery),
+            )?
+        };
         if usb.info.ap_nonce != device.ap_nonce || usb.info.sep_nonce != device.sep_nonce {
             crate::log!(Info, "boot", "Refreshing signatures after iBSS");
             device = usb.info.clone();
@@ -283,6 +280,18 @@ impl SignedIdentity {
         }
         Ok(())
     }
+}
+
+/// Both diagnostic and restore boots retire the DFU handle before reconnecting.
+/// A reset error alone never proves that the expected device reached iBSS.
+fn boot_ibss(mut usb: RecoveryUsb, bytes: &[u8], mode: Option<Mode>) -> Result<RecoveryUsb> {
+    let expected = usb.info.clone();
+    let upload = dfu::upload(&mut usb, Mode::Dfu, bytes, true).context("uploading iBSS");
+    drop(usb);
+    let usb = reconnect_after_ibss(upload, mode, |mode| wait_recovery(expected.ecid, mode))?;
+    validate_reconnected_device(&expected, &usb.info)
+        .context("hardware identity changed after iBSS")?;
+    Ok(usb)
 }
 
 pub(super) fn validate_reconnected_device(

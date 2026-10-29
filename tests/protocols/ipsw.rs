@@ -12,6 +12,7 @@ fn stored_filesystem_crc_is_checked_before_restore_and_after_validation_seeks() 
     std::fs::write(file.path(), bytes).unwrap();
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(ipsw.prepare_filesystem(&identity()).is_err());
+    assert!(ipsw.stream("Firmware/OS", &mut Vec::new()).is_err());
     let mut image = ipsw.image("Firmware/OS").unwrap();
     image.seek(SeekFrom::Start(10)).unwrap();
     image.read_exact(&mut [0; 4]).unwrap();
@@ -563,15 +564,7 @@ fn oversized_components_are_rejected_from_zip_metadata_before_reading() {
     let file = fixture(None, false);
     let mut bytes = std::fs::read(file.path()).unwrap();
     let name = b"Firmware/iBSS";
-    let offset = bytes
-        .windows(4)
-        .enumerate()
-        .find_map(|(offset, signature)| {
-            (signature == b"PK\x01\x02"
-                && bytes.get(offset + 46..offset + 46 + name.len()) == Some(name))
-            .then_some(offset)
-        })
-        .unwrap();
+    let offset = crate::test_support::zip_entry_offset(&bytes, std::str::from_utf8(name).unwrap());
     let size = (zalivka::ipsw::MAX_COMPONENT + 1) as u32;
     bytes[offset + 24..offset + 28].copy_from_slice(&size.to_le_bytes());
     std::fs::write(file.path(), bytes).unwrap();
@@ -1081,6 +1074,10 @@ fn zip64_streams_five_gib_with_bounded_memory() {
     let mut bytes = [1; 16];
     image.read_exact(&mut bytes).unwrap();
     assert_eq!(bytes, [0; 16]);
+    assert_eq!(
+        ipsw.stream("large.dmg", &mut std::io::sink()).unwrap(),
+        size
+    );
     let report = ipsw.verify_all().unwrap();
     assert_eq!(report.entries, 2);
     assert!(report.uncompressed_bytes > size);
@@ -1451,15 +1448,7 @@ fn direct_stored_images_reject_inconsistent_sizes_and_physical_truncation() {
     let file = fixture(None, false);
     let mut bytes = std::fs::read(file.path()).unwrap();
     let name = b"Firmware/OS";
-    let offset = bytes
-        .windows(4)
-        .enumerate()
-        .find_map(|(offset, signature)| {
-            (signature == b"PK\x01\x02"
-                && bytes.get(offset + 46..offset + 46 + name.len()) == Some(name))
-            .then_some(offset)
-        })
-        .unwrap();
+    let offset = crate::test_support::zip_entry_offset(&bytes, std::str::from_utf8(name).unwrap());
     let original_size = u32::from_le_bytes(bytes[offset + 24..offset + 28].try_into().unwrap());
     bytes[offset + 24..offset + 28].copy_from_slice(&(original_size + 1).to_le_bytes());
     std::fs::write(file.path(), &bytes).unwrap();

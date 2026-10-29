@@ -1,87 +1,81 @@
 use super::*;
 
 #[test]
-fn deflated_boot_objects_only_send_done_after_successful_zip_crc_validation() {
-    for size in [2 * 256 * 1024, 2 * 256 * 1024 + 123] {
-        let image: Vec<_> = (0..size).map(|i| (i % 251) as u8).collect();
-        for corrupt in [false, true] {
-            let file = fixture_compression(
-                None,
-                false,
-                &[("rosetta.dmg", &image)],
-                zip::CompressionMethod::Deflated,
-            );
-            if corrupt {
-                // Keep Deflate data valid, but make its central-directory CRC
-                // fail at EOF, after full blocks have already been delivered.
-                let mut bytes = std::fs::read(file.path()).unwrap();
-                let offset = bytes
-                    .windows(4)
-                    .enumerate()
-                    .find_map(|(offset, signature)| {
-                        (signature == b"PK\x01\x02"
-                            && bytes.get(offset + 46..offset + 57) == Some(b"rosetta.dmg"))
-                        .then_some(offset)
-                    })
-                    .unwrap();
-                bytes[offset + 16] ^= 1;
-                std::fs::write(file.path(), bytes).unwrap();
-            }
-            let mut state = restore_state(file.path());
-            manifest_mut(&mut context_mut(&mut state).restore.identity).insert(
-                "Cryptex1,RosettaOS".into(),
-                component_entry("rosetta.dmg", &image),
-            );
-            let mut handshake = tcp(62078, 1, 0, 1, 0x12, &[]);
-            handshake[30..32].copy_from_slice(&u16::MAX.to_be_bytes());
-            let (usb, output) = mock_mux(vec![version_packet(), handshake]);
-            let session = Session::new(usb).unwrap();
-            let mut main = session.connect(62078).unwrap();
-            let result = state.serve(
-                &session,
-                &mut main,
-                &wire::dict([
-                    ("DataType", "SourceBootObjectV4".into()),
-                    (
-                        "Arguments",
-                        wire::dict([("ImageName", "Cryptex1,RosettaOS".into())]),
-                    ),
-                ]),
-            );
-            assert_eq!(result.is_err(), corrupt);
-            if let Err(error) = result {
-                assert!(format!("{error:#}").contains("Invalid checksum"));
-            }
-            let mut replies = mux_output(&output, 62078);
-            let mut payload = Vec::new();
-            let mut done = false;
-            while replies.position() < replies.get_ref().len() as u64 {
-                let Ok(message) = wire::receive(&mut replies) else {
-                    // A failed source may leave the last batched plist partial.
-                    assert!(corrupt);
-                    break;
-                };
-                if crate::test_support::boolean(&message, &["FileDataDone"]) {
-                    assert!(!done);
-                    done = true;
-                } else {
-                    assert!(!done);
-                    payload.extend_from_slice(
-                        wire::get(&message, &["FileData"])
-                            .unwrap()
-                            .as_data()
-                            .unwrap(),
+fn streamed_boot_objects_only_send_done_after_successful_zip_crc_validation() {
+    for compression in [
+        zip::CompressionMethod::Stored,
+        zip::CompressionMethod::Deflated,
+    ] {
+        for size in [2 * 256 * 1024, 2 * 256 * 1024 + 123] {
+            let image: Vec<_> = (0..size).map(|i| (i % 251) as u8).collect();
+            for corrupt in [false, true] {
+                let file =
+                    fixture_compression(None, false, &[("rosetta.dmg", &image)], compression);
+                if corrupt {
+                    // Keep the payload valid, but make its central-directory CRC
+                    // fail at EOF, after full blocks have already been delivered.
+                    crate::test_support::corrupt_crc(file.path(), "rosetta.dmg");
+                }
+                let mut state = restore_state(file.path());
+                manifest_mut(&mut context_mut(&mut state).restore.identity).insert(
+                    "Cryptex1,RosettaOS".into(),
+                    component_entry("rosetta.dmg", &image),
+                );
+                let mut handshake = tcp(62078, 1, 0, 1, 0x12, &[]);
+                handshake[30..32].copy_from_slice(&u16::MAX.to_be_bytes());
+                let (usb, output) = mock_mux(vec![version_packet(), handshake]);
+                let session = Session::new(usb).unwrap();
+                let mut main = session.connect(62078).unwrap();
+                let result = state.serve(
+                    &session,
+                    &mut main,
+                    &wire::dict([
+                        ("DataType", "SourceBootObjectV4".into()),
+                        (
+                            "Arguments",
+                            wire::dict([("ImageName", "Cryptex1,RosettaOS".into())]),
+                        ),
+                    ]),
+                );
+                assert_eq!(result.is_err(), corrupt);
+                if let Err(error) = result {
+                    let message = format!("{error:#}");
+                    assert!(
+                        message.contains("Invalid checksum") || message.contains("CRC mismatch"),
+                        "{message}"
                     );
                 }
+                let mut replies = mux_output(&output, 62078);
+                let mut payload = Vec::new();
+                let mut done = false;
+                while replies.position() < replies.get_ref().len() as u64 {
+                    let Ok(message) = wire::receive(&mut replies) else {
+                        // A failed source may leave the last batched plist partial.
+                        assert!(corrupt);
+                        break;
+                    };
+                    if crate::test_support::boolean(&message, &["FileDataDone"]) {
+                        assert!(!done);
+                        done = true;
+                    } else {
+                        assert!(!done);
+                        payload.extend_from_slice(
+                            wire::get(&message, &["FileData"])
+                                .unwrap()
+                                .as_data()
+                                .unwrap(),
+                        );
+                    }
+                }
+                assert_eq!(done, !corrupt);
+                assert!(!payload.is_empty());
+                if corrupt {
+                    assert!(image.starts_with(&payload));
+                } else {
+                    assert_eq!(payload, image);
+                }
+                assert_eq!(state.ipsw.read("Firmware/OS").unwrap(), im4p(b"test"));
             }
-            assert_eq!(done, !corrupt);
-            assert!(!payload.is_empty());
-            if corrupt {
-                assert!(image.starts_with(&payload));
-            } else {
-                assert_eq!(payload, image);
-            }
-            assert_eq!(state.ipsw.read("Firmware/OS").unwrap(), im4p(b"test"));
         }
     }
 }

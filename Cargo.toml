@@ -45,6 +45,18 @@ webpki-roots = "1"
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
 x509-parser = { version = "0.18", default-features = false }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libproxy = "0.1.1"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libgssapi = "0.11"
+rustls-native-certs = "0.8"
+ureq = { version = "3.5", default-features = false, features = ["platform-verifier"] }
+rustls-platform-verifier = { version = "0.7", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+
 [target.'cfg(windows)'.dependencies]
 cab = "0.6"
 rustls-platform-verifier = { version = "0.7", default-features = false }

@@ -144,6 +144,114 @@ fn prefetch_returns_a_worker_panic_as_an_error() {
     assert_eq!(error.to_string(), "IPSW reader panicked");
 }
 
+#[test]
+fn prefetch_inherits_cancellation_and_joins_after_the_output_stops_it() {
+    struct CancelWriter {
+        context: crate::progress::Context,
+        bytes: Vec<u8>,
+    }
+    impl Write for CancelWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            self.context.cancel();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let context = crate::progress::Context::new(|_| {});
+    let expected = vec![0x35; 8 * STREAM_CHUNK];
+    let mut output = CancelWriter {
+        context: context.clone(),
+        bytes: Vec::new(),
+    };
+    let error = context
+        .run(|| copy_prefetched(expected.as_slice(), &mut output))
+        .unwrap_err();
+    assert_eq!(error.to_string(), "Operation stopped");
+    assert!(!output.bytes.is_empty());
+    assert!(output.bytes.len() <= 3 * STREAM_CHUNK);
+    assert!(expected.starts_with(&output.bytes));
+
+    let mut output = Vec::new();
+    let error = context
+        .run(|| copy_prefetched(expected.as_slice(), &mut output))
+        .unwrap_err();
+    assert_eq!(error.to_string(), "Operation stopped");
+    assert!(output.is_empty());
+}
+
+#[test]
+#[ignore = "local IPSW read benchmark; 64 MiB temporary images, no USB or network"]
+fn image_streaming_throughput() {
+    use std::time::Instant;
+    struct Checksum {
+        crc: crc32fast::Hasher,
+        bytes: u64,
+        largest_write: usize,
+    }
+    impl Write for Checksum {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.crc.update(bytes);
+            self.bytes += bytes.len() as u64;
+            self.largest_write = self.largest_write.max(bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let bytes: Vec<_> = (0..64 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let expected = crc32fast::hash(&bytes);
+    for compression in [
+        zip::CompressionMethod::Stored,
+        zip::CompressionMethod::Deflated,
+    ] {
+        let manifest = crate::wire::dict([
+            (
+                "BuildIdentities",
+                plist::Value::Array(vec![plist::Value::Dictionary(Default::default())]),
+            ),
+            (
+                "SupportedProductTypes",
+                plist::Value::Array(vec!["MacBookAir10,1".into()]),
+            ),
+        ]);
+        let file = crate::test_support::ipsw(&manifest, &[("OS.dmg", &bytes)], compression);
+        for baseline in [true, false] {
+            let start = Instant::now();
+            for _ in 0..3 {
+                let mut output = Checksum {
+                    crc: crc32fast::Hasher::new(),
+                    bytes: 0,
+                    largest_write: 0,
+                };
+                if baseline {
+                    let mut zip = zip::ZipArchive::new(std::io::BufReader::with_capacity(
+                        128 * 1024,
+                        file.reopen().unwrap(),
+                    ))
+                    .unwrap();
+                    std::io::copy(&mut zip.by_name("OS.dmg").unwrap(), &mut output).unwrap();
+                } else {
+                    Ipsw::open(file.path())
+                        .unwrap()
+                        .stream("OS.dmg", &mut output)
+                        .unwrap();
+                }
+                assert_eq!(output.bytes, bytes.len() as u64);
+                assert_eq!(output.crc.finalize(), expected);
+                assert!(output.largest_write <= STREAM_CHUNK);
+            }
+            eprintln!(
+                "{compression:?}; baseline={baseline}: {:.1} MiB/s; 192 MiB, output CRC verified",
+                192.0 / start.elapsed().as_secs_f64()
+            );
+        }
+    }
+}
+
 fn filesystem_fixture(
     compression: zip::CompressionMethod,
     corrupt: bool,
@@ -159,12 +267,8 @@ fn filesystem_fixture(
             )]),
         )]),
     );
-    let file = tempfile::NamedTempFile::new().unwrap();
-    let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
-    let options = zip::write::SimpleFileOptions::default().compression_method(compression);
-    zip.start_file("BuildManifest.plist", options).unwrap();
-    zip.write_all(
-        &crate::wire::xml(&crate::wire::dict([
+    let file = crate::test_support::ipsw(
+        &crate::wire::dict([
             (
                 "BuildIdentities",
                 plist::Value::Array(vec![identity.value.clone()]),
@@ -173,26 +277,12 @@ fn filesystem_fixture(
                 "SupportedProductTypes",
                 plist::Value::Array(vec!["MacBookAir10,1".into()]),
             ),
-        ]))
-        .unwrap(),
-    )
-    .unwrap();
-    zip.start_file("OS.dmg", options).unwrap();
-    zip.write_all(&image).unwrap();
-    zip.finish().unwrap();
+        ]),
+        &[("OS.dmg", &image)],
+        compression,
+    );
     if corrupt {
-        let mut bytes = std::fs::read(file.path()).unwrap();
-        let offset = bytes
-            .windows(4)
-            .enumerate()
-            .find_map(|(offset, signature)| {
-                (signature == b"PK\x01\x02"
-                    && bytes.get(offset + 46..offset + 52) == Some(b"OS.dmg"))
-                .then_some(offset)
-            })
-            .unwrap();
-        bytes[offset + 16] ^= 1;
-        std::fs::write(file.path(), bytes).unwrap();
+        crate::test_support::corrupt_crc(file.path(), "OS.dmg");
     }
     (file, identity, image)
 }

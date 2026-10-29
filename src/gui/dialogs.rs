@@ -198,6 +198,8 @@ impl App {
                             ui.label(
                                 RichText::new(tr(if cfg!(windows) {
                                     "USB and drivers"
+                                } else if cfg!(target_os = "linux") {
+                                    "USB access"
                                 } else {
                                     "Diagnostics"
                                 }))
@@ -230,6 +232,17 @@ impl App {
                                     self.start(Action::ResetDrivers, ctx);
                                 }
                                 caption(ui, "Remove DFU / Recovery / Restore device records, including disconnected devices, reinstall the Apple driver, and rescan devices. Reconnect the Mac and enter DFU mode after the reset.");
+                                ui.add_space(8.0);
+                            }
+                            if cfg!(target_os = "linux") {
+                                if ui.add_sized(
+                                    egui::vec2(ui.available_width(), 34.0),
+                                    egui::Button::new(tr("Install USB access rules")),
+                                ).clicked() {
+                                    close = true;
+                                    self.start(Action::InstallUdev, ctx);
+                                }
+                                caption(ui, "Allow your Linux user to access Apple USB devices. The system will request administrator access.");
                                 ui.add_space(8.0);
                             }
                             if ui

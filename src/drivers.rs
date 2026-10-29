@@ -1,3 +1,6 @@
+#[cfg(target_os = "linux")]
+mod linux;
+
 use crate::{device::Mode, usb::APPLE_VENDOR};
 use anyhow::{Context, Result, ensure};
 use nusb::MaybeFuture;
@@ -257,33 +260,20 @@ pub fn install(_inf: &Path) -> Result<bool> {
     anyhow::bail!("WinUSB installation is available only on Windows")
 }
 
+/// Install the bundled rule directly; the CLI caller must already have root access.
 pub fn install_udev() -> Result<()> {
-    ensure!(
-        cfg!(target_os = "linux"),
-        "udev installation is available only on Linux"
-    );
-    let path = Path::new("/etc/udev/rules.d/70-zalivka.rules");
-    if path.exists() {
-        ensure!(
-            std::fs::read_to_string(path)? == UDEV_RULES,
-            "different udev rule already exists; refusing to overwrite"
-        );
-    } else {
-        File::options()
-            .create_new(true)
-            .write(true)
-            .open(path)
-            .context("writing udev rule (requires root)")?
-            .write_all(UDEV_RULES.as_bytes())?;
-    }
-    let status = std::process::Command::new("udevadm")
-        .args(["control", "--reload-rules"])
-        .status()?;
-    ensure!(
-        status.success(),
-        "udevadm could not reload rules; rule file was saved"
-    );
-    Ok(())
+    #[cfg(target_os = "linux")]
+    return linux::install();
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!("udev installation is available only on Linux")
+}
+
+/// Request desktop authorization for the same installer used by the CLI.
+pub fn prepare_linux() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    return linux::prepare();
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!("Linux USB setup is available only on Linux")
 }
 
 #[cfg(test)]

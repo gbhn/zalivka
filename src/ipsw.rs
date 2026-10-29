@@ -1,5 +1,6 @@
 mod digest;
 mod identity;
+mod stream;
 mod verify;
 use crate::{img4, wire};
 use anyhow::{Context, Result, ensure};
@@ -9,16 +10,16 @@ use plist::Value;
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
-    io::{BufReader, Read, Seek, SeekFrom, Write},
+    io::{BufReader, Read, Write},
     path::{Component, Path, PathBuf},
-    sync::{Arc, mpsc},
-    thread,
+    sync::Arc,
 };
+pub use stream::ImageReader;
+use stream::{STREAM_CHUNK, copy_prefetched};
 pub use verify::Verification;
 use zip::ZipArchive;
 
 pub const MAX_COMPONENT: u64 = 1024 * 1024 * 1024;
-const STREAM_CHUNK: usize = 256 * 1024;
 
 /// Signing-only entries may omit a path; present metadata must still be valid.
 pub(crate) fn component_path(entry: &Value) -> Result<Option<&str>> {
@@ -238,7 +239,7 @@ impl Ipsw {
     pub fn stream(&mut self, path: &str, out: &mut impl Write) -> Result<u64> {
         validate_path(path)?;
         if self.prepared_images.contains_key(path) {
-            return Ok(std::io::copy(&mut self.image(path)?, out)?);
+            return self.image(path)?.copy_to(out);
         }
         let mut entry = self.archive.by_name(path)?;
         crate::log!(
@@ -248,9 +249,12 @@ impl Ipsw {
             entry.size(),
             entry.compression()
         );
-        if entry.compression() == zip::CompressionMethod::Stored
-            || entry.size() <= STREAM_CHUNK as u64
-        {
+        if entry.compression() == zip::CompressionMethod::Stored {
+            // Stored and prepared images share the same independent bounded
+            // reader, CRC validation and truncation checks used by ASR.
+            drop(entry);
+            self.image(path)?.copy_to(out)
+        } else if entry.size() <= STREAM_CHUNK as u64 {
             Ok(std::io::copy(&mut entry, out)?)
         } else {
             copy_prefetched(entry, out)
@@ -329,7 +333,7 @@ impl Ipsw {
         let entry = self.archive.by_name(path)?;
         let size = entry.size();
         let expected_crc = entry.crc32();
-        let (mut file, start) = if let Some(prepared) = self.prepared_images.get(path) {
+        let (file, start) = if let Some(prepared) = self.prepared_images.get(path) {
             (prepared.reopen().context("opening prepared filesystem")?, 0)
         } else {
             ensure!(
@@ -345,22 +349,8 @@ impl Ipsw {
                 entry.data_start().context("ZIP entry has no data offset")?,
             )
         };
-        let backing_size = file.metadata()?.len();
-        ensure!(
-            start
-                .checked_add(size)
-                .is_some_and(|end| end <= backing_size),
-            "filesystem image extends beyond its backing file: {path}"
-        );
-        file.seek(SeekFrom::Start(start))?;
-        Ok(ImageReader {
-            file,
-            start,
-            size,
-            position: 0,
-            expected_crc,
-            crc: Some(crc32fast::Hasher::new()),
-        })
+        ImageReader::new(file, start, size, expected_crc)
+            .with_context(|| format!("opening filesystem image {path}"))
     }
 
     pub fn preflight(&mut self, id: &mut Identity) -> Result<()> {
@@ -482,120 +472,6 @@ impl Ipsw {
         }
         id.file_types = types;
         Ok(())
-    }
-}
-
-/// Overlap decompression with writes. The queue, reader and writer hold at most
-/// three blocks; the output stays on the calling thread for mux/AEA exchanges.
-fn copy_prefetched(mut input: impl Read + Send, out: &mut impl Write) -> Result<u64> {
-    thread::scope(|scope| {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let reader = thread::Builder::new()
-            .name("ipsw-read-ahead".into())
-            .spawn_scoped(scope, move || -> std::io::Result<u64> {
-                let mut total = 0;
-                loop {
-                    let mut block = vec![0; STREAM_CHUNK];
-                    let mut filled = 0;
-                    while filled < block.len() {
-                        match input.read(&mut block[filled..]) {
-                            Ok(0) => break,
-                            Ok(n) => filled += n,
-                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                                continue;
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    if filled == 0 {
-                        return Ok(total);
-                    }
-                    block.truncate(filled);
-                    total += filled as u64;
-                    sender.send(block).map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::BrokenPipe,
-                            "IPSW stream consumer closed",
-                        )
-                    })?;
-                }
-            })
-            .context("starting IPSW reader")?;
-        let written: std::io::Result<()> = (|| {
-            for block in &receiver {
-                out.write_all(&block)?;
-            }
-            Ok(())
-        })();
-        // Unblock a reader waiting on a full queue before joining after an
-        // output failure. Preserve that original failure over queue closure.
-        drop(receiver);
-        let read = reader
-            .join()
-            .map_err(|_| anyhow::anyhow!("IPSW reader panicked"));
-        written?;
-        // EOF (including ZIP CRC validation) must succeed before the caller
-        // can signal FileDataDone, even if every payload block was written.
-        Ok(read??)
-    })
-}
-
-pub struct ImageReader {
-    file: File,
-    start: u64,
-    size: u64,
-    position: u64,
-    expected_crc: u32,
-    crc: Option<crc32fast::Hasher>,
-}
-impl ImageReader {
-    pub fn size(&self) -> u64 {
-        self.size
-    }
-}
-impl Read for ImageReader {
-    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
-        let limit = b
-            .len()
-            .min((self.size - self.position).min(usize::MAX as u64) as usize);
-        let n = self.file.read(&mut b[..limit])?;
-        if n == 0 && limit != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "truncated filesystem image",
-            ));
-        }
-        self.position += n as u64;
-        if let Some(crc) = &mut self.crc {
-            crc.update(&b[..n]);
-            if self.position == self.size && crc.clone().finalize() != self.expected_crc {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "filesystem image CRC mismatch",
-                ));
-            }
-        }
-        Ok(n)
-    }
-}
-impl Seek for ImageReader {
-    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
-        let n = match from {
-            SeekFrom::Start(n) => i128::from(n),
-            SeekFrom::Current(n) => i128::from(self.position) + i128::from(n),
-            SeekFrom::End(n) => i128::from(self.size) + i128::from(n),
-        };
-        if n < 0 || n > i128::from(self.size) {
-            return Err(std::io::Error::other("image seek out of bounds"));
-        }
-        self.file.seek(SeekFrom::Start(self.start + n as u64))?;
-        if n == 0 {
-            self.crc = Some(crc32fast::Hasher::new());
-        } else if n as u64 != self.position {
-            self.crc = None;
-        }
-        self.position = n as u64;
-        Ok(self.position)
     }
 }
 

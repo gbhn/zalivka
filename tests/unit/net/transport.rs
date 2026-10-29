@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn pac_routes_fail_over_before_sending_a_post_and_do_not_replay_a_sent_post() {
+    for lose_response in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+        let offline = unused.local_addr().unwrap();
+        drop(unused);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            if !lose_response {
+                assert!(read_header(&mut stream).starts_with("CONNECT gs.apple.com:80 "));
+                stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+            }
+            assert!(read_header(&mut stream).starts_with("POST /TSS/controller HTTP/1.1"));
+            let mut body = [0; 6];
+            stream.read_exact(&mut body).unwrap();
+            assert_eq!(&body, b"ticket");
+            if !lose_response {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                    .unwrap();
+            }
+        });
+        let guard = TcpListener::bind("127.0.0.1:0").unwrap();
+        guard.set_nonblocking(true).unwrap();
+        let uri = if lose_response {
+            format!("http://{address}/TSS/controller")
+        } else {
+            "http://gs.apple.com/TSS/controller".into()
+        };
+        let proxy = |address| Some(ureq::Proxy::new(&format!("http://{address}")).unwrap());
+        let routes = if lose_response {
+            vec![None, proxy(guard.local_addr().unwrap())]
+        } else {
+            vec![proxy(offline), proxy(address)]
+        };
+        let client = agent();
+        let request = Request::post(uri).body(b"ticket".to_vec()).unwrap();
+        let response =
+            crate::proxy::try_routes(routes, |proxy| send_http_via(&client, &request, proxy));
+        if lose_response {
+            assert!(response.is_err());
+        } else {
+            assert_eq!(response.unwrap().body_mut().read_to_string().unwrap(), "OK");
+        }
+        server.join().unwrap();
+        assert_eq!(
+            guard.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+}
+
+#[test]
 fn destination_tls_and_connection_reuse_work_through_every_proxy_route() {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
@@ -519,12 +576,12 @@ fn tss_tls_validates_apple_chain_hostname_signature_and_expiration() {
             .is_err()
     );
     // This extra root must never broaden the normal CDN/asset trust configuration.
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     assert!(matches!(
         super::agent().config().tls_config().root_certs(),
         ureq::tls::RootCerts::WebPki
     ));
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     assert!(matches!(
         super::agent().config().tls_config().root_certs(),
         ureq::tls::RootCerts::PlatformVerifier

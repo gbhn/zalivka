@@ -1,6 +1,7 @@
 mod cards;
 mod dialogs;
 mod events;
+mod journal;
 mod setup;
 mod widgets;
 use setup::{Action, Setup};
@@ -371,10 +372,7 @@ impl App {
             self.error("Operation unavailable", reason);
             return;
         }
-        if matches!(
-            action,
-            Action::Doctor | Action::PrepareWindows | Action::ResetDrivers
-        ) {
+        if action == Action::Doctor || action.requires_admin() {
             self.journal_open = true;
         }
         self.next_job += 1;

@@ -14,24 +14,39 @@ pub fn agent() -> ureq::Agent {
 }
 
 pub(crate) fn public_roots() -> ureq::tls::RootCerts {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     {
         ureq::tls::RootCerts::PlatformVerifier
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         ureq::tls::RootCerts::WebPki
     }
 }
 
 /// gs.apple.com uses Apple's private PKI, absent from Mozilla's public roots.
-/// Keep this additional trust anchor scoped to TSS; Windows trust applies too.
+/// Keep this additional trust anchor scoped to TSS, alongside system trust.
 pub(crate) fn tss_agent() -> ureq::Agent {
     let root =
         ureq::tls::Certificate::from_der(include_bytes!("../certs/AppleIncRootCertificate.cer"));
+    let roots = vec![root];
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let native = rustls_native_certs::load_native_certs();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let roots =
+        {
+            let mut roots = roots;
+            for error in &native.errors {
+                crate::log!(Warning, "tls:tss", "Loading system certificates: {error}");
+            }
+            roots.extend(native.certs.iter().map(|certificate| {
+                ureq::tls::Certificate::from_der(certificate.as_ref()).to_owned()
+            }));
+            roots
+        };
     let config = agent_config(
         Some(Duration::from_secs(120)),
-        ureq::tls::RootCerts::new_with_certs(&[root]),
+        ureq::tls::RootCerts::new_with_certs(&roots),
     );
     let proxy_config = ureq::Agent::config_builder()
         .tls_config(tls_config(public_roots()))
@@ -171,10 +186,12 @@ pub(crate) fn send_http(
     agent: &ureq::Agent,
     request: &Request<Vec<u8>>,
 ) -> Result<Response<ureq::Body>> {
-    send_http_via(agent, request, crate::proxy::for_url(request.uri())?)
+    crate::proxy::try_routes(crate::proxy::for_url(request.uri())?, |proxy| {
+        send_http_via(agent, request, proxy)
+    })
 }
 
-fn send_http_via(
+pub(crate) fn send_http_via(
     agent: &ureq::Agent,
     request: &Request<Vec<u8>>,
     proxy: Option<ureq::Proxy>,
@@ -197,7 +214,21 @@ fn send_http_via(
     } else {
         agent.run(request)
     };
-    let response = response.context("Apple HTTPS request failed")?;
+    let response = response
+        .map_err(|error| match error {
+            // ureq's Error does not expose Other through Error::source.
+            // Unwrap it so the connector's pre-request marker survives.
+            ureq::Error::Other(error) => match error.downcast::<crate::proxy::ConnectFailure>() {
+                Ok(error) => anyhow::Error::new(*error),
+                Err(error) => anyhow::Error::from_boxed(error),
+            },
+            ureq::Error::HostNotFound
+            | ureq::Error::Timeout(ureq::Timeout::Resolve | ureq::Timeout::Connect) => {
+                anyhow::Error::new(crate::proxy::ConnectFailure(error.into()))
+            }
+            error => error.into(),
+        })
+        .context("Apple HTTPS request failed")?;
     crate::log!(
         Trace,
         "http",
