@@ -3,7 +3,7 @@ mod canary;
 mod containers;
 mod request;
 use crate::{device::DeviceInfo, ipsw::Identity, wire};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 pub use canary::canary_response;
 pub use containers::payload_ranges;
 pub(crate) use containers::{MAX_PLIST_BUNDLE, plist_prefix, verify_plist_bundle};
@@ -12,12 +12,16 @@ use plist::Value;
 use std::io::Write;
 
 pub struct Update {
-    pub request: Value,
-    pub response_tags: Vec<String>,
+    request: Value,
+    response_tags: Vec<String>,
     payload: Option<Vec<u8>>,
 }
 
 impl Update {
+    pub fn request(&self) -> &Value {
+        &self.request
+    }
+
     pub fn finish(self, mut response: Value) -> Result<Value> {
         for tag in &self.response_tags {
             let value = wire::get(&response, &[tag])
@@ -53,23 +57,18 @@ pub fn prepare(
     device: &DeviceInfo,
     arguments: &Value,
 ) -> Result<Update> {
+    ensure!(
+        wire::string(arguments, &["MessageArgType"])? == "FirmwareResponseData",
+        "invalid firmware updater message type"
+    );
+    chunk_size(arguments)?;
     if wire::optional(arguments, &["DeviceGeneratedRequest"])?.is_none()
         && wire::optional(arguments, &["DeviceGeneratedTags"])?.is_none()
     {
-        let inferred = request::namespace_request(id, arguments)?;
-        let payload = ipsw.plist_component(id, &inferred.component)?;
-        return Ok(Update {
-            request: inferred.request,
-            response_tags: vec![inferred.ticket],
-            payload: Some(payload),
-        });
+        request::namespace_update(ipsw, id, arguments)
+    } else {
+        request::generated_update(id, device, arguments)
     }
-    let updater = request::Request::parse(arguments)?;
-    Ok(Update {
-        request: updater.signing_request(id, device)?,
-        response_tags: updater.response_tags,
-        payload: None,
-    })
 }
 
 fn chunk_size(arguments: &Value) -> Result<usize> {

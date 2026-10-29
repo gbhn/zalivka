@@ -182,7 +182,7 @@ impl RestoreContext {
                     response
                 } else {
                     let update = crate::firmware::prepare(ipsw, identity()?, &self.device, args)?;
-                    let response = tss::send_raw(&update.request)?;
+                    let response = tss::send_raw(update.request())?;
                     update.finish(response)?
                 };
                 return crate::firmware::send_response(out, response, args);

@@ -1,32 +1,27 @@
 //! Bind updater metadata without controller or model tables.
-use super::chunk_size;
-use crate::{device::DeviceInfo, ipsw::Identity, tss, wire};
+use super::Update;
+use crate::{
+    device::DeviceInfo,
+    ipsw::{Identity, Ipsw},
+    tss, wire,
+};
 use anyhow::{Context, Result, ensure};
 use plist::{Dictionary, Value};
 use std::collections::BTreeSet;
 
-pub(super) struct NamespaceRequest {
-    pub request: Value,
-    pub component: String,
-    pub ticket: String,
-}
-
-pub(super) fn namespace_request(id: &Identity, arguments: &Value) -> Result<NamespaceRequest> {
-    ensure!(
-        wire::string(arguments, &["MessageArgType"])? == "FirmwareResponseData",
-        "invalid firmware updater message type"
-    );
-    chunk_size(arguments)?;
+pub(super) fn namespace_update(
+    ipsw: &mut Ipsw,
+    id: &Identity,
+    arguments: &Value,
+) -> Result<Update> {
     let info = wire::dictionary(wire::get(arguments, &["MessageArgInfo"])?)?;
-    let namespaces = info
+    let namespace = info
         .keys()
-        .filter_map(|key| key.split_once(',').map(|(prefix, _)| prefix))
-        .collect::<BTreeSet<_>>();
-    ensure!(
-        namespaces.len() == 1,
-        "DeviceGeneratedRequest is absent and updater namespace is missing or ambiguous"
-    );
-    let namespace = *namespaces.first().unwrap();
+        .next()
+        .and_then(|key| key.split_once(',').map(|(prefix, _)| prefix))
+        .context(
+            "DeviceGeneratedRequest is absent and updater namespace is missing or ambiguous",
+        )?;
     ensure!(!namespace.is_empty(), "empty updater namespace");
     let prefix = format!("{namespace},");
     ensure!(
@@ -44,7 +39,6 @@ pub(super) fn namespace_request(id: &Identity, arguments: &Value) -> Result<Name
         components.next().is_none(),
         "updater namespace selects multiple manifest components"
     );
-    id.path(component)?;
     let mut parameters = Dictionary::new();
     for (key, value) in wire::dictionary(&id.value)? {
         if key.starts_with(&prefix) {
@@ -86,17 +80,12 @@ pub(super) fn namespace_request(id: &Identity, arguments: &Value) -> Result<Name
     request.insert("@BBTicket".into(), true.into());
     request.insert(format!("@{ticket}"), true.into());
     request.insert(component.clone(), Value::Dictionary(entry));
-    Ok(NamespaceRequest {
+    let payload = ipsw.plist_component(id, component)?;
+    Ok(Update {
         request: Value::Dictionary(request),
-        component: component.clone(),
-        ticket,
+        response_tags: vec![ticket],
+        payload: Some(payload),
     })
-}
-
-pub(super) struct Request<'a> {
-    generated: &'a Dictionary,
-    build_identity_tags: Vec<&'a str>,
-    pub response_tags: Vec<String>,
 }
 
 pub(super) fn tags(value: &Value) -> Result<Vec<&str>> {
@@ -116,68 +105,61 @@ pub(super) fn tags(value: &Value) -> Result<Vec<&str>> {
         .collect()
 }
 
-impl<'a> Request<'a> {
-    pub fn parse(arguments: &'a Value) -> Result<Self> {
-        ensure!(
-            wire::string(arguments, &["MessageArgType"])? == "FirmwareResponseData",
-            "invalid firmware updater message type"
-        );
-        chunk_size(arguments)?;
-        let generated = wire::dictionary(
-            wire::get(arguments, &["DeviceGeneratedRequest"])
-                .context("strict restore requires DeviceGeneratedRequest")?,
-        )?;
-        ensure!(!generated.is_empty(), "empty DeviceGeneratedRequest");
-        let build_identity_tags = tags(
-            wire::get(arguments, &["DeviceGeneratedTags", "BuildIdentityTags"])
-                .context("strict restore requires explicit BuildIdentityTags")?,
-        )
-        .context("invalid updater BuildIdentityTags")?;
-        let response_tags = tags(
-            wire::get(arguments, &["DeviceGeneratedTags", "ResponseTags"])
-                .context("strict restore requires explicit ResponseTags")?,
-        )
-        .context("invalid updater ResponseTags")?
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-        ensure!(
-            !response_tags.is_empty(),
-            "firmware updater supplied no response tags"
-        );
-        Ok(Self {
-            generated,
-            build_identity_tags,
-            response_tags,
-        })
-    }
-
-    pub fn signing_request(&self, id: &Identity, device: &DeviceInfo) -> Result<Value> {
-        let common = tss::updater_fields(device)?;
-        let mut request = common.clone();
-        let identity = wire::dictionary(&id.value)?;
-        // BuildIdentityTags selects available fields; it is not a required-field
-        // schema. Preserve device-generated types while checking AP consistency.
-        for name in &self.build_identity_tags {
-            if let Some(value) = self.generated.get(name).or_else(|| identity.get(name)) {
-                request.insert((*name).into(), value.clone());
-            }
+pub(super) fn generated_update(
+    id: &Identity,
+    device: &DeviceInfo,
+    arguments: &Value,
+) -> Result<Update> {
+    let generated = wire::dictionary(
+        wire::get(arguments, &["DeviceGeneratedRequest"])
+            .context("strict restore requires DeviceGeneratedRequest")?,
+    )?;
+    ensure!(!generated.is_empty(), "empty DeviceGeneratedRequest");
+    let build_identity_tags = tags(
+        wire::get(arguments, &["DeviceGeneratedTags", "BuildIdentityTags"])
+            .context("strict restore requires explicit BuildIdentityTags")?,
+    )
+    .context("invalid updater BuildIdentityTags")?;
+    let response_tags = tags(
+        wire::get(arguments, &["DeviceGeneratedTags", "ResponseTags"])
+            .context("strict restore requires explicit ResponseTags")?,
+    )
+    .context("invalid updater ResponseTags")?
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    ensure!(
+        !response_tags.is_empty(),
+        "firmware updater supplied no response tags"
+    );
+    let common = tss::updater_fields(device)?;
+    let mut request = common.clone();
+    let identity = wire::dictionary(&id.value)?;
+    // BuildIdentityTags selects available fields; it is not a required-field
+    // schema. Preserve device-generated types while checking AP consistency.
+    for name in build_identity_tags {
+        if let Some(value) = generated.get(name).or_else(|| identity.get(name)) {
+            request.insert(name.into(), value.clone());
         }
-        request.extend(self.generated.clone());
-        for (name, expected) in common {
-            let value = &request[&name];
-            let matches = if let Some(expected) = expected.as_boolean() {
-                value.as_boolean() == Some(expected)
-            } else if let Some(expected) = expected.as_unsigned_integer() {
-                wire::number(value).with_context(|| format!("invalid updater AP field {name}"))?
-                    == expected
-            } else {
-                continue;
-            };
-            ensure!(matches, "updater field {name} disagrees with connected AP");
-        }
-        Ok(Value::Dictionary(request))
     }
+    request.extend(generated.clone());
+    for (name, expected) in common {
+        let value = &request[&name];
+        let matches = if let Some(expected) = expected.as_boolean() {
+            value.as_boolean() == Some(expected)
+        } else if let Some(expected) = expected.as_unsigned_integer() {
+            wire::number(value).with_context(|| format!("invalid updater AP field {name}"))?
+                == expected
+        } else {
+            continue;
+        };
+        ensure!(matches, "updater field {name} disagrees with connected AP");
+    }
+    Ok(Update {
+        request: Value::Dictionary(request),
+        response_tags,
+        payload: None,
+    })
 }
 
 #[cfg(test)]

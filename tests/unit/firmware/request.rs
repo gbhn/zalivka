@@ -10,6 +10,9 @@ fn arguments(name: &str) -> Value {
 
 #[test]
 fn controller_names_never_supply_missing_device_metadata() {
+    let identity = Identity::new(0, wire::dict([] as [(&str, Value); 0]));
+    let device =
+        DeviceInfo::parse("CPID:8103 BDID:0A ECID:1 CPFM:03", crate::device::Mode::Dfu).unwrap();
     for name in [
         "SE",
         "AppleTCON",
@@ -22,14 +25,20 @@ fn controller_names_never_supply_missing_device_metadata() {
     ] {
         let args = arguments(name);
         assert!(
-            format!("{:#}", Request::parse(&args).err().unwrap())
-                .contains("DeviceGeneratedRequest")
+            format!(
+                "{:#}",
+                generated_update(&identity, &device, &args).err().unwrap()
+            )
+            .contains("DeviceGeneratedRequest")
         );
     }
 }
 
 #[test]
 fn explicit_tag_lists_are_required_and_must_be_unambiguous() {
+    let identity = Identity::new(0, wire::dict([] as [(&str, Value); 0]));
+    let device =
+        DeviceInfo::parse("CPID:8103 BDID:0A ECID:1 CPFM:03", crate::device::Mode::Dfu).unwrap();
     for key in ["BuildIdentityTags", "ResponseTags"] {
         for value in [
             None,
@@ -63,7 +72,13 @@ fn explicit_tag_lists_are_required_and_must_be_unambiguous() {
             } else {
                 fields.remove(key);
             }
-            assert!(format!("{:#}", Request::parse(&args).err().unwrap()).contains(key));
+            assert!(
+                format!(
+                    "{:#}",
+                    generated_update(&identity, &device, &args).err().unwrap()
+                )
+                .contains(key)
+            );
         }
     }
 }

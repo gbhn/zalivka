@@ -37,6 +37,48 @@ fn firmware_plist_payloads_and_chunks_are_transferred_without_trace_dumps() {
 }
 
 #[test]
+fn both_updater_formats_validate_the_envelope_before_loading_firmware() {
+    let (id, namespace, _) = namespace_bundle("New");
+    // This archive deliberately lacks the namespace's payload. Invalid envelope
+    // metadata must be rejected before a helper can try to load that file.
+    let file = fixture(None, false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    for arguments in [modern_updater_args("FutureController"), namespace] {
+        for (message_type, expected) in [
+            (None, "MessageArgType"),
+            (Some(true.into()), "expected plist string"),
+            (
+                Some("OtherMessage".into()),
+                "invalid firmware updater message type",
+            ),
+        ] {
+            let mut args = arguments.clone();
+            let fields = args.as_dictionary_mut().unwrap();
+            if let Some(value) = message_type {
+                fields.insert("MessageArgType".into(), value);
+            } else {
+                fields.remove("MessageArgType");
+            }
+            let error = zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args)
+                .err()
+                .unwrap();
+            let text = format!("{error:#}");
+            assert!(text.contains(expected), "{text}");
+        }
+        for chunk_size in [true.into(), (-1i64).into(), "-2".into(), "invalid".into()] {
+            let mut args = arguments.clone();
+            args.as_dictionary_mut()
+                .unwrap()
+                .insert("DataChunkSize".into(), chunk_size);
+            let error = zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args)
+                .err()
+                .unwrap();
+            assert!(format!("{error:#}").contains("plist integer"), "{error:#}");
+        }
+    }
+}
+
+#[test]
 fn metadata_updater_cannot_contradict_connected_ap_fields() {
     let file = fixture(None, false);
     let mut ipsw = Ipsw::open(file.path()).unwrap();
@@ -71,11 +113,11 @@ fn metadata_updater_cannot_contradict_connected_ap_fields() {
     generated.insert("ApBoardID".into(), "0x0A".into());
     let update = zalivka::firmware::prepare(&mut ipsw, &identity(), &device_info(), &args).unwrap();
     assert_eq!(
-        wire::string(&update.request, &["ApChipID"]).unwrap(),
+        wire::string(update.request(), &["ApChipID"]).unwrap(),
         "0X8103"
     );
     assert_eq!(
-        wire::string(&update.request, &["ApBoardID"]).unwrap(),
+        wire::string(update.request(), &["ApBoardID"]).unwrap(),
         "0x0A"
     );
     args.as_dictionary_mut()
@@ -152,7 +194,7 @@ fn all_updaters_forward_explicit_requests_and_preserve_complete_service_payloads
             wire::dict([("new payload shape", true.into())]),
         ] {
             let update = zalivka::firmware::prepare(&mut ipsw, &id, &device, &args).unwrap();
-            let request = wire::dictionary(&update.request).unwrap();
+            let request = wire::dictionary(update.request()).unwrap();
             assert_eq!(
                 request["UniqueBuildID"],
                 id.value.as_dictionary().unwrap()["UniqueBuildID"]
@@ -198,11 +240,11 @@ fn absent_selected_identity_fields_are_omitted_without_defaults() {
             Value::Array(vec!["MissingTag".into()]),
         );
     let update = zalivka::firmware::prepare(&mut ipsw, &identity(), &device_info(), &args).unwrap();
-    assert!(wire::get(&update.request, &["MissingTag"]).is_err());
+    assert!(wire::get(update.request(), &["MissingTag"]).is_err());
     for (key, value) in
         wire::dictionary(wire::get(&args, &["DeviceGeneratedRequest"]).unwrap()).unwrap()
     {
-        assert_eq!(wire::get(&update.request, &[key]).unwrap(), value);
+        assert_eq!(wire::get(update.request(), &[key]).unwrap(), value);
     }
 }
 
@@ -223,11 +265,11 @@ fn device_generated_fields_override_selected_identity_fields_without_type_change
         ]);
     let update = zalivka::firmware::prepare(&mut ipsw, &identity(), &device_info(), &args).unwrap();
     assert_eq!(
-        wire::get(&update.request, &["ApSecurityDomain"]).unwrap(),
+        wire::get(update.request(), &["ApSecurityDomain"]).unwrap(),
         &Value::String("0x02".into())
     );
     assert_eq!(
-        wire::get(&update.request, &["UniqueBuildID"])
+        wire::get(update.request(), &["UniqueBuildID"])
             .unwrap()
             .as_data()
             .unwrap(),
@@ -244,11 +286,11 @@ fn device_generated_fields_override_selected_identity_fields_without_type_change
     let id = identity();
     let update = zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).unwrap();
     assert_eq!(
-        wire::get(&update.request, &["UniqueBuildID"]).unwrap(),
+        wire::get(update.request(), &["UniqueBuildID"]).unwrap(),
         wire::get(&id.value, &["UniqueBuildID"]).unwrap()
     );
     assert_eq!(
-        wire::number(wire::get(&update.request, &["ApBoardID"]).unwrap()).unwrap(),
+        wire::number(wire::get(update.request(), &["ApBoardID"]).unwrap()).unwrap(),
         u64::from(device_info().board_id)
     );
 }
@@ -274,27 +316,27 @@ fn common_updater_fields_use_actual_hardware_and_fuses_without_ap_ticket_default
         device.chip_fuse_mode = Some(fuse);
         let update = zalivka::firmware::prepare(&mut ipsw, &identity(), &device, &args).unwrap();
         assert_eq!(
-            wire::number(wire::get(&update.request, &["ApChipID"]).unwrap()).unwrap(),
+            wire::number(wire::get(update.request(), &["ApChipID"]).unwrap()).unwrap(),
             0x9912
         );
         assert_eq!(
-            wire::number(wire::get(&update.request, &["ApBoardID"]).unwrap()).unwrap(),
+            wire::number(wire::get(update.request(), &["ApBoardID"]).unwrap()).unwrap(),
             0x78
         );
         assert_eq!(
-            wire::get(&update.request, &["ApProductionMode"])
+            wire::get(update.request(), &["ApProductionMode"])
                 .unwrap()
                 .as_boolean(),
             Some(fuse & 2 != 0)
         );
         assert_eq!(
-            wire::get(&update.request, &["ApSecurityMode"])
+            wire::get(update.request(), &["ApSecurityMode"])
                 .unwrap()
                 .as_boolean(),
             Some(fuse & 1 != 0)
         );
         for absent in ["@ApImg4Ticket", "@BBTicket", "ApNonce", "ApECID"] {
-            assert!(wire::get(&update.request, &[absent]).is_err());
+            assert!(wire::get(update.request(), &[absent]).is_err());
         }
     }
     device.chip_fuse_mode = None;
@@ -322,7 +364,7 @@ fn captured_cryptex_request_preserves_optional_absence_and_returns_ticket_withou
             .insert("MessageArgUpdaterName".into(), name.into());
         let update =
             zalivka::firmware::prepare(&mut ipsw, &identity(), &device_info(), &args).unwrap();
-        let mut actual = update.request.clone();
+        let mut actual = update.request().clone();
         actual.as_dictionary_mut().unwrap().retain(|key, _| {
             ![
                 "@HostPlatformInfo",
@@ -341,10 +383,10 @@ fn captured_cryptex_request_preserves_optional_absence_and_returns_ticket_withou
             "Cryptex1,GenericDmg",
             "Cryptex1,ExclaveNonceDomain",
         ] {
-            assert!(wire::get(&update.request, &[absent]).is_err());
+            assert!(wire::get(update.request(), &[absent]).is_err());
         }
         assert_eq!(
-            wire::get(&update.request, &["Cryptex1,Nonce"])
+            wire::get(update.request(), &["Cryptex1,Nonce"])
                 .unwrap()
                 .as_data()
                 .unwrap()
@@ -954,13 +996,13 @@ fn namespace_bundles_bind_metadata_and_stream_original_bytes_without_updater_nam
                     .insert("MessageArgUpdaterName".into(), name.into());
             }
             let update = zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).unwrap();
-            let request = wire::dictionary(&update.request).unwrap();
+            let request = wire::dictionary(update.request()).unwrap();
             assert!(crate::test_support::boolean(
-                &update.request,
+                update.request(),
                 &[&format!("@{namespace},Ticket")]
             ));
             assert!(crate::test_support::boolean(
-                &update.request,
+                update.request(),
                 &["@BBTicket"]
             ));
             assert_eq!(request[&format!("{namespace},BoardID")], 7u64.into());
@@ -970,7 +1012,7 @@ fn namespace_bundles_bind_metadata_and_stream_original_bytes_without_updater_nam
                 assert_eq!(&request[key], value);
             }
             let entry = wire::get(
-                &update.request,
+                update.request(),
                 &[&format!("{namespace},ArbitraryComponent")],
             )
             .unwrap();
