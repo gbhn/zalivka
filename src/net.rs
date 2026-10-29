@@ -10,7 +10,7 @@ use std::{sync::Arc, time::Duration};
 use ureq::http::{Method, Request, Response, StatusCode, Uri};
 
 pub fn agent() -> ureq::Agent {
-    agent_with_body_timeout(Some(Duration::from_secs(120)), public_roots())
+    agent_with_body_timeout(Some(Duration::from_secs(120)))
 }
 
 pub(crate) fn public_roots() -> ureq::tls::RootCerts {
@@ -41,14 +41,7 @@ pub(crate) fn tss_agent() -> ureq::Agent {
     let connector = crate::proxy::HttpConnector::for_tss(proxy_config);
     #[cfg(not(windows))]
     let connector = crate::proxy::HttpConnector::new(proxy_config);
-    let agent = ureq::Agent::with_parts(
-        config,
-        connector,
-        ureq::unversioned::resolver::DefaultResolver::default(),
-    );
-    let cancellation = agent.clone();
-    crate::progress::on_cancel(move || cancellation.shutdown());
-    agent
+    configured_agent(config, connector)
 }
 
 pub(crate) fn tls_config(roots: ureq::tls::RootCerts) -> ureq::tls::TlsConfig {
@@ -58,14 +51,19 @@ pub(crate) fn tls_config(roots: ureq::tls::RootCerts) -> ureq::tls::TlsConfig {
         .build()
 }
 
-fn agent_with_body_timeout(
-    body_timeout: Option<Duration>,
-    roots: ureq::tls::RootCerts,
+fn agent_with_body_timeout(body_timeout: Option<Duration>) -> ureq::Agent {
+    let config = agent_config(body_timeout, public_roots());
+    let connector = crate::proxy::HttpConnector::new(config.clone());
+    configured_agent(config, connector)
+}
+
+fn configured_agent(
+    config: ureq::config::Config,
+    connector: crate::proxy::HttpConnector,
 ) -> ureq::Agent {
-    let config = agent_config(body_timeout, roots);
     let agent = ureq::Agent::with_parts(
-        config.clone(),
-        crate::proxy::HttpConnector::new(config),
+        config,
+        connector,
         ureq::unversioned::resolver::DefaultResolver::default(),
     );
     let cancellation = agent.clone();
@@ -142,11 +140,7 @@ pub(crate) fn validate_apple_uri(uri: &Uri) -> Result<()> {
 }
 
 pub fn get(url: &str) -> Result<ureq::http::Response<ureq::Body>> {
-    get_with_agent(url, &agent())
-}
-
-fn get_with_agent(url: &str, agent: &ureq::Agent) -> Result<Response<ureq::Body>> {
-    let response = fetch(Request::get(url).body(Vec::new())?, agent)?;
+    let response = fetch(Request::get(url).body(Vec::new())?, &agent())?;
     ensure!(
         response.status().is_success(),
         "Apple HTTPS request returned {}",

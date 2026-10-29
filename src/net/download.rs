@@ -1,4 +1,4 @@
-use super::{agent_with_body_timeout, fetch, public_roots, validate_apple_url};
+use super::{agent_with_body_timeout, fetch, validate_apple_url};
 use anyhow::{Context, Result, ensure};
 use sha2::digest::DynDigest;
 use std::{
@@ -61,7 +61,7 @@ pub fn download_verified(url: &str, destination: &Path, expected: &[u8]) -> Resu
     validate_apple_url(url)?;
     // RecvBody is a total body deadline, not an inactivity timer. A full IPSW
     // can take hours; retain connect/header deadlines without a body limit.
-    let agent = agent_with_body_timeout(None, public_roots());
+    let agent = agent_with_body_timeout(None);
     download_from(destination, expected, 5, |offset| {
         fetch(firmware_request(url, offset)?, &agent)
     })

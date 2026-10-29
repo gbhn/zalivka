@@ -1,7 +1,9 @@
 //! Shared proxy policy for HTTP requests and the opaque restoreOS FDR tunnel.
 use anyhow::{Context, Result, ensure};
-use std::sync::Arc;
-use ureq::unversioned::transport::{ConnectionDetails, Connector, DefaultConnector, Transport};
+use ureq::unversioned::transport::{
+    ConnectionDetails, Connector, DefaultConnector, RustlsConnector, SocksConnector, TcpConnector,
+    Transport,
+};
 use ureq::{Proxy, http::Uri};
 
 mod connect;
@@ -60,8 +62,8 @@ fn environment_proxy(uri: &Uri, read: impl Fn(&str) -> Option<String>) -> Result
 /// Keep the HTTPS proxy's trust roots separate from Apple's private TSS PKI.
 #[derive(Debug)]
 pub(crate) struct HttpConnector {
-    target: DefaultConnector,
-    proxy_config: Arc<ureq::config::Config>,
+    tls: RustlsConnector,
+    proxy_config: ureq::config::Config,
     #[cfg(windows)]
     windows_tss: bool,
 }
@@ -69,8 +71,8 @@ pub(crate) struct HttpConnector {
 impl HttpConnector {
     pub(crate) fn new(proxy_config: ureq::config::Config) -> Self {
         Self {
-            target: DefaultConnector::default(),
-            proxy_config: Arc::new(proxy_config),
+            tls: RustlsConnector::default(),
+            proxy_config,
             #[cfg(windows)]
             windows_tss: false,
         }
@@ -93,7 +95,7 @@ impl Connector for HttpConnector {
         details: &ConnectionDetails,
         chained: Option<()>,
     ) -> Result<Option<Self::Out>, ureq::Error> {
-        if chained.is_none()
+        let transport = if chained.is_none()
             && let Some(proxy) = details.config.proxy()
             && matches!(
                 proxy.protocol(),
@@ -101,50 +103,24 @@ impl Connector for HttpConnector {
             )
             && !proxy.is_no_proxy(details.uri)
         {
-            return self.connect_http(details, proxy).map(Some);
-        }
+            self.connect_http(details, proxy)?
+        } else {
+            ().chain(SocksConnector::default())
+                .chain(TcpConnector::default())
+                .connect(details, chained)?
+                .ok_or(ureq::Error::ConnectionFailed)?
+                .boxed()
+        };
+        // Every route arrives here with a transport to the destination. TLS to
+        // an HTTPS proxy belongs to the tunnel, not to the destination server.
         #[cfg(windows)]
         if self.windows_tss && details.needs_tls() {
-            // HTTP proxies were handled above. Remaining paths are direct or
-            // SOCKS; establish their transport before native TSS TLS validation.
-            use ureq::unversioned::transport::{SocksConnector, TcpConnector};
-            let raw =
-                ().chain(SocksConnector::default())
-                    .chain(TcpConnector::default())
-                    .connect(details, None)?
-                    .ok_or(ureq::Error::ConnectionFailed)?;
-            return crate::windows::tls::connect_tss(details, raw.boxed()).map(Some);
+            return crate::windows::tls::connect_tss(details, transport).map(Some);
         }
-        let proxy_config = self.proxy_config.clone();
-        let target_details = ConnectionDetails {
-            uri: details.uri,
-            addrs: details.addrs.clone(),
-            config: details.config,
-            request_level: details.request_level,
-            resolver: details.resolver,
-            now: details.now,
-            timeout: details.timeout,
-            current_time: details.current_time.clone(),
-            register_shutdown: details.register_shutdown.clone(),
-            run_connector: Arc::new(move |details| {
-                let proxy_details = ConnectionDetails {
-                    uri: details.uri,
-                    addrs: details.addrs.clone(),
-                    config: &proxy_config,
-                    request_level: true,
-                    resolver: details.resolver,
-                    now: details.now,
-                    timeout: details.timeout,
-                    current_time: details.current_time.clone(),
-                    run_connector: details.run_connector.clone(),
-                    register_shutdown: details.register_shutdown.clone(),
-                };
-                DefaultConnector::default()
-                    .connect(&proxy_details, None)?
-                    .ok_or(ureq::Error::ConnectionFailed)
-            }),
-        };
-        self.target.connect(&target_details, chained)
+        Ok(self
+            .tls
+            .connect(details, Some(transport))?
+            .map(Transport::boxed))
     }
 }
 
@@ -155,7 +131,7 @@ impl HttpConnector {
         proxy: &Proxy,
     ) -> Result<Box<dyn Transport>, ureq::Error> {
         use std::time::Duration;
-        use ureq::unversioned::transport::{RustlsConnector, TransportAdapter};
+        use ureq::unversioned::transport::TransportAdapter;
         let timeout = details
             .timeout
             .not_zero()
@@ -189,7 +165,7 @@ impl HttpConnector {
                 details.current_time.clone(),
             ))
         };
-        let result = (|| -> anyhow::Result<_> {
+        (|| -> anyhow::Result<_> {
             let mut stream = make(timeout)?;
             let host = details
                 .uri
@@ -200,19 +176,9 @@ impl HttpConnector {
                 .port_u16()
                 .unwrap_or(if details.needs_tls() { 443 } else { 80 });
             connect::connect(&mut stream, (host, port), proxy, timeout, make)?;
-            Ok(TunnelTransport(stream.into_inner()))
+            Ok(TunnelTransport(stream.into_inner()).boxed())
         })()
-        .map_err(|error| ureq::Error::Other(error.into()))?;
-        // TLS to the proxy is already verified against its own roots. Add a
-        // separate TLS layer to the destination using the request's trust roots.
-        #[cfg(windows)]
-        if self.windows_tss && details.needs_tls() {
-            return crate::windows::tls::connect_tss(details, result.boxed());
-        }
-        RustlsConnector::default()
-            .connect(details, Some(result))?
-            .map(Transport::boxed)
-            .ok_or(ureq::Error::ConnectionFailed)
+        .map_err(|error| ureq::Error::Other(error.into()))
     }
 }
 

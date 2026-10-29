@@ -1,8 +1,200 @@
 use super::*;
 
 #[test]
+fn destination_tls_and_connection_reuse_work_through_every_proxy_route() {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    let certificate = include_bytes!("../../fixtures/proxy/localhost.der");
+    let server_config = Arc::new(
+        rustls::ServerConfig::builder_with_provider(Arc::new(
+            oxitls_rustcrypto_provider::provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(certificate.as_slice())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                include_bytes!("../../fixtures/proxy/localhost-key.der").to_vec(),
+            )),
+        )
+        .unwrap(),
+    );
+
+    fn serve_tls(stream: impl Read + Write, config: Arc<rustls::ServerConfig>) {
+        let connection = rustls::ServerConnection::new(config).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, stream);
+        for number in 1..=2 {
+            assert!(read_header(&mut stream).starts_with(&format!("GET /{number} HTTP/1.1")));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .unwrap();
+            stream.flush().unwrap();
+        }
+    }
+
+    for route in [
+        "direct",
+        "http",
+        "https",
+        "socks5h",
+        "http-bypass",
+        "socks-bypass",
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let destination = format!("localhost:{}", address.port());
+        let expected = destination.clone();
+        let config = server_config.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            match route {
+                "http" => {
+                    assert!(read_header(&mut stream).starts_with(&format!("CONNECT {expected} ")));
+                    stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+                    serve_tls(stream, config);
+                }
+                "https" => {
+                    let connection = rustls::ServerConnection::new(config.clone()).unwrap();
+                    let mut proxy = rustls::StreamOwned::new(connection, stream);
+                    assert!(read_header(&mut proxy).starts_with(&format!("CONNECT {expected} ")));
+                    proxy.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+                    proxy.flush().unwrap();
+                    serve_tls(proxy, config);
+                }
+                "socks5h" => {
+                    let mut greeting = [0; 3];
+                    stream.read_exact(&mut greeting).unwrap();
+                    assert_eq!(greeting, [5, 1, 0]);
+                    stream.write_all(&[5, 0]).unwrap();
+                    let mut target = [0; 16];
+                    stream.read_exact(&mut target).unwrap();
+                    assert_eq!(&target[..5], &[5, 1, 0, 3, 9]);
+                    assert_eq!(&target[5..14], b"localhost");
+                    assert_eq!(&target[14..], &address.port().to_be_bytes());
+                    stream.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).unwrap();
+                    serve_tls(stream, config);
+                }
+                _ => serve_tls(stream, config),
+            }
+        });
+        let proxy = match route {
+            "direct" => None,
+            "http-bypass" | "socks-bypass" => Some(
+                ureq::Proxy::builder(if route == "http-bypass" {
+                    ureq::ProxyProtocol::Http
+                } else {
+                    ureq::ProxyProtocol::Socks5h
+                })
+                .host("does-not-resolve.invalid")
+                .port(1)
+                .no_proxy("localhost")
+                .build()
+                .unwrap(),
+            ),
+            _ => Some(ureq::Proxy::new(&format!("{route}://{address}")).unwrap()),
+        };
+        let config = agent_config(
+            Some(Duration::from_secs(5)),
+            ureq::tls::RootCerts::new_with_certs(&[ureq::tls::Certificate::from_der(certificate)]),
+        );
+        let client = configured_agent(config.clone(), crate::proxy::HttpConnector::new(config));
+        for number in 1..=2 {
+            let request = Request::get(format!("https://{destination}/{number}"))
+                .body(Vec::new())
+                .unwrap();
+            let mut response = send_http_via(&client, &request, proxy.clone())
+                .unwrap_or_else(|error| panic!("{route}: {error:#}"));
+            assert_eq!(
+                response.body_mut().read_to_string().unwrap(),
+                "OK",
+                "{route}"
+            );
+        }
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn cancellation_interrupts_proxy_and_tls_handshakes_for_public_and_tss_clients() {
+    use std::sync::mpsc;
+
+    for tss in [false, true] {
+        for route in ["direct-tls", "http", "https", "socks5h"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (ready, receiving) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                match route {
+                    "http" => assert!(read_header(&mut stream).starts_with("CONNECT ")),
+                    "socks5h" => {
+                        let mut greeting = [0; 3];
+                        stream.read_exact(&mut greeting).unwrap();
+                        assert_eq!(greeting, [5, 1, 0]);
+                    }
+                    _ => {
+                        let mut record = [0; 5];
+                        stream.read_exact(&mut record).unwrap();
+                        assert_eq!(record[0], 22); // TLS handshake record.
+                    }
+                }
+                ready.send(()).unwrap();
+                if let Err(error) = stream.read_to_end(&mut Vec::new()) {
+                    assert!(
+                        matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        ),
+                        "{route}: {error}"
+                    );
+                }
+            });
+            let context = crate::progress::Context::new(|_| {});
+            let operation = context.clone();
+            let (completed, finishing) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                operation.run(|| {
+                    let client = if tss { tss_agent() } else { agent() };
+                    let (url, proxy) = if route == "direct-tls" {
+                        (format!("https://{address}/"), None)
+                    } else {
+                        (
+                            "https://does-not-resolve.invalid/".into(),
+                            Some(ureq::Proxy::new(&format!("{route}://{address}")).unwrap()),
+                        )
+                    };
+                    let request = Request::get(url).body(Vec::new()).unwrap();
+                    completed
+                        .send(send_http_via(&client, &request, proxy).is_err())
+                        .unwrap();
+                });
+            });
+            receiving.recv_timeout(Duration::from_secs(5)).unwrap();
+            context.cancel();
+            assert!(
+                finishing.recv_timeout(Duration::from_secs(2)).unwrap(),
+                "{route}; TSS={tss}"
+            );
+            worker.join().unwrap();
+            server.join().unwrap();
+        }
+    }
+}
+
+#[test]
 fn firmware_body_has_an_inactivity_timeout_and_retains_no_total_deadline() {
-    let client = agent_with_body_timeout(None, public_roots());
+    let client = agent_with_body_timeout(None);
     assert_eq!(
         client.config().timeout_per_read(),
         Some(Duration::from_secs(120))

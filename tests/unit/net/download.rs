@@ -78,7 +78,7 @@ fn firmware_server(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<St
 }
 
 fn test_download(url: &str, destination: &Path, expected: &[u8]) -> Result<()> {
-    let agent = agent_with_body_timeout(None, ureq::tls::RootCerts::WebPki);
+    let agent = agent_with_body_timeout(None);
     // Production uses fetch(), which enforces Apple's HTTPS host allowlist.
     // These fixtures use the same downloader and request with a local server.
     download_from(destination, expected, 0, |offset| {
@@ -96,7 +96,7 @@ fn automatic_retry_survives_http_and_body_failures_in_one_invocation() {
         "HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\nfirmware".into(),
         "HTTP/1.1 206 Partial Content\r\nContent-Length: 8\r\nContent-Range: bytes 8-15/16\r\nConnection: close\r\n\r\n payload".into(),
     ]);
-    let agent = agent_with_body_timeout(None, ureq::tls::RootCerts::WebPki);
+    let agent = agent_with_body_timeout(None);
     download_from(&destination, &expected, 5, |offset| {
         send_http(&agent, &firmware_request(&url, offset)?)
     })
@@ -119,7 +119,7 @@ fn retry_budget_is_shared_by_http_errors_and_interrupted_bodies() {
         "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
         "HTTP/1.1 206 Partial Content\r\nContent-Length: 8\r\nContent-Range: bytes 8-15/16\r\nConnection: close\r\n\r\n pay".into(),
     ]);
-    let agent = agent_with_body_timeout(None, ureq::tls::RootCerts::WebPki);
+    let agent = agent_with_body_timeout(None);
     let result = download_from(
         &destination,
         &Sha256::digest(b"firmware payload"),
@@ -327,11 +327,7 @@ fn firmware_body_streaming_is_not_limited_by_the_metadata_body_deadline() {
         let request = Request::get(format!("http://{address}/firmware"))
             .body(Vec::new())
             .unwrap();
-        let mut response = send_http(
-            &agent_with_body_timeout(limit, ureq::tls::RootCerts::WebPki),
-            &request,
-        )
-        .unwrap();
+        let mut response = send_http(&agent_with_body_timeout(limit), &request).unwrap();
         let mut bytes = Vec::new();
         let result = response.body_mut().as_reader().read_to_end(&mut bytes);
         server.join().unwrap();
