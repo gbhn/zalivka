@@ -1,4 +1,6 @@
 use super::*;
+use crate::test_net::{accept, read_header};
+use rustls::RootCertStore;
 use std::{net::TcpListener, thread};
 
 #[test]
@@ -9,7 +11,7 @@ fn empty_tls_read_does_not_start_a_handshake_or_touch_the_socket() {
     let (mut peer, _) = listener.accept().unwrap();
     peer.set_nonblocking(true).unwrap();
     let connection = ClientConnection::new(
-        tls_config().unwrap(),
+        crate::net::tls::config(None).unwrap(),
         ServerName::try_from("localhost").unwrap(),
     )
     .unwrap();
@@ -31,7 +33,7 @@ fn ipv6_targets_use_socks_address_bytes_with_local_and_remote_resolution() {
         let proxy =
             Proxy::new(&format!("{protocol}://{}", listener.local_addr().unwrap())).unwrap();
         let server = thread::spawn(move || {
-            let mut socket = accept(listener);
+            let mut socket = accept(&listener);
             let mut greeting = [0; 3];
             socket.read_exact(&mut greeting).unwrap();
             assert_eq!(greeting, [5, 1, 0]);
@@ -47,37 +49,6 @@ fn ipv6_targets_use_socks_address_bytes_with_local_and_remote_resolution() {
         assert_eq!(stream.read(&mut []).unwrap(), 0);
         server.join().unwrap();
     }
-}
-fn accept(listener: TcpListener) -> TcpStream {
-    listener.set_nonblocking(true).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let stream = loop {
-        match listener.accept() {
-            Ok((s, _)) => break s,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(1))
-            }
-            Err(e) => panic!("proxy accept failed: {e}"),
-        }
-    };
-    stream.set_nonblocking(false).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    stream
-}
-fn header(stream: &mut impl Read) -> String {
-    let mut bytes = vec![];
-    while !bytes.ends_with(b"\r\n\r\n") {
-        let mut b = [0];
-        stream.read_exact(&mut b).unwrap();
-        bytes.push(b[0]);
-        assert!(bytes.len() < 16384);
-    }
-    String::from_utf8(bytes).unwrap()
 }
 fn read_bytes(stream: &mut Stream, count: usize) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -118,8 +89,8 @@ fn http_tunnel_preserves_buffered_data_and_large_payload() {
     let payload: Vec<_> = (0..262144).map(|n| (n % 251) as u8).collect();
     let expected = payload.clone();
     let server = thread::spawn(move || {
-        let mut s = accept(proxy_listener);
-        let h = header(&mut s);
+        let mut s = accept(&proxy_listener);
+        let h = read_header(&mut s);
         assert!(h.starts_with("CONNECT does-not-resolve.invalid:443 HTTP/1.1\r\n"));
         assert!(h.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
         s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\nhello")
@@ -153,8 +124,8 @@ fn refused_proxy_never_connects_to_the_target_directly() {
     let proxy_listener = listener();
     let proxy = Proxy::new(&format!("http://{}", proxy_listener.local_addr().unwrap())).unwrap();
     let server = thread::spawn(move || {
-        let mut s = accept(proxy_listener);
-        let _ = header(&mut s);
+        let mut s = accept(&proxy_listener);
+        let _ = read_header(&mut s);
         s.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
             .unwrap();
     });
@@ -183,8 +154,8 @@ fn http_tunnels_reject_malformed_headers_and_bytes_after_an_early_terminator() {
         let proxy =
             Proxy::new(&format!("http://{}", proxy_listener.local_addr().unwrap())).unwrap();
         let server = thread::spawn(move || {
-            let mut stream = accept(proxy_listener);
-            let _ = header(&mut stream);
+            let mut stream = accept(&proxy_listener);
+            let _ = read_header(&mut stream);
             stream.write_all(reply).unwrap();
         });
         assert!(
@@ -204,7 +175,7 @@ fn socks5h_authenticates_and_sends_the_unresolved_domain() {
     ))
     .unwrap();
     let server = thread::spawn(move || {
-        let mut s = accept(proxy_listener);
+        let mut s = accept(&proxy_listener);
         let mut greeting = [0; 3];
         s.read_exact(&mut greeting).unwrap();
         assert_eq!(greeting, [5, 1, 2]);
@@ -238,7 +209,7 @@ fn socks4a_preserves_the_domain_and_user_id() {
     ))
     .unwrap();
     let server = thread::spawn(move || {
-        let mut s = accept(proxy_listener);
+        let mut s = accept(&proxy_listener);
         let mut request = [0; 8];
         s.read_exact(&mut request).unwrap();
         assert_eq!(request, [4, 1, 1, 187, 0, 0, 0, 1]);
@@ -263,22 +234,9 @@ fn socks4a_preserves_the_domain_and_user_id() {
 }
 #[test]
 fn https_proxy_verifies_the_certificate_and_preserves_target_bytes() {
-    use rustls::{
-        ServerConfig, ServerConnection,
-        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-    };
+    use rustls::{ServerConnection, pki_types::CertificateDer};
     let cert = CertificateDer::from(include_bytes!("../../fixtures/proxy/localhost.der").to_vec());
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-        include_bytes!("../../fixtures/proxy/localhost-key.der").to_vec(),
-    ));
-    let server_config = Arc::new(
-        ServerConfig::builder_with_provider(Arc::new(oxitls_rustcrypto_provider::provider()))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert.clone()], key)
-            .unwrap(),
-    );
+    let server_config = crate::test_net::tls_server_config();
     let mut roots = RootCertStore::empty();
     roots.add(cert).unwrap();
     let trusted = Arc::new(
@@ -291,21 +249,21 @@ fn https_proxy_verifies_the_certificate_and_preserves_target_bytes() {
     for (host, config, success) in [
         ("localhost", trusted.clone(), true),
         ("wrong.invalid", trusted, false),
-        ("localhost", tls_config().unwrap(), false),
+        ("localhost", crate::net::tls::config(None).unwrap(), false),
     ] {
         let l = listener();
         let address = l.local_addr().unwrap();
         let config_server = server_config.clone();
         let server = thread::spawn(move || {
             let mut tls =
-                StreamOwned::new(ServerConnection::new(config_server).unwrap(), accept(l));
+                StreamOwned::new(ServerConnection::new(config_server).unwrap(), accept(&l));
             while tls.conn.is_handshaking() {
                 if tls.conn.complete_io(&mut tls.sock).is_err() {
                     return;
                 }
             }
             if success {
-                assert!(header(&mut tls).starts_with("CONNECT does-not-resolve.invalid:443"));
+                assert!(read_header(&mut tls).starts_with("CONNECT does-not-resolve.invalid:443"));
                 tls.write_all(b"HTTP/1.1 200 OK\r\n\r\n\x16\x03\x03\x00\x02")
                     .unwrap();
                 tls.flush().unwrap();
@@ -342,8 +300,8 @@ fn every_successful_connect_status_starts_an_opaque_tunnel() {
         let proxy =
             Proxy::new(&format!("http://{}", proxy_listener.local_addr().unwrap())).unwrap();
         let server = thread::spawn(move || {
-            let mut socket = accept(proxy_listener);
-            header(&mut socket);
+            let mut socket = accept(&proxy_listener);
+            read_header(&mut socket);
             write!(socket, "HTTP/1.1 {status} Tunnel ready\r\n\r\nopaque").unwrap();
         });
         let mut stream = connect_blocking("does-not-resolve.invalid", 443, Some(proxy)).unwrap();

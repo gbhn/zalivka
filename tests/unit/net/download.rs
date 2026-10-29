@@ -65,10 +65,7 @@ fn firmware_server(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<St
     let server = thread::spawn(move || {
         let mut requests = vec![];
         for response in responses {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            let mut stream = accept(&listener);
             requests.push(read_header(&mut stream).to_ascii_lowercase());
             stream.write_all(response.as_bytes()).unwrap();
         }

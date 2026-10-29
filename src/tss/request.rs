@@ -58,27 +58,25 @@ fn base(device: &DeviceInfo, id: &Identity) -> Result<Dictionary> {
             "signing identity {name} disagrees with connected device"
         );
     }
-    if let Some(fields) = id.value.as_dictionary() {
-        wire::copy_keys(
-            &mut d,
-            fields,
-            &[
-                "UniqueBuildID",
-                "Ap,OSLongVersion",
-                "Ap,OSReleaseType",
-                "Ap,ProductMarketingVersion",
-                "Ap,ProductType",
-                "Ap,SDKPlatform",
-                "Ap,Target",
-                "Ap,TargetType",
-                "Ap,Timestamp",
-                "PearlCertificationRootPub",
-                "NeRDEpoch",
-                "AllowNeRDBoot",
-                "PermitNeRDPivot",
-            ],
-        );
-    }
+    wire::copy_keys(
+        &mut d,
+        wire::dictionary(&id.value)?,
+        &[
+            "UniqueBuildID",
+            "Ap,OSLongVersion",
+            "Ap,OSReleaseType",
+            "Ap,ProductMarketingVersion",
+            "Ap,ProductType",
+            "Ap,SDKPlatform",
+            "Ap,Target",
+            "Ap,TargetType",
+            "Ap,Timestamp",
+            "PearlCertificationRootPub",
+            "NeRDEpoch",
+            "AllowNeRDBoot",
+            "PermitNeRDPivot",
+        ],
+    );
     if wire::optional_boolean(&id.value, &["Info", "RequiresUIDMode"])?.unwrap_or(false) {
         let uid = wire::get(&id.value, &["UID_MODE"])
             .context("strict restore requires explicit UID_MODE")?;
@@ -121,30 +119,11 @@ fn firmware_request(device: &DeviceInfo, id: &Identity, chain: BootChain) -> Res
     }
     let mut components = Dictionary::new();
     for (name, value) in id.manifest()? {
-        let component =
-            Component::parse(value).with_context(|| format!("invalid signing component {name}"))?;
-        let selected = component
-            .info
-            .and_then(|info| info.get("Personalize"))
-            .map(|value| {
-                value
-                    .as_boolean()
-                    .with_context(|| format!("invalid {name} Info.Personalize"))
-            })
-            .transpose()?;
-        // Personalize controls file packaging. Trusted measurements and explicit
-        // signing rules also belong in the ticket, even with Personalize=false.
-        if selected != Some(true)
-            && !component.trusted
-            && !component
-                .info
-                .is_some_and(|info| info.contains_key("RestoreRequestRules"))
-        {
+        let Some(entry) = component_request(value, &parameters)
+            .with_context(|| format!("preparing signing component {name}"))?
+        else {
             continue;
-        }
-        let entry = component
-            .request(&parameters)
-            .with_context(|| format!("preparing signing component {name}"))?;
+        };
         ensure!(
             !parameters.contains_key(name) && !name.starts_with('@'),
             "signing component {name} conflicts with request parameters"
@@ -158,71 +137,63 @@ fn firmware_request(device: &DeviceInfo, id: &Identity, chain: BootChain) -> Res
     Ok(Value::Dictionary(parameters))
 }
 
-/// Validate optional metadata once, preserving signing-only entries without Info.
-struct Component<'a> {
-    fields: &'a Dictionary,
-    info: Option<&'a Dictionary>,
-    trusted: bool,
-    path: Option<&'a str>,
-}
-
-impl<'a> Component<'a> {
-    fn parse(value: &'a Value) -> Result<Self> {
-        let fields = wire::dictionary(value)?;
-        let info = fields.get("Info").map(wire::dictionary).transpose()?;
-        let trusted = fields
-            .get("Trusted")
-            .map(|value| value.as_boolean().context("invalid Trusted flag"))
-            .transpose()?
-            .unwrap_or(false);
-        Ok(Self {
-            fields,
-            info,
-            trusted,
-            path: crate::ipsw::component_path(value)?,
+/// Select and prepare one signing entry, including fileless measurements.
+fn component_request(value: &Value, parameters: &Dictionary) -> Result<Option<Dictionary>> {
+    let fields = wire::dictionary(value)?;
+    let info = fields.get("Info").map(wire::dictionary).transpose()?;
+    let trusted = fields
+        .get("Trusted")
+        .map(|value| value.as_boolean().context("invalid Trusted flag"))
+        .transpose()?
+        .unwrap_or(false);
+    let path = crate::ipsw::component_path(value)?;
+    let selected = info
+        .and_then(|info| info.get("Personalize"))
+        .map(|value| value.as_boolean().context("invalid Info.Personalize"))
+        .transpose()?;
+    let rules = info.and_then(|info| info.get("RestoreRequestRules"));
+    // Personalize controls file packaging. Trusted measurements and explicit
+    // signing rules also belong in the ticket, even with Personalize=false.
+    if selected != Some(true) && !trusted && rules.is_none() {
+        return Ok(None);
+    }
+    let mut entry = fields.clone();
+    entry.remove("Info");
+    if let Some(rules) = rules {
+        apply_rules(&mut entry, rules, parameters)?;
+    }
+    let trusted = entry
+        .get("Trusted")
+        .map(|value| {
+            value
+                .as_boolean()
+                .context("invalid signing Trusted flag after rules")
         })
-    }
-
-    fn request(&self, parameters: &Dictionary) -> Result<Dictionary> {
-        let mut entry = self.fields.clone();
-        entry.remove("Info");
-        if let Some(rules) = self.info.and_then(|info| info.get("RestoreRequestRules")) {
-            apply_rules(&mut entry, rules, parameters)?;
-        }
-        let trusted = entry
-            .get("Trusted")
-            .map(|value| {
-                value
-                    .as_boolean()
-                    .context("invalid signing Trusted flag after rules")
-            })
-            .transpose()?
-            .unwrap_or(false);
-        let digest = entry
-            .get("Digest")
-            .map(|value| value.as_data().context("invalid signing Digest"))
-            .transpose()?;
+        .transpose()?
+        .unwrap_or(false);
+    let digest = entry
+        .get("Digest")
+        .map(|value| value.as_data().context("invalid signing Digest"))
+        .transpose()?;
+    ensure!(
+        digest.is_none_or(|digest| digest.is_empty() || [20, 32, 48].contains(&digest.len())),
+        "unsupported signing Digest size"
+    );
+    if trusted && path.is_some() {
         ensure!(
-            digest.is_none_or(|digest| digest.is_empty() || [20, 32, 48].contains(&digest.len())),
-            "unsupported signing Digest size"
+            digest.is_some_and(|digest| !digest.is_empty()),
+            "strict restore requires a nonempty Digest for a trusted file"
         );
-        if trusted && self.path.is_some() {
-            ensure!(
-                digest.is_some_and(|digest| !digest.is_empty()),
-                "strict restore requires a nonempty Digest for a trusted file"
-            );
-        } else if trusted && digest.is_none() {
-            ensure!(
-                self.info
-                    .is_some_and(|info| info.contains_key("RestoreRequestRules")),
-                "strict restore requires a Digest or signing rules for a fileless trusted measurement"
-            );
-            // TSS's wire marker requests the server's measurement (e.g. a trust
-            // object). It is never used as a substitute for a file's hash.
-            entry.insert("Digest".into(), Value::Data(vec![]));
-        }
-        Ok(entry)
+    } else if trusted && digest.is_none() {
+        ensure!(
+            rules.is_some(),
+            "strict restore requires a Digest or signing rules for a fileless trusted measurement"
+        );
+        // TSS's wire marker requests the server's measurement (e.g. a trust
+        // object). It is never used as a substitute for a file's hash.
+        entry.insert("Digest".into(), Value::Data(vec![]));
     }
+    Ok(Some(entry))
 }
 
 pub fn apply_rules(entry: &mut Dictionary, rules: &Value, parameters: &Dictionary) -> Result<()> {
@@ -273,10 +244,6 @@ pub fn local_policy_request(
             ("Trusted", true.into()),
         ]),
     );
-    d.insert(
-        "Ap,NextStageIM4MHash".into(),
-        Value::Data(Sha384::digest(next_ticket).to_vec()),
-    );
     if let Some(args) = args {
         d.remove("ApNonce");
         for key in ["Ap,NextStageIM4MHash", "Ap,RecoveryOSPolicyNonceHash"] {
@@ -291,6 +258,11 @@ pub fn local_policy_request(
         d.insert(
             "Ap,VolumeUUID".into(),
             Value::Data(uuid.as_bytes().to_vec()),
+        );
+    } else {
+        d.insert(
+            "Ap,NextStageIM4MHash".into(),
+            Value::Data(Sha384::digest(next_ticket).to_vec()),
         );
     }
     Ok(Value::Dictionary(d))

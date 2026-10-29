@@ -5045,7 +5045,6 @@ dependencies = [
  "quick-xml 0.42.0",
  "rfd",
  "rustls",
- "rustls-native-certs",
  "rustls-platform-verifier",
  "rustls-webpki",
  "serde",

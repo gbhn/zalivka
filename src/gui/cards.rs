@@ -303,14 +303,7 @@ impl App {
                 ui.label(RichText::new(tr(job.action.title())).size(21.0).strong());
             });
             ui.add_space(12.0);
-            ui.label(
-                RichText::new(
-                    job.phase
-                        .strip_prefix("Stage: ")
-                        .map_or_else(|| tr(&job.phase), |stage| trf("Stage: {}", &[stage])),
-                )
-                .size(16.0),
-            );
+            ui.label(RichText::new(job.phase()).size(16.0));
             if job.action.writes_device() {
                 progress_bar(ui, job.overall_fraction);
             } else if job.transfers.is_empty() {

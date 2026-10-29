@@ -215,24 +215,18 @@ impl Ipsw {
 
     pub fn personalized(&mut self, id: &Identity, name: &str, ticket: &Value) -> Result<Vec<u8>> {
         crate::log!(Trace, "ipsw:sign", "{name}; identity={}", id.index);
-        let bytes = if name == "Ap,LocalPolicy" {
-            img4::empty_local_policy()
-        } else {
-            self.component(id, name)?
-        };
+        if name == "Ap,LocalPolicy" {
+            return img4::personalize(&img4::empty_local_policy(), crate::tss::ticket(ticket)?);
+        }
+        let bytes = self.component(id, name)?;
         // Trusted is a signing attribute, not the IMG4 transport container.
         // InputDevice is an untrusted IM4P but still needs the IMG4 wrapper.
-        if name != "Ap,LocalPolicy"
-            && !wire::optional_boolean(&id.value, &["Manifest", name, "Trusted"])?.unwrap_or(false)
+        if !wire::optional_boolean(&id.value, &["Manifest", name, "Trusted"])?.unwrap_or(false)
             && img4::type_offset(&bytes).is_none()
         {
             return Ok(bytes);
         }
-        if name == "Ap,LocalPolicy" {
-            img4::personalize(&bytes, crate::tss::ticket(ticket)?)
-        } else {
-            img4::personalize_with_metadata(name, &bytes, ticket, &id.value)
-        }
+        img4::personalize_with_metadata(name, &bytes, ticket, &id.value)
     }
 
     /// Stream even multi-gigabyte images without keeping them in memory.
@@ -353,23 +347,6 @@ impl Ipsw {
             .with_context(|| format!("opening filesystem image {path}"))
     }
 
-    pub fn preflight(&mut self, id: &mut Identity) -> Result<()> {
-        self.resolve_types(id)?;
-        self.preflight_paths(id)?;
-        id.path("OS")?;
-        for tag in [b"ibss", b"ibec", b"rdsk", b"rdtr", b"rkrn"] {
-            let name = id.require_component_type(tag)?;
-            self.verify_boot_component(id, name)?;
-        }
-        Ok(())
-    }
-
-    pub fn preflight_recovery(&mut self, id: &mut Identity) -> Result<()> {
-        self.resolve_types(id)?;
-        id.path("OS")?;
-        self.preflight_paths(id)
-    }
-
     pub(crate) fn verify_boot_component(&mut self, id: &Identity, name: &str) -> Result<Vec<u8>> {
         ensure!(
             wire::get(&id.value, &["Manifest", name, "Digest"])?
@@ -387,7 +364,9 @@ impl Ipsw {
         Ok(bytes)
     }
 
-    fn preflight_paths(&mut self, id: &Identity) -> Result<()> {
+    /// Check shared restore/RecoveryOS metadata without selecting boot stages.
+    pub fn validate_identity(&mut self, id: &mut Identity) -> Result<()> {
+        self.resolve_types(id)?;
         wire::optional_boolean(&id.value, &["Info", "RequiresUIDMode"])?;
         wire::optional_boolean(&id.value, &["Info", "RequiresNonceSlot"])?;
         for (name, entry) in id.manifest()? {
@@ -444,6 +423,7 @@ impl Ipsw {
                 );
             }
         }
+        id.path("OS")?;
         Ok(())
     }
 

@@ -162,8 +162,7 @@ fn environment_proxy(uri: &Uri, read: impl Fn(&str) -> Option<String>) -> Result
 pub(crate) struct HttpConnector {
     tls: RustlsConnector,
     proxy_config: ureq::config::Config,
-    #[cfg(windows)]
-    windows_tss: bool,
+    tss: bool,
 }
 
 impl HttpConnector {
@@ -171,15 +170,13 @@ impl HttpConnector {
         Self {
             tls: RustlsConnector::default(),
             proxy_config,
-            #[cfg(windows)]
-            windows_tss: false,
+            tss: false,
         }
     }
 
-    #[cfg(windows)]
     pub(crate) fn for_tss(proxy_config: ureq::config::Config) -> Self {
         Self {
-            windows_tss: true,
+            tss: true,
             ..Self::new(proxy_config)
         }
     }
@@ -227,9 +224,8 @@ impl HttpConnector {
         };
         // Every route arrives here with a transport to the destination. TLS to
         // an HTTPS proxy belongs to the tunnel, not to the destination server.
-        #[cfg(windows)]
-        if self.windows_tss && details.needs_tls() {
-            return crate::windows::tls::connect_tss(details, transport).map(Some);
+        if self.tss && details.needs_tls() {
+            return crate::net::tls::connect_tss(details, transport).map(Some);
         }
         Ok(self
             .tls
@@ -382,27 +378,26 @@ pub(crate) fn from_windows_list(uri: &Uri, list: &str, bypass: &str) -> Result<O
     if windows_bypass(uri, bypass) {
         return Ok(None);
     }
-    let entries: Vec<_> = list
+    let entries = list
         .split(|c: char| c == ';' || c.is_whitespace())
-        .filter(|entry| !entry.is_empty())
-        .collect();
+        .filter(|entry| !entry.is_empty());
     let scheme = uri
         .scheme_str()
         .context("proxy destination has no scheme")?;
     let selected = entries
-        .iter()
+        .clone()
         .find_map(|entry| {
             let (key, value) = entry.split_once('=')?;
             key.eq_ignore_ascii_case(scheme).then_some((value, false))
         })
         .or_else(|| {
             entries
-                .iter()
+                .clone()
                 .find(|entry| !entry.contains('='))
-                .map(|entry| (*entry, false))
+                .map(|entry| (entry, false))
         })
         .or_else(|| {
-            entries.iter().find_map(|entry| {
+            entries.clone().find_map(|entry| {
                 let (key, value) = entry.split_once('=')?;
                 key.eq_ignore_ascii_case("socks").then_some((value, true))
             })

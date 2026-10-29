@@ -1,4 +1,5 @@
 use super::*;
+use test_support::catalog_fixture;
 use zalivka::ipsw::Behavior;
 
 #[test]
@@ -61,43 +62,6 @@ fn apple_catalog_resolves_mac_and_t2_hardware_and_uses_current_universal_release
             assert!(release.url.ends_with("/restore.ipsw"));
         }
     }
-}
-
-#[test]
-fn catalog_selection_uses_advertised_hardware_without_chip_or_product_name_tables() {
-    let mut device = device_info();
-    device.chip_id = 0xabcd;
-    device.board_id = 0x42;
-    let key = ((u64::from(device.board_id) << 24) | u64::from(device.chip_id)).to_string();
-    let matching = catalog_fixture(
-        &key,
-        "FutureProduct9,2",
-        &"ab".repeat(20),
-        "https://updates.cdn-apple.com/future.ipsw",
-    );
-    let other = catalog_fixture(
-        "1",
-        "AnotherProduct",
-        &"ab".repeat(20),
-        "https://updates.cdn-apple.com/other.ipsw",
-    );
-    let expected = catalog::resolve(&matching, &device).unwrap();
-    assert_eq!(
-        catalog::resolve_catalogs(&[other.clone(), matching.clone()], &device).unwrap(),
-        expected
-    );
-    assert_eq!(
-        catalog::resolve_catalogs(&[matching.clone(), matching.clone()], &device).unwrap(),
-        expected
-    );
-    assert!(catalog::resolve_catalogs(&[other], &device).is_err());
-    let conflicting = catalog_fixture(
-        &key,
-        "FutureProduct9,2",
-        &"cd".repeat(20),
-        "https://updates.cdn-apple.com/different.ipsw",
-    );
-    assert!(catalog::resolve_catalogs(&[matching, conflicting], &device).is_err());
 }
 
 #[test]
@@ -236,7 +200,7 @@ fn automatic_download_reuses_a_verified_compatible_cached_ipsw() {
     let expected = directory.path().join(format!(
         "{}-{}.ipsw",
         release.build,
-        device::encode_hex(&release.sha1)
+        hex::encode(release.sha1)
     ));
     std::fs::copy(file.path(), &expected).unwrap();
     let cached = catalog::ensure_cached(
@@ -298,7 +262,7 @@ fn cached_firmware_handoff_retains_the_open_archive() {
     let path = directory.path().join(format!(
         "{}-{}.ipsw",
         release.build,
-        device::encode_hex(&release.sha1)
+        hex::encode(release.sha1)
     ));
     std::fs::copy(file.path(), &path).unwrap();
     let mut ipsw = catalog::ensure_cached(
@@ -315,7 +279,7 @@ fn cached_firmware_handoff_retains_the_open_archive() {
     std::fs::rename(&path, directory.path().join("moved.ipsw")).unwrap();
     assert!(!path.exists());
     assert_eq!(ipsw.component(&identity(), "iBSS").unwrap(), im4p(b"test"));
-    ipsw.preflight(&mut identity()).unwrap();
+    restore::preflight(&mut ipsw, &mut identity()).unwrap();
 }
 
 #[test]
@@ -337,7 +301,7 @@ fn cached_revive_selects_update_and_preserves_the_explicit_identity() {
     let path = directory.path().join(format!(
         "{}-{}.ipsw",
         release.build,
-        device::encode_hex(&release.sha1)
+        hex::encode(release.sha1)
     ));
     std::fs::copy(file.path(), &path).unwrap();
     let mut device = device_info();
@@ -373,7 +337,7 @@ fn automatic_download_refuses_corrupt_cache_and_unsafe_build_names() {
     let path = directory.path().join(format!(
         "{}-{}.ipsw",
         release.build,
-        device::encode_hex(&release.sha1)
+        hex::encode(release.sha1)
     ));
     std::fs::write(&path, b"corrupt").unwrap();
     assert!(
@@ -409,57 +373,6 @@ fn downloaded_file_checksums_support_apple_sha1_and_explicit_sha256() {
     assert!(net::verify_file(file.path(), &[0; 20]).is_err());
     assert!(net::verify_file(file.path(), &[0; 32]).is_err());
     assert!(net::verify_file(file.path(), &[0; 21]).is_err());
-}
-
-fn catalog_fixture(key: &str, product: &str, checksum: &str, url: &str) -> Value {
-    wire::dict([
-        (
-            "MobileDeviceProductTypes",
-            wire::dict([
-                ("DFU", wire::dict([(key, product.into())])),
-                ("Recovery", wire::dict([(key, product.into())])),
-            ]),
-        ),
-        (
-            "MobileDeviceSoftwareVersionsByVersion",
-            wire::dict([(
-                "1",
-                wire::dict([(
-                    "MobileDeviceSoftwareVersions",
-                    wire::dict([(
-                        product,
-                        wire::dict([
-                            (
-                                "Unknown",
-                                wire::dict([(
-                                    "Universal",
-                                    wire::dict([(
-                                        "Restore",
-                                        wire::dict([
-                                            ("BuildVersion", "26A434".into()),
-                                            ("ProductVersion", "27.0.1".into()),
-                                            ("FirmwareURL", url.into()),
-                                            ("FirmwareSHA1", checksum.into()),
-                                        ]),
-                                    )]),
-                                )]),
-                            ),
-                            (
-                                "99Z9999",
-                                wire::dict([(
-                                    "Restore",
-                                    wire::dict([(
-                                        "FirmwareURL",
-                                        "https://updates.cdn-apple.com/older.ipsw".into(),
-                                    )]),
-                                )]),
-                            ),
-                        ]),
-                    )]),
-                )]),
-            )]),
-        ),
-    ])
 }
 
 fn fixture_release(file: &std::path::Path) -> catalog::Release {

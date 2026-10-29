@@ -115,10 +115,7 @@ fn hex_ecid_is_consistent() {
     assert!(device::parse_ecid("0").is_err());
     assert!(device::decode_hex("abc").is_err());
     assert!(device::decode_hex("€").is_err());
-    assert_eq!(
-        device::encode_hex(&device::decode_hex("aB01").unwrap()),
-        "ab01"
-    );
+    assert_eq!(device::decode_hex("aB01").unwrap(), [0xab, 0x01]);
     assert!(device::decode_hex("").unwrap().is_empty());
     for value in ["+1", "0a+1", "-1", " 1", "1 ", "0x", "gg", "\0\0", "é"] {
         assert!(device::decode_hex(value).is_err(), "accepted {value:?}");

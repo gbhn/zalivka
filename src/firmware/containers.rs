@@ -4,7 +4,7 @@ use plist::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
-    io::{Read, Seek, SeekFrom},
+    io::{Cursor, Read, Seek, SeekFrom},
     ops::Range,
 };
 
@@ -130,20 +130,7 @@ pub fn payload_ranges(prefix: &[u8], length: u64) -> Result<Vec<std::ops::Range<
         prefix.len() as u64 <= length,
         "firmware prefix exceeds file length"
     );
-    payload_ranges_inner(
-        &mut |offset, size| {
-            let start = usize::try_from(offset)?;
-            let end = start.checked_add(size).context("firmware index overflow")?;
-            Ok(prefix
-                .get(start..end)
-                .context("truncated firmware index")?
-                .to_vec())
-        },
-        0,
-        length,
-        prefix.len() as u64,
-        0,
-    )
+    payload_ranges_inner(&mut Cursor::new(prefix), 0, length, prefix.len() as u64, 0)
 }
 
 pub(crate) fn container_prefix(prefix: &[u8]) -> bool {
@@ -156,29 +143,28 @@ pub(crate) fn payload_ranges_from(
     reader: &mut (impl Read + Seek),
     length: u64,
 ) -> Result<Vec<Range<u64>>> {
-    payload_ranges_inner(
-        &mut |offset, size| {
-            reader.seek(SeekFrom::Start(offset))?;
-            let mut bytes = vec![0; size];
-            reader.read_exact(&mut bytes)?;
-            Ok(bytes)
-        },
-        0,
-        length,
-        length,
-        0,
-    )
+    payload_ranges_inner(reader, 0, length, length, 0)
+}
+
+fn read_index(reader: &mut (impl Read + Seek), offset: u64, size: usize) -> Result<Vec<u8>> {
+    reader.seek(SeekFrom::Start(offset))?;
+    let mut bytes = vec![0; size];
+    reader
+        .read_exact(&mut bytes)
+        .context("truncated firmware index")?;
+    Ok(bytes)
 }
 
 fn payload_ranges_inner(
-    read: &mut impl FnMut(u64, usize) -> Result<Vec<u8>>,
+    reader: &mut (impl Read + Seek),
     base: u64,
     length: u64,
     available: u64,
     depth: usize,
 ) -> Result<Vec<std::ops::Range<u64>>> {
     ensure!(depth <= 4, "firmware containers nested too deeply");
-    let prefix = read(
+    let prefix = read_index(
+        reader,
         base,
         length.min(available.saturating_sub(base)).min(48) as usize,
     )?;
@@ -188,7 +174,7 @@ fn payload_ranges_inner(
         ensure!(count <= 65536, "too many FTAB entries");
         let end = 48 + count * 16;
         ensure!(end as u64 <= length, "FTAB index outside file");
-        ftab_index(&read(base, end)?, length)?
+        ftab_index(&read_index(reader, base, end)?, length)?
             .into_iter()
             // Centauri's 2ftb describes device memory, not a nested on-disk
             // container. Its bytes are hashable, but its offsets are not ours.
@@ -204,7 +190,8 @@ fn payload_ranges_inner(
                 start >= 44 && end <= length && size <= 1024 * 1024,
                 "invalid UARP index"
             );
-            uarp_index(&read(base + start, size)?, end, length)?
+            ensure!(base + end <= available, "truncated firmware index");
+            uarp_index(&read_index(reader, base + start, size)?, end, length)?
         } else {
             Vec::new()
         };
@@ -216,7 +203,7 @@ fn payload_ranges_inner(
     for (range, descend) in entries {
         if descend && base + range.start < available {
             for child in payload_ranges_inner(
-                read,
+                reader,
                 base + range.start,
                 range.end - range.start,
                 available,

@@ -1,9 +1,9 @@
 use super::*;
+use crate::test_net::accept;
 use std::{
     io::{BufRead, BufReader, Write},
     net::TcpListener,
     thread,
-    time::Duration,
 };
 
 #[test]
@@ -11,10 +11,7 @@ fn cloned_asset_clients_reuse_connections_and_consume_each_response() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        let stream = accept(&listener);
         let mut stream = BufReader::new(stream);
         for path in ["first", "second"] {
             let mut line = String::new();

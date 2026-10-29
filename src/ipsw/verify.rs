@@ -2,13 +2,14 @@
 use super::{
     Ipsw, component_digest, component_path,
     digest::{DigestInput, verify_component_digest},
+    stream::read_chunk,
 };
 use crate::{checksum::hasher, firmware, img4, wire};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
 };
 
 #[derive(Debug, Serialize)]
@@ -229,21 +230,6 @@ impl EntryDigests {
         progress.finish();
         Ok(verified)
     }
-}
-
-/// Fill the first block so container headers never depend on short ZIP reads.
-fn read_chunk(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
-    let mut n = 0;
-    while n < buffer.len() {
-        crate::progress::check_cancelled()?;
-        match reader.read(&mut buffer[n..]) {
-            Ok(0) => break,
-            Ok(read) => n += read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(n)
 }
 
 #[cfg(test)]

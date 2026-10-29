@@ -388,7 +388,7 @@ impl App {
         let result = Job::spawn(
             id,
             action,
-            &setup,
+            setup,
             &self.tx,
             ctx,
             self.windows_reboot_required,

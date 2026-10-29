@@ -174,13 +174,13 @@ pub enum Event {
 }
 
 impl Event {
-    pub fn emit(&self) {
+    pub fn emit(self) {
         let context = CURRENT.with(|slot| slot.borrow().clone());
         if let Some(context) = context {
             if let Self::Log(record) = self {
-                context.log(record.clone());
+                context.log(record);
             } else {
-                (context.output)(self.clone());
+                (context.output)(self);
             }
         }
     }

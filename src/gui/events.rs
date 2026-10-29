@@ -91,13 +91,15 @@ impl App {
                                 let source = self.log_path.clone();
                                 let journal = self.job.as_ref().map(|job| job.journal.clone());
                                 let logs = self.job.as_ref().map(|job| job.context.clone());
-                                let mut text = self.journal_text(true);
-                                if source.is_none() {
-                                    text = format!(
-                                        "Incomplete journal: saved the last {} records from memory.\n{text}\n",
-                                        self.logs.len()
-                                    );
-                                }
+                                let text = if source.is_none() {
+                                    format!(
+                                        "Incomplete journal: saved the last {} records from memory.\n{}\n",
+                                        self.logs.len(),
+                                        self.journal_text(true)
+                                    )
+                                } else {
+                                    String::new()
+                                };
                                 let spawn = self.background(ctx, "save", move || {
                                     if let Some(logs) = logs
                                         && let Err(error) = logs.flush_logs()

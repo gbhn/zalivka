@@ -1,10 +1,6 @@
 //! Blocking TCP tunnels for FDR, including HTTP, HTTPS and SOCKS proxies.
 use anyhow::{Context, Result, bail, ensure};
-#[cfg(any(test, not(any(windows, target_os = "linux", target_os = "macos"))))]
-use rustls::RootCertStore;
 use rustls::{ClientConfig, ClientConnection, StreamOwned, pki_types::ServerName};
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-use std::sync::OnceLock;
 use std::{
     io::{self, Read, Write},
     net::{IpAddr, TcpStream, ToSocketAddrs},
@@ -57,44 +53,6 @@ impl Write for Stream {
             Self::Tcp(s) => s.flush(),
             Self::Tls(s) => s.flush(),
         }
-    }
-}
-
-fn tls_config() -> Result<Arc<ClientConfig>> {
-    #[cfg(windows)]
-    {
-        crate::windows::tls::config(None)
-    }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        let provider = Arc::new(oxitls_rustcrypto_provider::provider());
-        let verifier = rustls_platform_verifier::Verifier::new(provider.clone())?;
-        Ok(Arc::new(
-            ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()?
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(verifier))
-                .with_no_client_auth(),
-        ))
-    }
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    {
-        static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-        Ok(CONFIG
-            .get_or_init(|| {
-                let roots =
-                    RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-                Arc::new(
-                    ClientConfig::builder_with_provider(Arc::new(
-                        oxitls_rustcrypto_provider::provider(),
-                    ))
-                    .with_safe_default_protocol_versions()
-                    .unwrap()
-                    .with_root_certificates(roots)
-                    .with_no_client_auth(),
-                )
-            })
-            .clone())
     }
 }
 
@@ -173,7 +131,7 @@ fn proxy_stream(proxy: &Proxy, timeout: Duration) -> Result<Stream> {
     let tcp =
         tcp_connect(proxy.host(), proxy.port(), timeout).context("connecting configured proxy")?;
     if proxy.protocol() == ProxyProtocol::Https {
-        tls_transport(tcp, proxy.host(), tls_config()?)
+        tls_transport(tcp, proxy.host(), crate::net::tls::config(None)?)
     } else {
         Ok(Stream::Tcp(tcp))
     }

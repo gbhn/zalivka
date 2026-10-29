@@ -12,10 +12,7 @@ fn get_and_post_forward_headers_binary_body_and_http_error_responses() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            let mut stream = accept(&listener);
             let headers = read_header(&mut stream).to_ascii_lowercase();
             assert!(
                 headers.starts_with(&format!("{} /asset http/1.1", method.to_ascii_lowercase()))
@@ -144,10 +141,7 @@ fn wkms_sends_imported_authorization_with_the_original_binary_post() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        let mut stream = accept(&listener);
         let headers = read_header(&mut stream).to_ascii_lowercase();
         assert!(headers.starts_with("post /key http/1.1\r\n"));
         assert!(headers.contains("authorization: bearer fixture-token\r\n"));
@@ -275,10 +269,7 @@ fn wkms_forwards_opaque_wrapped_key_and_rejects_http_errors_and_empty_keys() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            let mut stream = accept(&listener);
             read_header(&mut stream);
             let mut request = [0; 4];
             stream.read_exact(&mut request).unwrap();

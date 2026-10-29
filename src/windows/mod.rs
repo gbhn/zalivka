@@ -48,7 +48,6 @@ pub(crate) mod package;
 pub(crate) mod proxy;
 pub(crate) mod reset;
 pub(crate) mod setup;
-pub(crate) mod tls;
 
 pub(crate) fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain(Some(0)).collect()

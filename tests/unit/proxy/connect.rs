@@ -169,6 +169,8 @@ fn refusal_and_malformed_framing_never_loop_or_expose_auth_tokens() {
     for body in [
         "Content-Length: 1\r\nContent-Length: 2\r\n\r\nxx",
         "Content-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "Transfer-Encoding: gzip\r\n\r\n",
         "Content-Length: 1048577\r\n\r\n",
         "Transfer-Encoding: chunked\r\n\r\nffffffffffffffffffff\r\n",
     ] {
@@ -208,7 +210,7 @@ fn refusal_and_malformed_framing_never_loop_or_expose_auth_tokens() {
 #[test]
 fn http10_keep_alive_preserves_authentication_and_exchanges_are_bounded() {
     let proxy = Proxy::new("http://proxy.example:3128").unwrap();
-    let reply = "HTTP/1.0 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate c2VydmVy\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
+    let reply = "HTTP/1.0 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate c2VydmVy\r\nConnection: unused, KeEp-ALive\r\nProxy-Connection: unused\r\nContent-Length: 0\r\nContent-Length: 00\r\n\r\n";
     let mut stream = Script::new(format!("{}HTTP/1.0 200 OK\r\n\r\n", reply.repeat(2)));
     let mut calls = 0;
     handshake(

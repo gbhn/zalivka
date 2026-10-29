@@ -80,24 +80,22 @@ pub(super) fn save_log(
         .and_then(|source| source.canonicalize().ok())
         .zip(path.canonicalize().ok())
         .is_some_and(|(source, destination)| source == destination);
-    let source = source
-        .map(File::open)
-        .transpose()?
-        .map(|file| -> Result<_> {
-            // Capture a complete record boundary, then release writers while the
-            // potentially large snapshot is copied in the background.
-            let mut journal =
-                journal.map(|journal| journal.lock().unwrap_or_else(|e| e.into_inner()));
-            if let Some(journal) = &mut journal {
-                let _ = journal.flush();
-                if let Some(error) = journal.error() {
-                    anyhow::bail!("Disk journal incomplete: {error}");
-                }
+    let source = if let Some(source) = source {
+        let file = File::open(source)?;
+        // Capture a complete record boundary, then release writers while the
+        // potentially large snapshot is copied in the background.
+        let mut journal = journal.map(|journal| journal.lock().unwrap_or_else(|e| e.into_inner()));
+        if let Some(journal) = &mut journal {
+            let _ = journal.flush();
+            if let Some(error) = journal.error() {
+                anyhow::bail!("Disk journal incomplete: {error}");
             }
-            let length = file.metadata()?.len();
-            Ok((file, length))
-        })
-        .transpose()?;
+        }
+        let length = file.metadata()?.len();
+        Some((file, length))
+    } else {
+        None
+    };
     if same {
         return Ok(path);
     }

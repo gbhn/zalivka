@@ -9,15 +9,28 @@ use crate::{
 use anyhow::{Result, ensure};
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, clap::Args)]
+#[group(skip)]
 pub struct Restore {
+    /// Local IPSW; omitted to automatically download the current compatible image.
     pub ipsw: Option<PathBuf>,
+    /// Firmware cache for automatic downloads.
+    #[arg(long, conflicts_with = "ipsw")]
     pub firmware_dir: Option<PathBuf>,
+    #[arg(skip)]
     pub release: Option<catalog::Release>,
+    #[arg(long, value_parser = crate::device::parse_ecid)]
     pub ecid: u64,
+    #[arg(long)]
     pub identity: Option<usize>,
+    /// Record restored's plist messages as JSON lines (new file only).
+    #[arg(long)]
     pub transcript: Option<PathBuf>,
+    /// Apple host-to-bearer-token plist for WKMS authorization.
+    #[arg(long)]
     pub authorization_tokens: Option<PathBuf>,
+    /// Raw DAWTKN data obtained from an authorized AppleConnect session.
+    #[arg(long)]
     pub apple_connect_data: Option<PathBuf>,
 }
 
@@ -130,27 +143,4 @@ pub fn doctor() -> Result<Vec<drivers::UsbDiagnostic>> {
         }
     }
     Ok(devices)
-}
-
-pub fn prepare_windows() -> Result<()> {
-    let reboot = drivers::prepare_windows()?;
-    crate::log!(Info, "drivers", "Setup complete; reboot={reboot}");
-    Ok(())
-}
-
-pub fn reset_drivers() -> Result<()> {
-    let reboot = drivers::reset_windows()?;
-    crate::log!(Info, "drivers", "Reset complete; reboot={reboot}");
-    Ok(())
-}
-
-/// Configure Linux USB access through a desktop administrator prompt.
-pub fn prepare_linux() -> Result<()> {
-    drivers::prepare_linux()?;
-    crate::log!(
-        Info,
-        "udev",
-        "USB access configured. Reconnect the USB cable."
-    );
-    Ok(())
 }

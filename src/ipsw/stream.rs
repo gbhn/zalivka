@@ -2,7 +2,7 @@
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::File,
-    io::{BufReader, Read, Seek, SeekFrom, Write},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
     sync::mpsc,
     thread,
 };
@@ -21,20 +21,8 @@ pub(super) fn copy_prefetched(mut input: impl Read + Send, out: &mut impl Write)
                 crate::progress::inherit(move || -> std::io::Result<u64> {
                     let mut total = 0;
                     loop {
-                        crate::progress::check_cancelled()?;
                         let mut block = vec![0; STREAM_CHUNK];
-                        let mut filled = 0;
-                        while filled < block.len() {
-                            crate::progress::check_cancelled()?;
-                            match input.read(&mut block[filled..]) {
-                                Ok(0) => break,
-                                Ok(n) => filled += n,
-                                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                                    continue;
-                                }
-                                Err(error) => return Err(error),
-                            }
-                        }
+                        let filled = read_chunk(&mut input, &mut block)?;
                         if filled == 0 {
                             return Ok(total);
                         }
@@ -67,6 +55,21 @@ pub(super) fn copy_prefetched(mut input: impl Read + Send, out: &mut impl Write)
         // can signal FileDataDone, even if every payload block was written.
         Ok(read??)
     })
+}
+
+/// Fill a bounded block across short reads and interruptions, respecting cancellation.
+pub(super) fn read_chunk(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
+    let mut n = 0;
+    while n < buffer.len() {
+        crate::progress::check_cancelled()?;
+        match reader.read(&mut buffer[n..]) {
+            Ok(0) => break,
+            Ok(read) => n += read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(n)
 }
 
 pub struct ImageReader {

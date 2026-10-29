@@ -122,3 +122,54 @@ pub fn payloads(output: &std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>, port: u
     }
     data
 }
+
+pub fn catalog_fixture(key: &str, product: &str, checksum: &str, url: &str) -> Value {
+    wire::dict([
+        (
+            "MobileDeviceProductTypes",
+            wire::dict([
+                ("DFU", wire::dict([(key, product.into())])),
+                ("Recovery", wire::dict([(key, product.into())])),
+            ]),
+        ),
+        (
+            "MobileDeviceSoftwareVersionsByVersion",
+            wire::dict([(
+                "1",
+                wire::dict([(
+                    "MobileDeviceSoftwareVersions",
+                    wire::dict([(
+                        product,
+                        wire::dict([
+                            (
+                                "Unknown",
+                                wire::dict([(
+                                    "Universal",
+                                    wire::dict([(
+                                        "Restore",
+                                        wire::dict([
+                                            ("BuildVersion", "26A434".into()),
+                                            ("ProductVersion", "27.0.1".into()),
+                                            ("FirmwareURL", url.into()),
+                                            ("FirmwareSHA1", checksum.into()),
+                                        ]),
+                                    )]),
+                                )]),
+                            ),
+                            (
+                                "99Z9999",
+                                wire::dict([(
+                                    "Restore",
+                                    wire::dict([(
+                                        "FirmwareURL",
+                                        "https://updates.cdn-apple.com/older.ipsw".into(),
+                                    )]),
+                                )]),
+                            ),
+                        ]),
+                    )]),
+                )]),
+            )]),
+        ),
+    ])
+}

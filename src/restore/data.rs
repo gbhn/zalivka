@@ -79,20 +79,23 @@ impl RestoreContext {
             DataType::Asr | DataType::RecoveryAsr => {
                 return serve_asr(ipsw, identity()?, out);
             }
-            DataType::BuildIdentity => wire::dict([
-                ("BuildIdentityDict", identity()?.value.clone()),
-                (
-                    "Variant",
-                    match wire::optional(message, &["Arguments", "Variant"])? {
-                        Some(value) => value
-                            .as_string()
-                            .filter(|value| !value.is_empty())
-                            .context("invalid Arguments.Variant")?
-                            .into(),
-                        None => identity()?.behavior()?.name().into(),
-                    },
-                ),
-            ]),
+            DataType::BuildIdentity => {
+                let id = identity()?;
+                wire::dict([
+                    ("BuildIdentityDict", id.value.clone()),
+                    (
+                        "Variant",
+                        match wire::optional(message, &["Arguments", "Variant"])? {
+                            Some(value) => value
+                                .as_string()
+                                .filter(|value| !value.is_empty())
+                                .context("invalid Arguments.Variant")?
+                                .into(),
+                            None => id.behavior()?.name().into(),
+                        },
+                    ),
+                ])
+            }
             DataType::ReceiptManifest => wire::dict([(
                 "ReceiptManifest",
                 Value::Dictionary(identity()?.manifest()?.clone()),
@@ -113,8 +116,9 @@ impl RestoreContext {
             }
             DataType::Empty => Value::Dictionary(Dictionary::new()),
             DataType::Component(tag) => {
-                let component = identity()?.require_component_type(tag)?;
-                let bytes = ipsw.personalized(identity()?, component, &self.restore.ticket)?;
+                let id = identity()?;
+                let component = id.require_component_type(tag)?;
+                let bytes = ipsw.personalized(id, component, &self.restore.ticket)?;
                 wire::dict([(format!("{kind}File"), Value::Data(bytes))])
             }
             DataType::PersonalizedBootObject | DataType::SourceBootObject => {

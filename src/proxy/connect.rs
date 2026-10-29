@@ -7,6 +7,11 @@ use std::{
 };
 use ureq::Proxy;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::negotiate::Negotiate;
+#[cfg(windows)]
+use crate::windows::negotiate::Negotiate;
+
 pub(super) trait Connection: Read + Write {
     fn timeout(&mut self, remaining: Duration) -> Result<()>;
 }
@@ -18,10 +23,8 @@ pub(super) fn connect<S: Connection>(
     timeout: Duration,
     reconnect: impl FnMut(Duration) -> Result<S>,
 ) -> Result<()> {
-    #[cfg(windows)]
-    let mut auth: Option<crate::windows::negotiate::Negotiate> = None;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let mut auth: Option<super::negotiate::Negotiate> = None;
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    let mut auth: Option<Negotiate> = None;
     handshake(
         stream,
         target,
@@ -29,20 +32,10 @@ pub(super) fn connect<S: Connection>(
         timeout,
         reconnect,
         |scheme, challenge| {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
             {
                 if auth.is_none() {
-                    auth = Some(crate::windows::negotiate::Negotiate::new(
-                        scheme,
-                        proxy.host(),
-                    )?);
-                }
-                auth.as_mut().unwrap().step(challenge)
-            }
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            {
-                if auth.is_none() {
-                    auth = Some(super::negotiate::Negotiate::new(scheme, proxy.host())?);
+                    auth = Some(Negotiate::new(scheme, proxy.host())?);
                 }
                 auth.as_mut().unwrap().step(challenge)
             }
@@ -284,57 +277,55 @@ fn handshake<S: Connection>(
             proxy.host(),
             proxy.port()
         );
-        let connection_values: Vec<_> = response
+        let mut close = false;
+        let mut keep_alive = false;
+        for value in response
             .headers
             .iter()
             .filter(|h| {
                 h.name.eq_ignore_ascii_case("connection")
                     || h.name.eq_ignore_ascii_case("proxy-connection")
             })
-            .flat_map(|h| {
-                String::from_utf8_lossy(h.value)
-                    .split(',')
-                    .map(|v| v.trim().to_ascii_lowercase())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        let close = connection_values.iter().any(|value| value == "close")
-            || (response.version == Some(0)
-                && !connection_values.iter().any(|value| value == "keep-alive"));
-        let lengths: Vec<_> = response
+            .flat_map(|h| h.value.split(|byte| *byte == b','))
+        {
+            close |= value.trim_ascii().eq_ignore_ascii_case(b"close");
+            keep_alive |= value.trim_ascii().eq_ignore_ascii_case(b"keep-alive");
+        }
+        let close = close || (response.version == Some(0) && !keep_alive);
+        let mut length = None;
+        for header in response
             .headers
             .iter()
             .filter(|h| h.name.eq_ignore_ascii_case("content-length"))
-            .map(|h| {
-                std::str::from_utf8(h.value)?
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(anyhow::Error::from)
-            })
-            .collect::<Result<_>>()?;
-        ensure!(
-            lengths.windows(2).all(|pair| pair[0] == pair[1]),
-            "conflicting proxy Content-Length values"
-        );
-        let encodings: Vec<_> = response
+        {
+            let value = std::str::from_utf8(header.value)?.trim().parse::<usize>()?;
+            ensure!(
+                length
+                    .replace(value)
+                    .is_none_or(|previous| previous == value),
+                "conflicting proxy Content-Length values"
+            );
+        }
+        let mut encodings = response
             .headers
             .iter()
-            .filter(|h| h.name.eq_ignore_ascii_case("transfer-encoding"))
-            .map(|h| std::str::from_utf8(h.value))
-            .collect::<std::result::Result<_, _>>()?;
-        let chunked = !encodings.is_empty();
-        ensure!(
-            !chunked
-                || (encodings.len() == 1
-                    && encodings[0].eq_ignore_ascii_case("chunked")
-                    && lengths.is_empty()),
-            "unsupported proxy authentication body framing"
-        );
-        if close || (lengths.is_empty() && !chunked) {
+            .filter(|h| h.name.eq_ignore_ascii_case("transfer-encoding"));
+        let chunked = if let Some(encoding) = encodings.next() {
+            ensure!(
+                encodings.next().is_none()
+                    && encoding.value.eq_ignore_ascii_case(b"chunked")
+                    && length.is_none(),
+                "unsupported proxy authentication body framing"
+            );
+            true
+        } else {
+            false
+        };
+        if close || (length.is_none() && !chunked) {
             crate::log!(
                 Trace,
                 "proxy:connect",
-                "Reconnecting; close={close}, length={lengths:?}, chunked={chunked}"
+                "Reconnecting; close={close}, length={length:?}, chunked={chunked}"
             );
             ensure!(
                 selected.is_none(),
@@ -343,8 +334,8 @@ fn handshake<S: Connection>(
             *stream = reconnect(remaining(deadline)?)?;
         } else if chunked {
             discard_chunked(stream, deadline)?;
-        } else {
-            discard(stream, lengths[0], deadline)?;
+        } else if let Some(length) = length {
+            discard(stream, length, deadline)?;
         }
         let token = authenticate(scheme, *challenge)?;
         crate::log!(

@@ -2,7 +2,7 @@
 use anyhow::{Result, ensure};
 use std::path::Path;
 use zalivka::device::parse_ecid;
-use zalivka::{ipsw::Behavior, operations};
+use zalivka::{drivers, ipsw::Behavior, operations};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Action {
@@ -109,7 +109,7 @@ impl Setup {
         Ok(())
     }
 
-    pub(super) fn restore_options(&self, transcript: Option<&Path>) -> Result<operations::Restore> {
+    pub(super) fn restore_options(&self, transcript: &Path) -> Result<operations::Restore> {
         let path = |text: &str| (!text.trim().is_empty()).then(|| text.trim().into());
         Ok(operations::Restore {
             ipsw: if self.automatic {
@@ -125,17 +125,16 @@ impl Setup {
             release: self.automatic.then(|| self.release.clone()).flatten(),
             ecid: parse_ecid(self.ecid.trim()).map_err(anyhow::Error::msg)?,
             identity: None,
-            transcript: transcript.map(Path::to_path_buf),
+            transcript: Some(transcript.to_path_buf()),
             authorization_tokens: path(&self.tokens),
             apple_connect_data: path(&self.connect_data),
         })
     }
 
     pub(super) fn run(&self, action: Action, transcript: &Path) -> Result<()> {
-        self.validate(action)?;
         match action {
             Action::Restore | Action::Revive => {
-                self.restore_options(Some(transcript))?
+                self.restore_options(transcript)?
                     .run(if action == Action::Restore {
                         Behavior::Erase
                     } else {
@@ -160,9 +159,13 @@ impl Setup {
                     "USB diagnostics found inaccessible devices"
                 );
             }
-            Action::PrepareWindows => operations::prepare_windows()?,
-            Action::InstallUdev => operations::prepare_linux()?,
-            Action::ResetDrivers => operations::reset_drivers()?,
+            Action::PrepareWindows => {
+                drivers::prepare_windows()?;
+            }
+            Action::InstallUdev => drivers::prepare_linux()?,
+            Action::ResetDrivers => {
+                drivers::reset_windows()?;
+            }
         }
         Ok(())
     }

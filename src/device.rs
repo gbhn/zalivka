@@ -95,10 +95,6 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>> {
     hex::decode(s).context("expected an even number of hexadecimal digits")
 }
 
-pub fn encode_hex(data: &[u8]) -> String {
-    hex::encode(data)
-}
-
 pub fn parse_ecid(s: &str) -> std::result::Result<u64, String> {
     let n = hex_number(s).map_err(|error| error.to_string())?;
     if n == 0 {

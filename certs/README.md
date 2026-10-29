@@ -12,8 +12,10 @@
 
 The TSS endpoint `https://gs.apple.com/TSS/controller?action=2` presents a chain
 through Apple Server Authentication CA to this root, which is absent from the
-Mozilla roots used by the normal HTTP agent. The certificate is embedded only
-in the TSS agent. CDN, catalog and asset requests retain the Mozilla root set.
+public Mozilla root set. The certificate is embedded only in the TSS agent,
+alongside system trust. CDN, catalog, asset and HTTPS proxy connections use the
+system certificate store on Windows, Linux and macOS, or Mozilla roots on other
+platforms.
 
 Certificate-chain validation, hostname checking, validity checking and TLS
 handshake signature verification remain enabled. No system certificate store

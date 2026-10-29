@@ -1,7 +1,7 @@
 use super::*;
 use crate::{img4, test_support::Ftab};
 use sha2::{Digest, Sha256, Sha384};
-use std::io::Cursor;
+use std::io::{self, Cursor};
 
 struct Fragmented<'a> {
     data: Cursor<&'a [u8]>,
@@ -84,6 +84,12 @@ impl Read for Fragmented<'_> {
         }
         let length = out.len().min(7);
         self.data.read(&mut out[..length])
+    }
+}
+
+impl Seek for Fragmented<'_> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.data.seek(position)
     }
 }
 
@@ -198,6 +204,14 @@ fn streamed_verification_matches_full_verification_for_nested_late_ftab() {
     uarp[80..84].copy_from_slice(&(inner.len() as u32).to_be_bytes());
     uarp[offset..].copy_from_slice(&inner);
     for bytes in [bytes, uarp] {
+        let mut index = Fragmented {
+            data: Cursor::new(bytes.as_slice()),
+            interrupted: false,
+        };
+        assert_eq!(
+            firmware::payload_ranges_from(&mut index, bytes.len() as u64).unwrap(),
+            firmware::payload_ranges(&bytes, bytes.len() as u64).unwrap()
+        );
         let expected = Sha256::digest(&payload).to_vec();
         let full = DigestInput::variants(&bytes, bytes.len() as u64, None).unwrap();
         verify_component_digest(full, |input| input.matches(&bytes, &expected)).unwrap();

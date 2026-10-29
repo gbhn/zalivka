@@ -10,6 +10,7 @@ use std::{
     sync::{Arc, Mutex, mpsc::Sender},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use zalivka::localization::{format as trf, text as tr};
 
 pub(super) struct Job {
     pub(super) id: u64,
@@ -22,7 +23,7 @@ pub(super) struct Job {
     pub(super) transfers: BTreeMap<u64, Transfer>,
     overall_operations: BTreeMap<u64, Operation>,
     pub(super) overall_fraction: Option<f32>,
-    pub(super) phase: String,
+    checkpoint: Option<String>,
     pub(super) last_activity: Instant,
 }
 
@@ -80,27 +81,42 @@ pub(super) struct Completion {
 }
 
 impl Job {
-    pub(super) fn new(id: u64, action: Action, context: progress::Context, log: File) -> Self {
+    pub(super) fn new(
+        id: u64,
+        action: Action,
+        context: progress::Context,
+        journal: Arc<Mutex<Journal>>,
+    ) -> Self {
         let now = Instant::now();
         Self {
             id,
             action,
             started: now,
             context,
-            journal: Arc::new(Mutex::new(Journal::new(log))),
+            journal,
             completion: None,
             restore_completed: false,
             transfers: BTreeMap::new(),
             overall_operations: BTreeMap::new(),
             overall_fraction: None,
-            phase: if action == Action::InstallUdev {
-                "Approve the Linux administrator prompt".into()
-            } else if action.requires_admin() {
-                "Approve the Windows administrator prompt".into()
-            } else {
-                "Preparing".into()
-            },
+            checkpoint: None,
             last_activity: now,
+        }
+    }
+
+    pub(super) fn phase(&self) -> String {
+        if self.restore_completed {
+            tr("Restore complete")
+        } else if let Some(name) = &self.checkpoint {
+            trf("Stage: {}", &[&name.replace('_', " ")])
+        } else {
+            tr(if self.action == Action::InstallUdev {
+                "Approve the Linux administrator prompt"
+            } else if self.action.requires_admin() {
+                "Approve the Windows administrator prompt"
+            } else {
+                "Preparing"
+            })
         }
     }
 
@@ -159,13 +175,12 @@ impl Job {
             progress::Event::RestoreCompleted => {
                 self.restore_completed = true;
                 self.overall_fraction = Some(1.0);
-                self.phase = "Restore complete".into();
                 self.transfers.clear();
             }
             progress::Event::ProvisioningWarning { .. } | progress::Event::RebootRequired => {}
             progress::Event::Checkpoint { name, complete } => {
                 if !complete {
-                    self.phase = format!("Stage: {}", name.replace('_', " "));
+                    self.checkpoint = Some(name);
                 }
             }
             progress::Event::OperationWeights {
@@ -233,13 +248,13 @@ impl Job {
     }
 
     pub(super) fn worker_context(
-        &self,
+        id: u64,
+        journal: &Arc<Mutex<Journal>>,
         tx: &Sender<Event>,
         ctx: &egui::Context,
         reboot_required: bool,
     ) -> Result<(progress::Context, Arc<Mutex<Completion>>)> {
-        let id = self.id;
-        let journal = self.journal.clone();
+        let log_journal = journal.clone();
         let completion = Arc::new(Mutex::new(Completion {
             reboot_required,
             ..Completion::default()
@@ -249,7 +264,7 @@ impl Job {
         let repaint = ctx.clone();
         let context = progress::Context::new(move |event| match event {
             progress::Event::Log(record) => {
-                let mut journal = journal.lock().unwrap_or_else(|e| e.into_inner());
+                let mut journal = log_journal.lock().unwrap_or_else(|e| e.into_inner());
                 let wake = journal.record(record);
                 drop(journal);
                 if wake {
@@ -265,7 +280,7 @@ impl Job {
                 repaint.request_repaint_after(UI_REFRESH_INTERVAL);
             }
         });
-        let journal = self.journal.clone();
+        let journal = journal.clone();
         let repaint = ctx.clone();
         let context = context
             .with_async_logs(move || {
@@ -281,7 +296,7 @@ impl Job {
     pub(super) fn spawn(
         id: u64,
         action: Action,
-        setup: &Setup,
+        setup: Setup,
         tx: &Sender<Event>,
         ctx: &egui::Context,
         reboot_required: bool,
@@ -293,7 +308,7 @@ impl Job {
         let transcript = directory.join(format!("{name}.jsonl"));
         setup.validate(action)?;
         let log = File::options().write(true).create_new(true).open(&path)?;
-        let mut job = Self::new(id, action, progress::Context::new(|_| {}), log);
+        let mut journal = Journal::new(log);
         let record = Record::new(
             Level::Info,
             "session",
@@ -308,19 +323,12 @@ impl Job {
                 }
             ),
         );
-        job.journal
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .record(record);
-        job.journal
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .flush();
-        let (context, completion) = job.worker_context(tx, ctx, reboot_required)?;
-        job.context = context.clone();
-        let setup = setup.clone();
+        journal.record(record);
+        journal.flush();
+        let journal = Arc::new(Mutex::new(journal));
+        let (context, completion) = Self::worker_context(id, &journal, tx, ctx, reboot_required)?;
+        let job = Self::new(id, action, context.clone(), journal.clone());
         let started = job.started;
-        let final_journal = job.journal.clone();
         let tx = tx.clone();
         let ctx = ctx.clone();
         std::thread::Builder::new()
@@ -348,7 +356,7 @@ impl Job {
                 let mut completion =
                     std::mem::take(&mut *completion.lock().unwrap_or_else(|e| e.into_inner()));
                 completion.success = result.is_ok();
-                let completion = completion.finish(action, started, &context, &final_journal);
+                let completion = completion.finish(action, started, &context, &journal);
                 let _ = tx.send(Event::Worker(id, Output::Finished(completion)));
                 ctx.request_repaint();
             })
@@ -494,7 +502,12 @@ mod tests {
     #[test]
     fn polling_gui_logs_does_not_wait_for_the_journal_mutex() {
         let log = tempfile::tempfile().unwrap();
-        let mut job = Job::new(1, Action::Verify, progress::Context::new(|_| {}), log);
+        let mut job = Job::new(
+            1,
+            Action::Verify,
+            progress::Context::new(|_| {}),
+            Arc::new(Mutex::new(Journal::new(log))),
+        );
         let journal = job.journal.clone();
         let locked = journal.lock().unwrap();
         let (done, result) = std::sync::mpsc::channel();

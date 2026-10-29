@@ -1,6 +1,7 @@
 mod assets;
 mod download;
 mod request;
+pub(crate) mod tls;
 pub use assets::AssetClient;
 pub(crate) use assets::wrapped_key_request;
 pub use download::{download, download_verified, verify_file};
@@ -27,35 +28,8 @@ pub(crate) fn public_roots() -> ureq::tls::RootCerts {
 /// gs.apple.com uses Apple's private PKI, absent from Mozilla's public roots.
 /// Keep this additional trust anchor scoped to TSS, alongside system trust.
 pub(crate) fn tss_agent() -> ureq::Agent {
-    let root =
-        ureq::tls::Certificate::from_der(include_bytes!("../certs/AppleIncRootCertificate.cer"));
-    let roots = vec![root];
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let native = rustls_native_certs::load_native_certs();
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let roots =
-        {
-            let mut roots = roots;
-            for error in &native.errors {
-                crate::log!(Warning, "tls:tss", "Loading system certificates: {error}");
-            }
-            roots.extend(native.certs.iter().map(|certificate| {
-                ureq::tls::Certificate::from_der(certificate.as_ref()).to_owned()
-            }));
-            roots
-        };
-    let config = agent_config(
-        Some(Duration::from_secs(120)),
-        ureq::tls::RootCerts::new_with_certs(&roots),
-    );
-    let proxy_config = ureq::Agent::config_builder()
-        .tls_config(tls_config(public_roots()))
-        .proxy(None)
-        .build();
-    #[cfg(windows)]
-    let connector = crate::proxy::HttpConnector::for_tss(proxy_config);
-    #[cfg(not(windows))]
-    let connector = crate::proxy::HttpConnector::new(proxy_config);
+    let config = agent_config(Some(Duration::from_secs(120)), public_roots());
+    let connector = crate::proxy::HttpConnector::for_tss(config.clone());
     configured_agent(config, connector)
 }
 

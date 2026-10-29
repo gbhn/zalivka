@@ -1,6 +1,6 @@
 //! Apple's IPSW catalogs contain the model lookup and latest restore URL/hash.
 use crate::{
-    device::{DeviceInfo, Mode, decode_hex, encode_hex},
+    device::{DeviceInfo, Mode, decode_hex},
     ipsw::{Behavior, Ipsw},
     net, wire,
 };
@@ -59,27 +59,13 @@ fn product_type<'a>(catalog: &'a Value, device: &DeviceInfo) -> Result<Option<&'
         .transpose()
 }
 
-pub fn resolve_catalogs(catalogs: &[Value], device: &DeviceInfo) -> Result<Release> {
-    let mut selected = None;
-    for catalog in catalogs {
-        if product_type(catalog, device)?.is_none() {
-            continue;
-        }
-        let release = resolve(catalog, device)?;
-        ensure!(
-            selected
-                .as_ref()
-                .is_none_or(|previous| previous == &release),
-            "Apple catalogs contain conflicting firmware releases for this hardware; select an IPSW explicitly"
-        );
-        selected = Some(release);
-    }
-    selected.context("Apple catalogs have no firmware for this hardware")
-}
-
 pub fn resolve(catalog: &Value, device: &DeviceInfo) -> Result<Release> {
     let product_type = product_type(catalog, device)?
         .context("Apple catalog has no model for the supplied hardware and mode")?;
+    resolve_product(catalog, product_type)
+}
+
+fn resolve_product(catalog: &Value, product_type: &str) -> Result<Release> {
     let versions = wire::dictionary(wire::get(
         catalog,
         &["MobileDeviceSoftwareVersionsByVersion"],
@@ -151,24 +137,32 @@ fn latest_with(
     device: &DeviceInfo,
     mut load: impl FnMut(&str) -> Result<Value>,
 ) -> Result<Release> {
-    let mut catalogs = Vec::new();
+    let mut selected = None;
     let mut errors = Vec::new();
     for url in [MACOS_CATALOG, BRIDGEOS_CATALOG] {
         let loaded = load(url).and_then(|catalog| {
-            if product_type(&catalog, device)?.is_some() {
-                resolve(&catalog, device)?;
-            }
-            Ok(catalog)
+            product_type(&catalog, device)?
+                .map(|product| resolve_product(&catalog, product))
+                .transpose()
         });
         match loaded {
-            Ok(catalog) => catalogs.push(catalog),
+            Ok(Some(release)) => {
+                ensure!(
+                    selected
+                        .as_ref()
+                        .is_none_or(|previous| previous == &release),
+                    "Apple catalogs contain conflicting firmware releases for this hardware; select an IPSW explicitly"
+                );
+                selected = Some(release);
+            }
+            Ok(None) => {}
             Err(error) => {
                 crate::log!(Warning, "firmware", "Catalog {url}: {error:#}");
                 errors.push(format!("{url}: {error:#}"));
             }
         }
     }
-    let result = resolve_catalogs(&catalogs, device);
+    let result = selected.context("Apple catalogs have no firmware for this hardware");
     if errors.is_empty() {
         result
     } else {
@@ -224,7 +218,7 @@ pub fn ensure_cached(
     let path = directory.join(format!(
         "{}-{}.ipsw",
         release.build,
-        encode_hex(&release.sha1)
+        hex::encode(release.sha1)
     ));
     if path.exists() {
         crate::log!(Info, "firmware", "Checking cache: {}", path.display());

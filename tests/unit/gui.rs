@@ -12,7 +12,9 @@ fn job(action: Action) -> Job {
         7,
         action,
         progress::Context::new(|_| {}),
-        tempfile::tempfile().unwrap(),
+        std::sync::Arc::new(std::sync::Mutex::new(journal::Journal::new(
+            tempfile::tempfile().unwrap(),
+        ))),
     )
 }
 
@@ -228,7 +230,10 @@ fn throttled_background_paints_do_not_delay_input_or_drop_worker_updates() {
         app.journal_open,
         "clicks must be applied in the input frame"
     );
-    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: writing filesystem");
+    assert_eq!(
+        app.job.as_ref().unwrap().phase(),
+        "Stage: writing filesystem"
+    );
 }
 
 fn worker_line(event: progress::Event) -> String {
@@ -256,13 +261,14 @@ fn finished(success: bool) -> Output {
 
 fn connect_worker(app: &mut App) -> std::sync::Arc<std::sync::Mutex<worker::Completion>> {
     let job = app.job.as_mut().unwrap();
-    let (context, completion) = job
-        .worker_context(
-            &app.tx,
-            &egui::Context::default(),
-            app.windows_reboot_required,
-        )
-        .unwrap();
+    let (context, completion) = Job::worker_context(
+        job.id,
+        &job.journal,
+        &app.tx,
+        &egui::Context::default(),
+        app.windows_reboot_required,
+    )
+    .unwrap();
     if job.context.cancelled() {
         context.cancel();
     }
@@ -302,10 +308,10 @@ fn a_state_burst_leaves_time_for_rendering_without_losing_events() {
     }
     let ctx = egui::Context::default();
     app.poll(&ctx);
-    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: stage 255");
+    assert_eq!(app.job.as_ref().unwrap().phase(), "Stage: stage 255");
     app.poll(&ctx);
     app.poll(&ctx);
-    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: stage 599");
+    assert_eq!(app.job.as_ref().unwrap().phase(), "Stage: stage 599");
 }
 
 fn device(ecid: u64, mode: Mode) -> DeviceInfo {
@@ -347,7 +353,7 @@ fn native_restore_options_preserve_authorization_and_transcript() {
         connect_data: "connect.data".into(),
         ..Setup::default()
     };
-    let options = setup.restore_options(Some(Path::new("run.jsonl"))).unwrap();
+    let options = setup.restore_options(Path::new("run.jsonl")).unwrap();
     assert!(options.ipsw.is_none());
     assert_eq!(options.ecid, 42);
     assert_eq!(options.firmware_dir.as_deref(), Some(Path::new("cache")));
@@ -381,9 +387,21 @@ fn selected_release_is_carried_into_automatic_restore_but_not_local_restore() {
         ipsw: file.path().display().to_string(),
         ..Setup::default()
     };
-    assert_eq!(setup.restore_options(None).unwrap().release, Some(release));
+    assert_eq!(
+        setup
+            .restore_options(Path::new("run.jsonl"))
+            .unwrap()
+            .release,
+        Some(release)
+    );
     setup.automatic = false;
-    assert!(setup.restore_options(None).unwrap().release.is_none());
+    assert!(
+        setup
+            .restore_options(Path::new("run.jsonl"))
+            .unwrap()
+            .release
+            .is_none()
+    );
 }
 
 #[test]
@@ -392,7 +410,7 @@ fn udev_setup_needs_no_mac_and_keeps_the_administrator_prompt_until_completion()
     assert!(operation.action.requires_admin());
     assert!(!operation.action.writes_device());
     assert!(!operation.can_stop());
-    assert_eq!(operation.phase, "Approve the Linux administrator prompt");
+    assert_eq!(operation.phase(), "Approve the Linux administrator prompt");
     let completion = worker::Completion {
         success: true,
         ..Default::default()
@@ -489,7 +507,7 @@ fn local_firmware_is_required_and_has_no_cache_option() {
         cache: "cache".into(),
         ..Setup::default()
     };
-    let options = setup.restore_options(None).unwrap();
+    let options = setup.restore_options(Path::new("run.jsonl")).unwrap();
     assert_eq!(options.ipsw.as_deref(), Some(file.path()));
     assert!(options.firmware_dir.is_none());
     setup.ipsw = "missing.ipsw".into();
@@ -1143,7 +1161,7 @@ fn worker_state_survives_journal_eviction_and_protects_restore_from_stopping() {
             complete: false,
         },
     );
-    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: update firmware");
+    assert_eq!(app.job.as_ref().unwrap().phase(), "Stage: update firmware");
     send_worker(&mut app, progress::Event::RestoreCompleted);
     for index in 0..4001 {
         app.journal_line(Record::new(Level::Info, "test", format!("message {index}")));
@@ -1243,7 +1261,7 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
     );
     assert!(app.job.as_ref().unwrap().transfers.is_empty());
     assert!(!app.job.as_ref().unwrap().can_stop());
-    assert_eq!(app.job.as_ref().unwrap().phase, "Restore complete");
+    assert_eq!(app.job.as_ref().unwrap().phase(), "Restore complete");
     assert_eq!(app.logs.back().unwrap().message, line);
 }
 
@@ -2363,4 +2381,27 @@ fn firmware_lookup_ignores_superseded_requests_and_surfaces_network_failure() {
         .unwrap();
     app.poll(&ctx);
     assert!(app.firmware.is_none());
+}
+
+#[test]
+fn phase_labels_follow_the_current_language_and_completion_is_terminal() {
+    let mut operation = job(Action::Restore);
+    operation.output(Output::State(progress::Event::Checkpoint {
+        name: "writing_filesystem".into(),
+        complete: false,
+    }));
+    assert_eq!(operation.phase(), "Stage: writing filesystem");
+    let mut localizer = zalivka::localization::Localizer::load();
+    localizer.select("ru");
+    {
+        let _language = localizer.enter();
+        assert_eq!(operation.phase(), "Этап: writing filesystem");
+        operation.output(Output::State(progress::Event::RestoreCompleted));
+        operation.output(Output::State(progress::Event::Checkpoint {
+            name: "late_checkpoint".into(),
+            complete: false,
+        }));
+        assert_eq!(operation.phase(), "Восстановление завершено");
+    }
+    assert_eq!(operation.phase(), "Restore complete");
 }

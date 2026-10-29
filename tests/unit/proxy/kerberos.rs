@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_net::read_header;
 use libgssapi::{
     context::ServerCtx,
     credential::{Cred, CredUsage},
@@ -7,21 +8,8 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     process::Command,
-    sync::Arc,
     thread,
-    time::Duration,
 };
-
-fn header(stream: &mut impl Read) -> String {
-    let mut bytes = Vec::new();
-    while !bytes.ends_with(b"\r\n\r\n") {
-        assert!(bytes.len() < 128 * 1024);
-        let mut byte = [0];
-        stream.read_exact(&mut byte).unwrap();
-        bytes.push(byte[0]);
-    }
-    String::from_utf8(bytes).unwrap()
-}
 
 #[test]
 fn invalid_tokens_and_unfinished_mutual_authentication_are_rejected() {
@@ -60,13 +48,7 @@ fn kerberos_authenticates_http_and_fdr_tunnels() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            let mut stream = crate::test_net::accept(&listener);
             let name = Name::new(
                 b"HTTP/127.0.0.1@ZALIVKA.TEST",
                 Some(libgssapi::oid::GSS_NT_KRB5_PRINCIPAL),
@@ -75,12 +57,12 @@ fn kerberos_authenticates_http_and_fdr_tunnels() {
             let credential = Cred::acquire(Some(&name), None, CredUsage::Accept, None)
                 .unwrap_or_else(|error| panic!("GSS acceptor credentials: {error}"));
             let mut context = ServerCtx::new(Some(credential));
-            let first = header(&mut stream);
+            let first = read_header(&mut stream);
             assert!(first.starts_with("CONNECT "));
             assert!(!first.contains("Proxy-Authorization"));
             stream.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0\r\n\r\n").unwrap();
             loop {
-                let request = header(&mut stream);
+                let request = read_header(&mut stream);
                 let token = request
                     .lines()
                     .find_map(|line| line.strip_prefix("Proxy-Authorization: Negotiate "))
@@ -107,27 +89,12 @@ fn kerberos_authenticates_http_and_fdr_tunnels() {
                 .unwrap();
             }
             if http {
-                use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-                let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-                    oxitls_rustcrypto_provider::provider(),
-                ))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_no_client_auth()
-                .with_single_cert(
-                    vec![CertificateDer::from(
-                        include_bytes!("../../fixtures/proxy/localhost.der").as_slice(),
-                    )],
-                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-                        include_bytes!("../../fixtures/proxy/localhost-key.der").to_vec(),
-                    )),
-                )
-                .unwrap();
+                let config = crate::test_net::tls_server_config();
                 let mut tls = rustls::StreamOwned::new(
-                    rustls::ServerConnection::new(Arc::new(config)).unwrap(),
+                    rustls::ServerConnection::new(config).unwrap(),
                     stream,
                 );
-                assert!(header(&mut tls).starts_with("GET /ticket HTTP/1.1"));
+                assert!(read_header(&mut tls).starts_with("GET /ticket HTTP/1.1"));
                 tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
                     .unwrap();
                 tls.flush().unwrap();

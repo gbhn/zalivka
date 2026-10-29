@@ -281,6 +281,7 @@ fn signing_rejects_malformed_metadata_instead_of_skipping_components() {
     for entry in [
         true.into(),
         wire::dict([("Info", "invalid".into())]),
+        wire::dict([("Info", wire::dict([("Personalize", "yes".into())]))]),
         wire::dict([
             ("Info", wire::dict([] as [(&str, Value); 0])),
             ("Trusted", "true".into()),

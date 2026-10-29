@@ -9,10 +9,7 @@ fn pac_routes_fail_over_before_sending_a_post_and_do_not_replay_a_sent_post() {
         let offline = unused.local_addr().unwrap();
         drop(unused);
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            let mut stream = accept(&listener);
             if !lose_response {
                 assert!(read_header(&mut stream).starts_with("CONNECT gs.apple.com:80 "));
                 stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
@@ -59,24 +56,8 @@ fn pac_routes_fail_over_before_sending_a_post_and_do_not_replay_a_sent_post() {
 
 #[test]
 fn destination_tls_and_connection_reuse_work_through_every_proxy_route() {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-
     let certificate = include_bytes!("../../fixtures/proxy/localhost.der");
-    let server_config = Arc::new(
-        rustls::ServerConfig::builder_with_provider(Arc::new(
-            oxitls_rustcrypto_provider::provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![CertificateDer::from(certificate.as_slice())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-                include_bytes!("../../fixtures/proxy/localhost-key.der").to_vec(),
-            )),
-        )
-        .unwrap(),
-    );
+    let server_config = crate::test_net::tls_server_config();
 
     fn serve_tls(stream: impl Read + Write, config: Arc<rustls::ServerConfig>) {
         let connection = rustls::ServerConnection::new(config).unwrap();
@@ -104,13 +85,7 @@ fn destination_tls_and_connection_reuse_work_through_every_proxy_route() {
         let expected = destination.clone();
         let config = server_config.clone();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            let mut stream = accept(&listener);
             match route {
                 "http" => {
                     assert!(read_header(&mut stream).starts_with(&format!("CONNECT {expected} ")));
@@ -188,10 +163,7 @@ fn cancellation_interrupts_proxy_and_tls_handshakes_for_public_and_tss_clients()
             let address = listener.local_addr().unwrap();
             let (ready, receiving) = mpsc::channel();
             let server = thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
+                let mut stream = accept(&listener);
                 match route {
                     "http" => assert!(read_header(&mut stream).starts_with("CONNECT ")),
                     "socks5h" => {
@@ -260,10 +232,7 @@ fn firmware_body_has_an_inactivity_timeout_and_retains_no_total_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        let mut stream = accept(&listener);
         read_header(&mut stream);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx")
@@ -296,10 +265,7 @@ fn native_cancellation_interrupts_a_stalled_http_body_without_killing_the_proces
     let address = listener.local_addr().unwrap();
     let (ready, receiving) = mpsc::channel();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        let mut stream = accept(&listener);
         read_header(&mut stream);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\ndata")
@@ -370,43 +336,13 @@ fn http_requests_automatically_answer_negotiate_using_the_current_windows_user()
 
 #[test]
 fn https_proxy_uses_its_own_roots_with_tss_destination_trust() {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     let certificate = include_bytes!("../../fixtures/proxy/localhost.der");
-    let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        oxitls_rustcrypto_provider::provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(
-        vec![CertificateDer::from(certificate.as_slice())],
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-            include_bytes!("../../fixtures/proxy/localhost-key.der").to_vec(),
-        )),
-    )
-    .unwrap();
+    let server_config = crate::test_net::tls_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let proxy = ureq::Proxy::new(&format!("https://{}", listener.local_addr().unwrap())).unwrap();
     let server = thread::spawn(move || {
-        listener.set_nonblocking(true).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && std::time::Instant::now() < deadline =>
-                {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => panic!("HTTPS proxy accept failed: {error}"),
-            }
-        };
-        stream.set_nonblocking(false).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let connection = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
+        let stream = accept(&listener);
+        let connection = rustls::ServerConnection::new(server_config).unwrap();
         let mut stream = rustls::StreamOwned::new(connection, stream);
         for expected in ["CONNECT does-not-resolve.invalid:80 ", "POST /sign "] {
             assert!(read_header(&mut stream).starts_with(expected));
@@ -454,26 +390,9 @@ fn http_proxy_tunnels_get_post_and_range_requests() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let proxy =
             ureq::Proxy::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
-        listener.set_nonblocking(true).unwrap();
         let expected_method = method.clone();
         let server = thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::WouldBlock
-                            && std::time::Instant::now() < deadline =>
-                    {
-                        thread::sleep(Duration::from_millis(10))
-                    }
-                    Err(error) => panic!("HTTP proxy accept failed: {error}"),
-                }
-            };
-            stream.set_nonblocking(false).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            let mut stream = accept(&listener);
             assert!(
                 read_header(&mut stream)
                     .to_ascii_lowercase()
@@ -513,79 +432,6 @@ fn http_proxy_tunnels_get_post_and_range_requests() {
         assert_eq!(response.body_mut().read_to_string().unwrap(), "reply");
         server.join().unwrap();
     }
-}
-
-#[test]
-fn tss_tls_validates_apple_chain_hostname_signature_and_expiration() {
-    use rustls::{
-        RootCertStore,
-        client::WebPkiServerVerifier,
-        client::danger::ServerCertVerifier,
-        pki_types::{CertificateDer, ServerName, UnixTime},
-    };
-    let agent = tss_agent();
-    let tls = agent.config().tls_config();
-    assert!(!tls.disable_verification());
-    assert!(tls.use_sni());
-    let ureq::tls::RootCerts::Specific(certificates) = tls.root_certs() else {
-        panic!("TSS must use its explicit Apple trust anchor");
-    };
-    let mut roots = RootCertStore::empty();
-    for certificate in certificates.iter() {
-        roots.add(CertificateDer::from(certificate.der())).unwrap();
-    }
-    let verifier = WebPkiServerVerifier::builder_with_provider(
-        Arc::new(roots),
-        Arc::new(oxitls_rustcrypto_provider::provider()),
-    )
-    .build()
-    .unwrap();
-    let leaf =
-        CertificateDer::from(include_bytes!("../../fixtures/tss/gs-2026-04-28.der").as_slice());
-    let intermediates = [CertificateDer::from(
-        include_bytes!("../../fixtures/tss/apple-server-auth-ca.der").as_slice(),
-    )];
-    let host = ServerName::try_from("gs.apple.com").unwrap();
-    // Fixed capture date: this fixture remains reproducible after the leaf expires.
-    let now = UnixTime::since_unix_epoch(Duration::from_secs(1_792_454_400));
-    verifier
-        .verify_server_cert(&leaf, &intermediates, &host, &[], now)
-        .unwrap();
-    let wrong_host = ServerName::try_from("updates.cdn-apple.com").unwrap();
-    assert!(
-        verifier
-            .verify_server_cert(&leaf, &intermediates, &wrong_host, &[], now)
-            .is_err()
-    );
-    assert!(
-        verifier
-            .verify_server_cert(&leaf, &[], &host, &[], now)
-            .is_err()
-    );
-    let mut tampered = leaf.to_vec();
-    *tampered.last_mut().unwrap() ^= 1;
-    assert!(
-        verifier
-            .verify_server_cert(&tampered.into(), &intermediates, &host, &[], now)
-            .is_err()
-    );
-    let expired = UnixTime::since_unix_epoch(Duration::from_secs(1_794_528_000));
-    assert!(
-        verifier
-            .verify_server_cert(&leaf, &intermediates, &host, &[], expired)
-            .is_err()
-    );
-    // This extra root must never broaden the normal CDN/asset trust configuration.
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    assert!(matches!(
-        super::agent().config().tls_config().root_certs(),
-        ureq::tls::RootCerts::WebPki
-    ));
-    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-    assert!(matches!(
-        super::agent().config().tls_config().root_certs(),
-        ureq::tls::RootCerts::PlatformVerifier
-    ));
 }
 
 #[test]

@@ -133,18 +133,20 @@ pub(super) fn generated_update(
         "firmware updater supplied no response tags"
     );
     let common = tss::updater_fields(device)?;
-    let mut request = common.clone();
+    let mut request = generated.clone();
     let identity = wire::dictionary(&id.value)?;
     // BuildIdentityTags selects available fields; it is not a required-field
     // schema. Preserve device-generated types while checking AP consistency.
     for name in build_identity_tags {
-        if let Some(value) = generated.get(name).or_else(|| identity.get(name)) {
-            request.insert(name.into(), value.clone());
+        if let Some(value) = identity.get(name) {
+            request.entry(name).or_insert_with(|| value.clone());
         }
     }
-    request.extend(generated.clone());
     for (name, expected) in common {
-        let value = &request[&name];
+        let Some(value) = request.get(&name) else {
+            request.insert(name, expected);
+            continue;
+        };
         let matches = if let Some(expected) = expected.as_boolean() {
             value.as_boolean() == Some(expected)
         } else if let Some(expected) = expected.as_unsigned_integer() {

@@ -143,6 +143,18 @@ fn metadata_updater_cannot_contradict_connected_ap_fields() {
         .unwrap()
         .insert("ApChipID".into(), 0xffffu64.into());
     assert!(zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).is_err());
+    args.as_dictionary_mut()
+        .unwrap()
+        .get_mut("DeviceGeneratedRequest")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("ApChipID".into(), "0X8103".into());
+    let update = zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).unwrap();
+    assert_eq!(
+        wire::string(update.request(), &["ApChipID"]).unwrap(),
+        "0X8103"
+    );
 }
 
 #[test]
@@ -515,6 +527,8 @@ fn container_indexes_must_fit_the_declared_file_even_without_payloads() {
     assert!(payload_ranges(&uarp, 43).is_err());
     uarp[36..40].copy_from_slice(&43u32.to_be_bytes());
     assert!(payload_ranges(&uarp, 44).is_err());
+    uarp[36..40].copy_from_slice(&84u32.to_be_bytes());
+    assert!(payload_ranges(&uarp, 84).is_err()); // Even an empty index must be in the prefix.
     uarp[36..40].copy_from_slice(&44u32.to_be_bytes());
     uarp[40..44].copy_from_slice(&40u32.to_be_bytes());
     assert!(payload_ranges(&uarp, 84).is_err()); // The index is not in the prefix yet.

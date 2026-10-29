@@ -1,4 +1,4 @@
-//! Native Windows chain validation, including user and enterprise trust roots.
+//! Shared TLS for TSS and HTTPS proxy tunnels, using platform certificate trust.
 use anyhow::Result;
 use rustls::{
     ClientConfig, ClientConnection, StreamOwned,
@@ -16,11 +16,24 @@ use ureq::unversioned::transport::{
 
 fn verifier(extra: Option<CertificateDer<'static>>) -> Result<Arc<dyn ServerCertVerifier>> {
     let provider = Arc::new(oxitls_rustcrypto_provider::provider());
-    Ok(Arc::new(if let Some(root) = extra {
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    let verifier = Arc::new(if let Some(root) = extra {
         rustls_platform_verifier::Verifier::new_with_extra_roots([root], provider)?
     } else {
         rustls_platform_verifier::Verifier::new(provider)?
-    }))
+    });
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    let verifier = {
+        let mut roots = rustls::RootCertStore::empty();
+        if let Some(root) = extra {
+            roots.add(root)?;
+        } else {
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+        rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+            .build()?
+    };
+    Ok(verifier)
 }
 
 pub(crate) fn config(extra: Option<CertificateDer<'static>>) -> Result<Arc<ClientConfig>> {
@@ -28,7 +41,7 @@ pub(crate) fn config(extra: Option<CertificateDer<'static>>) -> Result<Arc<Clien
     Ok(Arc::new(
         ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()?
-            // This supplies the Windows verifier, not a verification bypass.
+            // The verifier checks the chain, hostname, validity and handshake signatures.
             .dangerous()
             .with_custom_certificate_verifier(verifier(extra)?)
             .with_no_client_auth(),
@@ -45,7 +58,7 @@ pub(crate) fn connect_tss(
         include_bytes!("../../certs/AppleIncRootCertificate.cer").as_slice(),
     )))
     .map_err(|error| ureq::Error::Other(error.into()))?;
-    crate::log!(Debug, "tls:tss", "Certificates: Windows + Apple Root");
+    crate::log!(Debug, "tls:tss", "Certificates: system trust + Apple Root");
     connect_with_config(details, transport, config)
 }
 
@@ -61,7 +74,7 @@ fn connect_with_config(
     let mut socket = TransportAdapter::new(transport, details.current_time.clone());
     socket.set_timeout(details.timeout);
     connection.complete_io(&mut socket)?;
-    Ok(Box::new(WindowsTls {
+    Ok(Box::new(TlsTransport {
         stream: StreamOwned::new(connection, socket),
         buffers: LazyBuffers::new(
             details.config.input_buffer_size(),
@@ -70,16 +83,16 @@ fn connect_with_config(
     }))
 }
 
-struct WindowsTls {
+struct TlsTransport {
     stream: StreamOwned<ClientConnection, TransportAdapter>,
     buffers: LazyBuffers,
 }
-impl fmt::Debug for WindowsTls {
+impl fmt::Debug for TlsTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WindowsTls").finish_non_exhaustive()
+        f.debug_struct("TlsTransport").finish_non_exhaustive()
     }
 }
-impl Transport for WindowsTls {
+impl Transport for TlsTransport {
     fn buffers(&mut self) -> &mut dyn Buffers {
         &mut self.buffers
     }
@@ -104,5 +117,5 @@ impl Transport for WindowsTls {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/windows/tls.rs"]
+#[path = "../../tests/unit/net/tls.rs"]
 mod tests;

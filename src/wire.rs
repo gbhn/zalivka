@@ -2,30 +2,35 @@
 use anyhow::{Context, Result, bail, ensure};
 use plist::{Dictionary, Value};
 use quick_xml::{Reader, Writer, events::Event};
+use serde::de::Error as _;
 use std::io::{BufRead, Read, Write};
 
 pub const MAX_PLIST: usize = 64 * 1024 * 1024;
 
-/// Check collection depth before constructing a recursively owned Value.
-/// The plist event reader handles XML, binary and ASCII without a Value tree.
+/// Decode XML, binary or ASCII once, checking depth before the Value builder
+/// receives each collection event.
 pub(crate) fn decode_plist(bytes: &[u8]) -> Result<Value> {
     use plist::stream::{Event as PlistEvent, Reader as PlistReader};
     let mut depth = 0usize;
-    for event in PlistReader::new(std::io::Cursor::new(bytes)) {
-        match event? {
+    let events = PlistReader::new(std::io::Cursor::new(bytes)).map(|event| {
+        let event = event?;
+        match &event {
             PlistEvent::StartArray(_) | PlistEvent::StartDictionary(_) => {
                 depth += 1;
-                ensure!(depth <= 128, "plist nested too deeply");
+                if depth > 128 {
+                    return Err(plist::Error::custom("plist nested too deeply"));
+                }
             }
             PlistEvent::EndCollection => {
                 depth = depth
                     .checked_sub(1)
-                    .context("unbalanced plist collections")?;
+                    .ok_or_else(|| plist::Error::custom("unbalanced plist collections"))?;
             }
             _ => {}
         }
-    }
-    Value::from_reader(std::io::Cursor::new(bytes)).context("decoding plist")
+        Ok(event)
+    });
+    Value::from_events(events).map_err(Into::into)
 }
 
 pub fn dict(items: impl IntoIterator<Item = (impl Into<String>, Value)>) -> Value {

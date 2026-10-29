@@ -35,3 +35,7 @@ mod test_mux;
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
 mod test_support;
+
+#[cfg(test)]
+#[path = "../tests/support/net.rs"]
+mod test_net;

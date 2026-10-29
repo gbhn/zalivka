@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn all_plist_formats_reject_excessive_depth_before_building_values() {
+fn all_plist_formats_reject_excessive_depth() {
     let xml = format!(
         "<plist>{}<string>x</string>{}</plist>",
         "<array>".repeat(4096),
@@ -32,6 +32,47 @@ fn all_plist_formats_reject_excessive_depth_before_building_values() {
         decode_plist(b"<plist><array><string>x</string></array></plist>").unwrap(),
         Value::Array(vec![Value::String("x".into())])
     );
+}
+
+#[test]
+fn all_plist_formats_preserve_values_at_the_depth_limit_and_reject_the_next_level() {
+    for depth in [0, 1, 128, 129] {
+        let mut value = Value::String("x".into());
+        for _ in 0..depth {
+            value = Value::Array(vec![value]);
+        }
+        let mut xml = Vec::new();
+        value.to_writer_xml(&mut xml).unwrap();
+        let mut binary = Vec::new();
+        value.to_writer_binary(&mut binary).unwrap();
+        let ascii = format!("/* plist */ {}x{}", "(".repeat(depth), ")".repeat(depth)).into_bytes();
+        for bytes in [xml, binary, ascii] {
+            let decoded = decode_plist(&bytes);
+            if depth <= 128 {
+                assert_eq!(decoded.unwrap(), value);
+            } else {
+                assert!(
+                    decoded
+                        .unwrap_err()
+                        .to_string()
+                        .contains("nested too deeply")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn malformed_collections_and_trailing_roots_are_not_accepted_as_partial_values() {
+    for bytes in [
+        b"<plist><dict><key>missing</key></dict></plist>".as_slice(),
+        b"<plist><string>first</string><string>second</string></plist>",
+        b"<plist><array><string>unfinished</string>",
+        b"(x, (y)",
+        b"{ missing = }",
+    ] {
+        assert!(decode_plist(bytes).is_err(), "{bytes:?}");
+    }
 }
 
 #[test]

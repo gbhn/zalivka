@@ -52,7 +52,9 @@ pub fn check_host() -> Result<()> {
 
 pub fn prepare_windows() -> Result<bool> {
     #[cfg(windows)]
-    return crate::windows::setup::run(crate::windows::setup::Action::Prepare);
+    return crate::windows::setup::run(crate::windows::setup::Action::Prepare).inspect(|reboot| {
+        crate::log!(Info, "drivers", "Setup complete; reboot={reboot}");
+    });
     #[cfg(not(windows))]
     anyhow::bail!("Driver setup is only available on Windows")
 }
@@ -65,7 +67,9 @@ pub fn run_elevated_helper() -> Option<u32> {
 /// Remove Apple restore device records and reinstall the signed USB package.
 pub fn reset_windows() -> Result<bool> {
     #[cfg(windows)]
-    return crate::windows::setup::run(crate::windows::setup::Action::Reset);
+    return crate::windows::setup::run(crate::windows::setup::Action::Reset).inspect(|reboot| {
+        crate::log!(Info, "drivers", "Reset complete; reboot={reboot}");
+    });
     #[cfg(not(windows))]
     anyhow::bail!("USB driver reset is only available on Windows")
 }
@@ -271,7 +275,13 @@ pub fn install_udev() -> Result<()> {
 /// Request desktop authorization for the same installer used by the CLI.
 pub fn prepare_linux() -> Result<()> {
     #[cfg(target_os = "linux")]
-    return linux::prepare();
+    return linux::prepare().inspect(|()| {
+        crate::log!(
+            Info,
+            "udev",
+            "USB access configured. Reconnect the USB cable."
+        );
+    });
     #[cfg(not(target_os = "linux"))]
     anyhow::bail!("Linux USB setup is available only on Linux")
 }

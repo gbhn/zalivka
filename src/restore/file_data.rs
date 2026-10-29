@@ -149,18 +149,14 @@ impl<'a> FileDataWriter<'a> {
         ensure!(!self.failed, "file transfer already failed");
         self.flush_pending(true)?;
 
-        if self.prefix.is_aea() {
-            if self.stream.has_pending_input()? {
-                self.exchange_keys()?;
-            }
-            wire::send(
-                &mut self.pending,
-                &wire::dict([("FileDataDone", true.into())]),
-            )?;
-            self.flush_pending(true)?;
-        } else {
-            wire::send(self.stream, &wire::dict([("FileDataDone", true.into())]))?;
+        if self.prefix.is_aea() && self.stream.has_pending_input()? {
+            self.exchange_keys()?;
         }
+        wire::send(
+            &mut self.pending,
+            &wire::dict([("FileDataDone", true.into())]),
+        )?;
+        self.flush_pending(true)?;
         self.progress.finish();
         Ok(())
     }

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use clap::{Args, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::path::PathBuf;
 use zalivka::{
@@ -100,50 +100,13 @@ enum Command {
     /// Experimental erase restore.
     Restore {
         #[command(flatten)]
-        args: RestoreArgs,
+        args: operations::Restore,
         /// Acknowledge that restore erases the target Mac.
         #[arg(long, required = true)]
         erase: bool,
     },
     /// Experimental firmware/recovery update using an Upgrade identity; never falls back to erase.
-    Revive(RestoreArgs),
-}
-
-#[derive(Args)]
-struct RestoreArgs {
-    /// Local IPSW; omitted to automatically download the current compatible image.
-    ipsw: Option<PathBuf>,
-    /// Firmware cache for automatic downloads.
-    #[arg(long, conflicts_with = "ipsw")]
-    firmware_dir: Option<PathBuf>,
-    #[arg(long, value_parser = parse_ecid)]
-    ecid: u64,
-    #[arg(long)]
-    identity: Option<usize>,
-    /// Record restored's plist messages as JSON lines (new file only).
-    #[arg(long)]
-    transcript: Option<PathBuf>,
-    /// Apple host-to-bearer-token plist for WKMS authorization.
-    #[arg(long)]
-    authorization_tokens: Option<PathBuf>,
-    /// Raw DAWTKN data obtained from an authorized AppleConnect session.
-    #[arg(long)]
-    apple_connect_data: Option<PathBuf>,
-}
-
-impl From<RestoreArgs> for operations::Restore {
-    fn from(args: RestoreArgs) -> Self {
-        Self {
-            ipsw: args.ipsw,
-            firmware_dir: args.firmware_dir,
-            release: None,
-            ecid: args.ecid,
-            identity: args.identity,
-            transcript: args.transcript,
-            authorization_tokens: args.authorization_tokens,
-            apple_connect_data: args.apple_connect_data,
-        }
-    }
+    Revive(operations::Restore),
 }
 
 #[derive(Subcommand)]
@@ -220,8 +183,12 @@ pub(super) fn run() -> Result<()> {
             DriverCommand::Status => {
                 print_json(&drivers::host_status()?)?;
             }
-            DriverCommand::Prepare => operations::prepare_windows()?,
-            DriverCommand::Reset => operations::reset_drivers()?,
+            DriverCommand::Prepare => {
+                drivers::prepare_windows()?;
+            }
+            DriverCommand::Reset => {
+                drivers::reset_windows()?;
+            }
             DriverCommand::Export {
                 directory,
                 pid,
@@ -367,9 +334,9 @@ pub(super) fn run() -> Result<()> {
         }
         Command::Restore { args, erase } => {
             ensure!(erase, "--erase is required");
-            operations::Restore::from(args).run(Behavior::Erase)?;
+            args.run(Behavior::Erase)?;
         }
-        Command::Revive(args) => operations::Restore::from(args).run(Behavior::Update)?,
+        Command::Revive(args) => args.run(Behavior::Update)?,
     }
     Ok(())
 }
