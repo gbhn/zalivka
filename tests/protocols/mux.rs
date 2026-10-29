@@ -1,6 +1,143 @@
 use super::*;
 
 #[test]
+fn mux_tcp_options_preserve_payload_boundaries_and_only_required_acks_are_sent() {
+    let payload = b"payload across wrap";
+    let initial = u32::MAX - 3;
+    for options in [0, 4, 40] {
+        let packet = |frame: Vec<u8>| {
+            let mut body = frame[16..].to_vec();
+            body[12] = (((20 + options) / 4) as u8) << 4;
+            body.splice(20..20, vec![0xa5; options]);
+            test_mux::encode_packet(6, 2, 1, 0, &body).unwrap()
+        };
+        let (usb, output) = mock_mux(vec![
+            version_packet(),
+            packet(tcp(12345, 1, initial, 1, 0x12, &[])),
+            packet(tcp(12345, 1, 1234567, 1, 0x10, &[])),
+            packet(tcp(54321, 65000, 1, 1, 0x10, b"unrelated channel")),
+            packet(tcp(12345, 1, initial.wrapping_add(1), 1, 0x10, payload)),
+            packet(tcp(
+                12345,
+                1,
+                initial.wrapping_add(1 + payload.len() as u32),
+                1,
+                0x11,
+                &[],
+            )),
+        ]);
+        let session = Session::new(usb).unwrap();
+        let mut stream = session.connect(12345).unwrap();
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).unwrap();
+        assert_eq!(received, payload);
+        assert_eq!(
+            stream.write(b"closed").unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        let sent = output.lock().unwrap();
+        let acknowledgements: Vec<_> = sent
+            .iter()
+            .skip(2)
+            .filter_map(|bytes| {
+                let packet = mux::decode_packet(bytes, 2).unwrap();
+                (packet.payload[13] == 0x10)
+                    .then(|| u32::from_be_bytes(packet.payload[8..12].try_into().unwrap()))
+            })
+            .collect();
+        assert_eq!(
+            acknowledgements,
+            [
+                initial.wrapping_add(1),
+                initial.wrapping_add(1 + payload.len() as u32),
+                initial.wrapping_add(2 + payload.len() as u32),
+            ]
+        );
+        assert_eq!(sent.len(), 6); // version, setup, SYN, and three ACKs.
+    }
+}
+
+#[test]
+fn mux_reset_preserves_buffered_bytes_and_does_not_close_other_services() {
+    let (usb, output) = mock_mux(vec![
+        version_packet(),
+        tcp(12345, 1, 0, 1, 0x12, &[]),
+        tcp(54321, 2, 0, 1, 0x12, &[]),
+        tcp(12345, 1, 1, 1, 0x10, b"before reset"),
+        tcp(12345, 1, 13, 1, 0x04, b"service stopped"),
+        tcp(54321, 2, 1, 1, 0x10, b"OK"),
+    ]);
+    let session = Session::new(usb).unwrap();
+    let mut first = session.connect(12345).unwrap();
+    let mut second = session.connect(54321).unwrap();
+    // This reader routes the other service's data and reset before that
+    // service consumes its buffer.
+    second.read_exact(&mut [0; 2]).unwrap();
+    let mut received = Vec::new();
+    first.read_to_end(&mut received).unwrap();
+    assert_eq!(received, b"before reset");
+    assert_eq!(
+        first.write(b"closed").unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    second.write_all(b"still open").unwrap();
+    assert_eq!(mux_output(&output, 54321).into_inner(), b"still open");
+    let acknowledgements = output
+        .lock()
+        .unwrap()
+        .iter()
+        .skip(2)
+        .filter(|bytes| {
+            let packet = mux::decode_packet(bytes, 2).unwrap();
+            packet.payload[2..4] == 12345u16.to_be_bytes() && packet.payload[13] == 0x10
+        })
+        .count();
+    assert_eq!(acknowledgements, 2); // SYN and data; never answer RST with ACK.
+}
+
+#[test]
+fn malformed_tcp_headers_cancel_all_services_even_for_an_unknown_channel() {
+    for destination in [1, 65000] {
+        for malformed in 0..3 {
+            let mut body = tcp(12345, destination, 1, 1, 0x10, &[])[16..].to_vec();
+            match malformed {
+                0 => {
+                    body.pop();
+                }
+                1 => body[12] = 0x40,
+                2 => body[12] = 0x60,
+                _ => unreachable!(),
+            }
+            let (usb, output) = mock_mux(vec![
+                version_packet(),
+                tcp(12345, 1, 0, 1, 0x12, &[]),
+                tcp(54321, 2, 0, 1, 0x12, &[]),
+                test_mux::encode_packet(6, 2, 1, 0, &body).unwrap(),
+            ]);
+            let session = Session::new(usb).unwrap();
+            let mut first = session.connect(12345).unwrap();
+            let mut second = session.connect(54321).unwrap();
+            assert!(
+                first
+                    .read(&mut [0])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("mux TCP")
+            );
+            let sent = output.lock().unwrap().len();
+            assert!(
+                second
+                    .write_all(b"must not continue")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cancelled")
+            );
+            assert_eq!(output.lock().unwrap().len(), sent);
+        }
+    }
+}
+
+#[test]
 fn mux_coalesced_frames_survive_fragmentation_sequence_wrap_and_final_close() {
     let first = vec![0xa5; 4097];
     let last = b"final bytes";

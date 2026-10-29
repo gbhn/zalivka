@@ -1,5 +1,5 @@
 //! Per-service reads, bounded writes, ACK waiting and transfer accounting.
-use super::{ACK, MAX_PAYLOAD, RST, Session, WRITE_BATCH, yield_link};
+use super::{ACK, MAX_PAYLOAD, RST, Session, State, WRITE_BATCH, yield_link};
 use anyhow::Result;
 use std::{
     io::{Read, Write},
@@ -103,7 +103,7 @@ impl MuxStream {
                 .get_mut(&self.source)
                 .ok_or_else(|| std::io::Error::other("mux channel closed"))?;
             c.firmware_transfer = crate::logging::firmware_transfer_active();
-            if c.closed {
+            if c.state == State::Closed {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     "device closed service",
@@ -258,7 +258,7 @@ impl Read for MuxStream {
                 }
                 return Ok(n);
             }
-            if c.closed {
+            if c.state == State::Closed {
                 crate::log!(
                     Trace,
                     "usbmux:io",

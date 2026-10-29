@@ -54,3 +54,34 @@ pub fn decode_packet(bytes: &[u8], version: u32) -> Result<Packet<'_>> {
         payload: &bytes[size..],
     })
 }
+
+/// A checked TCP header and its borrowed payload, without copying USB data.
+pub(super) struct TcpPacket<'a> {
+    pub source: u16,
+    pub destination: u16,
+    pub seq: u32,
+    pub ack: u32,
+    pub flags: u8,
+    pub window: u32,
+    pub data: &'a [u8],
+}
+
+impl<'a> TcpPacket<'a> {
+    pub(super) fn parse(bytes: &'a [u8]) -> Result<Self> {
+        ensure!(bytes.len() >= 20, "truncated mux TCP header");
+        let header_len = usize::from(bytes[12] >> 4) * 4;
+        ensure!(
+            header_len >= 20 && header_len <= bytes.len(),
+            "invalid mux TCP header size"
+        );
+        Ok(Self {
+            source: u16::from_be_bytes(bytes[..2].try_into()?),
+            destination: u16::from_be_bytes(bytes[2..4].try_into()?),
+            seq: u32::from_be_bytes(bytes[4..8].try_into()?),
+            ack: u32::from_be_bytes(bytes[8..12].try_into()?),
+            flags: bytes[13],
+            window: u32::from(u16::from_be_bytes(bytes[14..16].try_into()?)) << 8,
+            data: &bytes[header_len..],
+        })
+    }
+}

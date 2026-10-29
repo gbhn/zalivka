@@ -1,13 +1,15 @@
 //! Direct USB multiplex transport. No usbmuxd daemon or MobileDevice library.
+mod channel;
 mod packet;
 mod stream;
 use crate::usb::MuxUsb;
 use anyhow::{Context, Result, ensure};
 use bytes::{Bytes, BytesMut};
-use packet::encode_header;
+use channel::{Channel, State};
 pub use packet::{Packet, decode_packet};
+use packet::{TcpPacket, encode_header};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
@@ -78,35 +80,6 @@ impl PacketTransport for MuxUsb {
     }
     fn write_packets(&mut self, packets: &[Vec<u8>], cancelled: &AtomicBool) -> Result<()> {
         self.write_packets(packets, cancelled)
-    }
-}
-
-#[derive(Debug)]
-struct Channel {
-    destination: u16,
-    seq: u32,
-    ack: u32,
-    peer_ack: u32,
-    window: u32,
-    connected: bool,
-    closed: bool,
-    firmware_transfer: bool,
-    input: VecDeque<u8>,
-    consumed: usize,
-}
-
-impl Channel {
-    fn tcp_header(&self, source: u16, flags: u8) -> [u8; 20] {
-        let mut tcp = [0; 20];
-        tcp[..2].copy_from_slice(&source.to_be_bytes());
-        tcp[2..4].copy_from_slice(&self.destination.to_be_bytes());
-        tcp[4..8].copy_from_slice(&self.seq.to_be_bytes());
-        tcp[8..12].copy_from_slice(&self.ack.to_be_bytes());
-        tcp[12] = 5 << 4;
-        tcp[13] = flags;
-        let window = ((RECEIVE_WINDOW - self.input.len()) >> 8) as u16;
-        tcp[14..16].copy_from_slice(&window.to_be_bytes());
-        tcp
     }
 }
 
@@ -235,21 +208,7 @@ impl Session {
                 break p;
             }
         };
-        link.channels.insert(
-            source,
-            Channel {
-                destination,
-                seq: 0,
-                ack: 0,
-                peer_ack: 0,
-                window: 0,
-                connected: false,
-                closed: false,
-                firmware_transfer: false,
-                input: VecDeque::new(),
-                consumed: 0,
-            },
-        );
+        link.channels.insert(source, Channel::new(destination));
         let sent = link.send_tcp(source, SYN, &[]);
         crate::log!(Trace, "usbmux:tcp", "{source} -> {destination}: SYN");
         drop(link);
@@ -259,14 +218,14 @@ impl Session {
             ensure!(!self.1.load(Ordering::Acquire), "USB mux session cancelled");
             let mut link = self.lock()?;
             let c = &link.channels[&source];
-            if c.closed {
+            if c.state == State::Closed {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::ConnectionRefused,
                     format!("device refused service port {destination}"),
                 )
                 .into());
             }
-            if c.connected {
+            if c.state == State::Open {
                 crate::log!(Trace, "usbmux:tcp", "{source} -> {destination}: connected");
                 return Ok(stream);
             }
@@ -496,97 +455,22 @@ impl Link {
             "unexpected mux protocol {}",
             packet.protocol
         );
-        let tcp = packet.payload;
-        ensure!(tcp.len() >= 20, "truncated mux TCP header");
-        let source = u16::from_be_bytes(tcp[2..4].try_into()?);
-        let peer_port = u16::from_be_bytes(tcp[..2].try_into()?);
-        let seq = u32::from_be_bytes(tcp[4..8].try_into()?);
-        let ack = u32::from_be_bytes(tcp[8..12].try_into()?);
-        let flags = tcp[13];
-        let header_len = (tcp[12] >> 4) as usize * 4;
-        ensure!(
-            header_len >= 20 && header_len <= tcp.len(),
-            "invalid mux TCP header size"
-        );
-        let data = &tcp[header_len..];
+        let tcp = TcpPacket::parse(packet.payload)?;
+        let source = tcp.destination;
         crate::log!(
             Trace,
             "usbmux:tcp",
-            "{peer_port} -> {source}: flags={flags:#04x}, seq={seq}, ack={ack}, window={}, bytes={}",
-            u32::from(u16::from_be_bytes(tcp[14..16].try_into()?)) << 8,
-            data.len()
+            "{} -> {source}: flags={:#04x}, seq={}, ack={}, window={}, bytes={}",
+            tcp.source,
+            tcp.flags,
+            tcp.seq,
+            tcp.ack,
+            tcp.window,
+            tcp.data.len()
         );
-        let Some(c) = self.channels.get_mut(&source) else {
-            return Ok(true);
-        };
-        ensure!(c.destination == peer_port, "mux TCP peer port mismatch");
-        if c.closed {
-            return Ok(true);
-        }
-        c.window = u32::from(u16::from_be_bytes(tcp[14..16].try_into()?)) << 8;
-        if flags & RST != 0 {
-            crate::log!(
-                Debug,
-                "usbmux",
-                "RST {peer_port} -> {source}: {}",
-                String::from_utf8_lossy(&data[..data.len().min(256)])
-            );
-            crate::logging::bytes(
-                "usbmux:tcp",
-                format_args!("RST {peer_port} -> {source}"),
-                data,
-            );
-            c.closed = true;
-            return Ok(true);
-        }
-        if !c.connected {
-            ensure!(
-                flags == SYN | ACK && ack == 1 && data.is_empty(),
-                "invalid mux TCP handshake"
-            );
-            c.seq = 1;
-            c.peer_ack = 1;
-            c.ack = seq.wrapping_add(1);
-            c.connected = true;
-            self.send_tcp(source, ACK, &[])?;
-            return Ok(true);
-        }
-        ensure!(
-            flags & ACK != 0 && flags & SYN == 0,
-            "invalid mux TCP flags {flags:#x}"
-        );
-        ensure!(
-            c.seq.wrapping_sub(ack) <= c.seq.wrapping_sub(c.peer_ack),
-            "invalid mux TCP acknowledgement"
-        );
-        c.peer_ack = ack;
-        if !data.is_empty() || flags & 1 != 0 {
-            ensure!(
-                seq == c.ack,
-                "out-of-order mux TCP data on {peer_port} -> {source}: expected={}, got={seq}, bytes={}, flags={flags:#x}",
-                c.ack,
-                data.len()
-            );
-        }
-        if !data.is_empty() {
-            ensure!(
-                c.input.len() + data.len() <= RECEIVE_WINDOW,
-                "device exceeded mux receive window"
-            );
-            c.input.extend(data);
-            c.ack = c.ack.wrapping_add(data.len() as u32);
-        }
-        if flags & 1 != 0 {
-            crate::log!(
-                Debug,
-                "usbmux",
-                "FIN {peer_port} -> {source}: buffered={} B",
-                c.input.len()
-            );
-            c.ack = c.ack.wrapping_add(1);
-            c.closed = true;
-        }
-        if !data.is_empty() || flags & 1 != 0 {
+        if let Some(channel) = self.channels.get_mut(&source)
+            && channel.receive(&tcp)?
+        {
             self.send_tcp(source, ACK, &[])?;
         }
         Ok(true)
