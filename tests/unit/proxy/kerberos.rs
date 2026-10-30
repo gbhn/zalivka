@@ -107,12 +107,14 @@ fn kerberos_authenticates_http_and_fdr_tunnels() {
         });
         let proxy = ureq::Proxy::new(&format!("http://127.0.0.1:{}", address.port())).unwrap();
         if http {
+            let root = crate::test_net::localhost_root();
             let config = ureq::Agent::config_builder()
                 .proxy(None)
                 .tls_config(crate::net::tls_config(
                     ureq::tls::RootCerts::new_with_certs(&[ureq::tls::Certificate::from_der(
-                        include_bytes!("../../fixtures/proxy/localhost.der"),
-                    )]),
+                        root.as_ref(),
+                    )
+                    .to_owned()]),
                 ))
                 .build();
             let client = ureq::Agent::with_parts(

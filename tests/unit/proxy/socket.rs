@@ -234,8 +234,8 @@ fn socks4a_preserves_the_domain_and_user_id() {
 }
 #[test]
 fn https_proxy_verifies_the_certificate_and_preserves_target_bytes() {
-    use rustls::{ServerConnection, pki_types::CertificateDer};
-    let cert = CertificateDer::from(include_bytes!("../../fixtures/proxy/localhost.der").to_vec());
+    use rustls::ServerConnection;
+    let cert = crate::test_net::localhost_root();
     let server_config = crate::test_net::tls_server_config();
     let mut roots = RootCertStore::empty();
     roots.add(cert).unwrap();

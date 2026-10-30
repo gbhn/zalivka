@@ -56,7 +56,7 @@ fn pac_routes_fail_over_before_sending_a_post_and_do_not_replay_a_sent_post() {
 
 #[test]
 fn destination_tls_and_connection_reuse_work_through_every_proxy_route() {
-    let certificate = include_bytes!("../../fixtures/proxy/localhost.der");
+    let certificate = crate::test_net::localhost_root();
     let server_config = crate::test_net::tls_server_config();
 
     fn serve_tls(stream: impl Read + Write, config: Arc<rustls::ServerConfig>) {
@@ -134,7 +134,10 @@ fn destination_tls_and_connection_reuse_work_through_every_proxy_route() {
         };
         let config = agent_config(
             Some(Duration::from_secs(5)),
-            ureq::tls::RootCerts::new_with_certs(&[ureq::tls::Certificate::from_der(certificate)]),
+            ureq::tls::RootCerts::new_with_certs(&[ureq::tls::Certificate::from_der(
+                certificate.as_ref(),
+            )
+            .to_owned()]),
         );
         let client = configured_agent(config.clone(), crate::proxy::HttpConnector::new(config));
         for number in 1..=2 {
@@ -336,7 +339,7 @@ fn http_requests_automatically_answer_negotiate_using_the_current_windows_user()
 
 #[test]
 fn https_proxy_uses_its_own_roots_with_tss_destination_trust() {
-    let certificate = include_bytes!("../../fixtures/proxy/localhost.der");
+    let certificate = crate::test_net::localhost_root();
     let server_config = crate::test_net::tls_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let proxy = ureq::Proxy::new(&format!("https://{}", listener.local_addr().unwrap())).unwrap();
@@ -363,7 +366,7 @@ fn https_proxy_uses_its_own_roots_with_tss_destination_trust() {
     });
     let tls = ureq::tls::TlsConfig::builder()
         .root_certs(ureq::tls::RootCerts::new_with_certs(&[
-            ureq::tls::Certificate::from_der(certificate),
+            ureq::tls::Certificate::from_der(certificate.as_ref()).to_owned(),
         ]))
         .unversioned_rustls_crypto_provider(Arc::new(oxitls_rustcrypto_provider::provider()))
         .build();

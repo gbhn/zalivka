@@ -1,13 +1,16 @@
-# Local HTTPS proxy fixture
+# Local HTTPS proxy fixtures
 
 `localhost.der` is a self-signed P-256 certificate for `localhost` and
 `127.0.0.1`, generated with OpenSSL on 2026-10-23 with a 100-year lifetime.
 `localhost-key.der` is its deliberately public PKCS#8 test key.
 Neither file is used by production code or installed into any trust store.
 
-The HTTPS proxy regression uses this certificate only in the proxy's test
-trust configuration. It verifies that CONNECT works while the destination
-retains Apple's separate TSS trust anchor.
+TLS unit tests do not load `localhost.der`: macOS rejects certificates whose
+validity period exceeds its TLS limits ("not standards compliant"), and a
+checked-in certificate short enough for it would expire. `tests/support/net.rs`
+instead mints a loopback CA and leaf, valid for one year from the test run, and
+serves that leaf. `localhost.der` is kept because `localhost-key.der` is the
+deliberately public test key shared with the FDR laboratory below.
 
 `fdr-lab.pem` and `fdr-lab.der` are the same self-signed P-256 server certificate,
 valid for `tbsc.apple.com`, `localhost`, and `127.0.0.1`. They use the existing public

@@ -3,8 +3,9 @@ use rustls::pki_types::UnixTime;
 
 #[test]
 fn native_verifier_rejects_unknown_roots_and_validates_names_with_extra_roots() {
-    let certificate =
-        CertificateDer::from(include_bytes!("../../fixtures/proxy/localhost.der").as_slice());
+    // Generated instead of checked in: macOS rejects certificates whose
+    // validity period exceeds its TLS limits ("not standards compliant").
+    let certificate = crate::test_net::localhost_leaf();
     let host = ServerName::try_from("localhost").unwrap();
     let now = UnixTime::now();
     assert!(
@@ -13,7 +14,7 @@ fn native_verifier_rejects_unknown_roots_and_validates_names_with_extra_roots() 
             .verify_server_cert(&certificate, &[], &host, &[], now)
             .is_err()
     );
-    let trusted = verifier(Some(certificate.clone())).unwrap();
+    let trusted = verifier(Some(crate::test_net::localhost_root())).unwrap();
     trusted
         .verify_server_cert(&certificate, &[], &host, &[], now)
         .unwrap();
@@ -45,10 +46,8 @@ fn native_tls_transport_exchanges_http_data_and_reuses_a_verified_connection() {
             connect_with_config(details, raw.boxed(), self.0.clone()).map(Some)
         }
     }
-    let certificate =
-        CertificateDer::from(include_bytes!("../../fixtures/proxy/localhost.der").as_slice());
     let server_config = crate::test_net::tls_server_config();
-    let client_config = config(Some(certificate)).unwrap();
+    let client_config = config(Some(crate::test_net::localhost_root())).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = thread::spawn(move || {
@@ -154,7 +153,7 @@ fn tss_tls_validates_apple_chain_hostname_signature_and_expiration() {
 fn tss_does_not_inherit_a_trusted_https_proxys_certificate() {
     use std::{net::TcpListener, thread};
 
-    let certificate = include_bytes!("../../fixtures/proxy/localhost.der");
+    let certificate = crate::test_net::localhost_root();
     let server_config = crate::test_net::tls_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -177,7 +176,10 @@ fn tss_does_not_inherit_a_trusted_https_proxys_certificate() {
     let proxy_config = ureq::Agent::config_builder()
         .proxy(None)
         .tls_config(crate::net::tls_config(
-            ureq::tls::RootCerts::new_with_certs(&[ureq::tls::Certificate::from_der(certificate)]),
+            ureq::tls::RootCerts::new_with_certs(&[ureq::tls::Certificate::from_der(
+                certificate.as_ref(),
+            )
+            .to_owned()]),
         ))
         .build();
     let client = crate::net::configured_agent(
