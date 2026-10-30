@@ -25,14 +25,19 @@ fn desktop_proxy_and_pac_use_native_libproxy() {
     if let Ok(case) = std::env::var("ZALIVKA_PROXY_CASE") {
         let routes = for_url(&"https://gs.apple.com/TSS/controller".parse().unwrap()).unwrap();
         if case.ends_with("pac") {
-            assert_eq!(routes.len(), 4);
+            assert_eq!(routes.len(), 3);
             assert_eq!(routes[0].as_ref().unwrap().host(), "one.example");
+            assert_eq!(routes[0].as_ref().unwrap().port(), 3128);
             assert_eq!(routes[1].as_ref().unwrap().host(), "two.example");
+            assert_eq!(routes[1].as_ref().unwrap().port(), 8080);
+            assert_eq!(routes[2].as_ref().unwrap().host(), "socks.example");
+            assert_eq!(routes[2].as_ref().unwrap().port(), 1080);
             assert_eq!(
                 routes[2].as_ref().unwrap().protocol(),
                 ureq::ProxyProtocol::Socks5h
             );
-            assert!(routes[3].is_none());
+            let direct = for_url(&"https://direct.example/".parse().unwrap()).unwrap();
+            assert!(matches!(direct.as_slice(), [None]));
         } else {
             assert_eq!(routes.len(), 1);
             assert_eq!(routes[0].as_ref().unwrap().host(), "proxy.example");
@@ -45,7 +50,16 @@ fn desktop_proxy_and_pac_use_native_libproxy() {
     for case in ["kde-manual", "kde-pac", "gnome-manual", "gnome-pac"] {
         let directory = tempfile::tempdir().unwrap();
         let script = directory.path().join("proxy.pac");
-        std::fs::write(&script, "function FindProxyForURL(url, host) { if (dnsDomainIs(host, '.internal')) return 'DIRECT'; return 'PROXY one.example:3128; PROXY two.example:8080; SOCKS5 socks.example:1080; DIRECT'; }").unwrap();
+        // Ubuntu 24.04's libproxy 0.5.4 drops DIRECT from mixed PAC lists.
+        // Check proxy ordering and DIRECT-only decisions separately.
+        std::fs::write(
+            &script,
+            r"function FindProxyForURL(url, host) {
+                if (host === 'direct.example' || dnsDomainIs(host, '.internal')) return 'DIRECT';
+                return 'PROXY one.example:3128; PROXY two.example:8080; SOCKS5 socks.example:1080';
+            }",
+        )
+        .unwrap();
         let pac = format!("file://{}", script.display());
         if case.starts_with("kde") {
             std::fs::write(directory.path().join("kioslaverc"), format!("[Proxy Settings]\nProxyType={}\nhttpsProxy=http://proxy.example:3128\nNoProxyFor=*.internal\nProxy Config Script={pac}\n", if case.ends_with("pac") {2} else {1})).unwrap();

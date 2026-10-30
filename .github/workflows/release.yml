@@ -26,15 +26,31 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-aarch64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows-x86_64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: windows-aarch64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform: macos-universal
+
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+
       - name: Set version from tag
         if: startsWith(github.ref, 'refs/tags/')
         shell: python
@@ -56,50 +72,121 @@ jobs:
           text, count = re.subn(r'(?m)^version = "[^"]+"$', f'version = "{version}"', manifest.read_text(encoding='utf-8'), count=1)
           if count != 1 or tomllib.loads(text)['package']['version'] != version:
               raise SystemExit('Could not set package version in Cargo.toml')
+
           lock = Path('Cargo.lock')
           pattern = rf'(\[\[package\]\]\nname = "{re.escape(package["name"])}"\nversion = ")[^"]+("\n)'
           lock_text, count = re.subn(pattern, rf'\g<1>{version}\g<2>', lock.read_text(encoding='utf-8'))
           if count != 1:
               raise SystemExit('Could not set package version in Cargo.lock')
+
           manifest.write_text(text, encoding='utf-8')
           lock.write_text(lock_text, encoding='utf-8')
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
               output.write(f'ZALIVKA_RELEASE_VERSION={version}\n')
           print(f'Release version: {version}')
+
       - name: Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libproxy-dev libkrb5-dev libclang-dev gsettings-desktop-schemas libglib2.0-bin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libproxy-dev libkrb5-dev \
+            libclang-dev gsettings-desktop-schemas libglib2.0-bin
+
       - name: Rust tools
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target ${{ matrix.target }}
+
+      - name: Rust macOS Intel target
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin
+
       - name: Format
         run: cargo fmt --all -- --check
+
       - name: Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --target ${{ matrix.target }} --all-targets --all-features -- -D warnings
+
       - name: Tests
-        run: cargo test --locked --all-features
+        run: cargo test --locked --target ${{ matrix.target }} --all-features
+
       - name: Build and package
         shell: pwsh
         env:
           BUILD_TARGET: ${{ matrix.target }}
           BUILD_PLATFORM: ${{ matrix.platform }}
         run: |
-          $executable = & ./scripts/build.ps1 -Target $env:BUILD_TARGET
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $info = Get-Content -LiteralPath ($executable + '.json') -Raw | ConvertFrom-Json
+          if ($IsMacOS) {
+              $armDir = Join-Path $env:RUNNER_TEMP 'zalivka-arm64'
+              $intelDir = Join-Path $env:RUNNER_TEMP 'zalivka-x86_64'
+
+              $arm = & ./scripts/build.ps1 -Target aarch64-apple-darwin -OutputDirectory $armDir
+              if (-not $arm) { throw 'ARM64 macOS build produced no executable.' }
+
+              $intel = & ./scripts/build.ps1 -Target x86_64-apple-darwin -OutputDirectory $intelDir
+              if (-not $intel) { throw 'x86_64 macOS build produced no executable.' }
+
+              $armInfo = Get-Content -LiteralPath ($arm + '.json') -Raw | ConvertFrom-Json
+              $intelInfo = Get-Content -LiteralPath ($intel + '.json') -Raw | ConvertFrom-Json
+              if (-not $armInfo.version -or $armInfo.version -ne $intelInfo.version) {
+                  throw 'macOS architecture versions do not match.'
+              }
+
+              New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+              $executable = Join-Path 'artifacts' ('zalivka-' + $armInfo.version)
+
+              & lipo -create -output $executable $arm $intel
+              if ($LASTEXITCODE -ne 0) { throw 'lipo failed.' }
+
+              & lipo -verify_arch arm64 x86_64 $executable
+              if ($LASTEXITCODE -ne 0) { throw 'Universal binary is missing an architecture.' }
+
+              & chmod +x $executable
+              if ($LASTEXITCODE -ne 0) { throw 'Could not set executable permissions.' }
+
+              # Ad-hoc signing requires no certificate, Apple ID, or secrets.
+              & codesign --force --sign - $executable
+              if ($LASTEXITCODE -ne 0) { throw 'Ad-hoc signing failed.' }
+
+              & codesign --verify $executable
+              if ($LASTEXITCODE -ne 0) { throw 'Signature verification failed.' }
+
+              & lipo -info $executable
+              if ($LASTEXITCODE -ne 0) { throw 'Could not inspect universal binary.' }
+
+              $info = $armInfo
+              $info.target = 'universal-apple-darwin'
+              $info.executable = [IO.Path]::GetFileName($executable)
+              $info.sha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+              $info | Add-Member -NotePropertyName architectures -NotePropertyValue @('aarch64-apple-darwin', 'x86_64-apple-darwin') -Force
+              $info | ConvertTo-Json -Depth 5 |
+                  Set-Content -LiteralPath ($executable + '.json') -Encoding utf8NoBOM
+
+              Copy-Item -LiteralPath (Join-Path $armDir 'locales') -Destination artifacts -Recurse -Force
+          } else {
+              $executable = & ./scripts/build.ps1 -Target $env:BUILD_TARGET
+              if (-not $executable) { throw 'Build produced no executable.' }
+              $info = Get-Content -LiteralPath ($executable + '.json') -Raw | ConvertFrom-Json
+          }
+
           Copy-Item README.md, LICENSE -Destination artifacts
-          New-Item -ItemType Directory -Path dist | Out-Null
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
           $name = 'zalivka-' + $info.version + '-' + $env:BUILD_PLATFORM
+
           if ($IsWindows) {
               $archive = $name + '.zip'
               Compress-Archive -Path artifacts/* -DestinationPath (Join-Path dist $archive)
           } else {
-              Copy-Item packaging/70-zalivka.rules -Destination artifacts
+              if ($IsLinux) {
+                  Copy-Item packaging/70-zalivka.rules -Destination artifacts
+              }
               $archive = $name + '.tar.gz'
-              tar -czf (Join-Path dist $archive) -C artifacts .
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              & tar -czf (Join-Path dist $archive) -C artifacts .
+              if ($LASTEXITCODE -ne 0) { throw 'tar failed.' }
           }
+
           $hash = (Get-FileHash -LiteralPath (Join-Path dist $archive) -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content -LiteralPath (Join-Path dist ($archive + '.sha256')) -Encoding utf8NoBOM
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zalivka-${{ matrix.platform }}
@@ -120,6 +207,7 @@ jobs:
           pattern: zalivka-*
           path: dist
           merge-multiple: true
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
